@@ -18,6 +18,14 @@ import {
 import { ApiError } from '../lib/errors.ts';
 
 export const MAX_UPLOAD_URLS = 50;
+/**
+ * S3's hard ceiling on parts in one multipart upload. Shared by BOTH multipart
+ * routes on purpose: this lived as a private constant in the V2 handler, the V1
+ * handler was written without it, and the gap was a presign-fan-out DoS — one
+ * authenticated GET could mint arbitrarily many signed URLs. Keep it here so
+ * the two routes cannot drift apart again.
+ */
+export const MAX_MULTIPART_PART_COUNT = 10_000;
 
 export interface FileAttributes {
   objectKey?: string;

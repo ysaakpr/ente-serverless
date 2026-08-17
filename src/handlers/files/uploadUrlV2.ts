@@ -19,12 +19,11 @@ import type { Context } from 'hono';
 import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { assertQuota } from '../../domain/files.ts';
+import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
 const MIN_PART_SIZE = 5 * 1024 * 1024;
 const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
-const MAX_PART_COUNT = 10_000;
 
 export const uploadEligibility = (deps: Deps) => async (c: Context) => {
   await assertQuota(deps, auth(c).userId, null);
@@ -67,7 +66,7 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
     throw errBadRequestSentinel();
   }
   const partCount = Math.ceil(body.contentLength / body.partLength);
-  if (partCount > MAX_PART_COUNT) throw errBadRequestSentinel();
+  if (partCount > MAX_MULTIPART_PART_COUNT) throw errBadRequestSentinel();
   if (body.partMd5s && body.partMd5s.length !== partCount) throw errBadRequestSentinel();
   await assertQuota(deps, userId, null);
 

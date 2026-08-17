@@ -14,6 +14,7 @@ import { makeIntWorld, LOCALSTACK, type IntWorld } from '../helpers/intWorld.ts'
 import { makeClientKeys, openEncryptedToken, type ClientKeys } from '../helpers/client.ts';
 import { computeVerifier, SrpClient } from '../../src/domain/srp.ts';
 import { b64, fromB64 } from '../../src/lib/b64.ts';
+import { ConditionFailedError } from '../../src/ports/db.ts';
 
 let world: IntWorld;
 
@@ -88,6 +89,117 @@ describe('M1 gate on LocalStack', () => {
     const newToken = openEncryptedToken(body.encryptedToken, keys);
     const probe = await world.request('GET', '/users/session-validity/v2', { token: newToken });
     expect(probe.status).toBe(200);
+  });
+
+  /**
+   * D38 end to end on the REAL adapters. Scope, precisely: the refusal here comes
+   * from `assertSrpUserIdClaimable`'s READ, which throws before the transaction
+   * runs — so this proves the guard and the victim's survival against real
+   * DynamoDB, but NOT the conditional write. That write only fires on the race
+   * (a claim landing between our read and our write); its DynamoDB behaviour is
+   * asserted separately, just below.
+   */
+  it('a taken srpUserID is refused on the real adapter, victim login intact', async () => {
+    const victimEmail = uniqueEmail();
+    const victimKeys = makeClientKeys();
+    const victim = await fullSignup(victimEmail, victimKeys);
+
+    // Attacker with key attributes but NO SRP — the state that reaches the guard
+    // (a configured account is stopped earlier by the first-time-only 400).
+    const attackerEmail = uniqueEmail();
+    const attackerKeys = makeClientKeys();
+    const ott = await world.request('POST', '/users/ott', {
+      body: { email: attackerEmail, purpose: 'signup' },
+    });
+    expect(ott.status).toBe(200);
+    const verify = await world.request('POST', '/users/verify-email', {
+      body: { email: attackerEmail, ott: '123456' },
+    });
+    const { token: attackerToken } = (await verify.json()) as { token: string };
+    expect(
+      (
+        await world.request('PUT', '/users/attributes', {
+          token: attackerToken,
+          body: { keyAttributes: attackerKeys.keyAttributes },
+        })
+      ).status,
+    ).toBe(200);
+
+    // Claim the victim's srpUserID against a verifier of the attacker's choosing.
+    const salt = randomBytes(16);
+    const identity = new TextEncoder().encode(victim.srpUserID);
+    const verifier = computeVerifier(salt, identity, attackerKeys.loginSubKey);
+    const client = new SrpClient(salt, identity, attackerKeys.loginSubKey, randomBytes(32));
+    const setup = await world.request('POST', '/users/srp/setup', {
+      token: attackerToken,
+      body: {
+        srpUserID: victim.srpUserID,
+        srpSalt: b64(salt),
+        srpVerifier: b64(verifier),
+        srpA: b64(client.computeA()),
+      },
+    });
+    expect(setup.status).toBe(200); // museum parity: setup never refuses
+    const { setupID, srpB } = (await setup.json()) as { setupID: string; srpB: string };
+    client.setB(fromB64(srpB));
+
+    const complete = await world.request('POST', '/users/srp/complete', {
+      token: attackerToken,
+      body: { setupID, srpM1: b64(client.computeM1()) },
+    });
+    expect(complete.status).toBe(500); // museum's UNIQUE-violation shape (D38)
+
+    // The guard still resolves to the victim, and the victim still logs in.
+    const guard = await world.deps.db.get(`SRPUSER#${victim.srpUserID}`, 'META');
+    expect(guard!.userId).toBe(victim.id);
+
+    const loginClient = new SrpClient(
+      victim.salt,
+      identity,
+      victimKeys.loginSubKey,
+      randomBytes(32),
+    );
+    const create = await world.request('POST', '/users/srp/create-session', {
+      body: { srpUserID: victim.srpUserID, srpA: b64(loginClient.computeA()) },
+    });
+    expect(create.status).toBe(200);
+    const created = (await create.json()) as { sessionID: string; srpB: string };
+    loginClient.setB(fromB64(created.srpB));
+    const login = await world.request('POST', '/users/srp/verify-session', {
+      body: {
+        sessionID: created.sessionID,
+        srpUserID: victim.srpUserID,
+        srpM1: b64(loginClient.computeM1()),
+      },
+    });
+    expect(login.status).toBe(200);
+  });
+
+  /**
+   * The race half of D38's guard: `commitSrpAuth` writes the guard under
+   * `ifNotExists` so a claim landing after its read still loses. That relies on
+   * DynamoDB honouring `attribute_not_exists(pk)` inside TransactWriteItems AND
+   * on db.dynamo.ts mapping the resulting TransactionCanceledException to
+   * ConditionFailedError — neither observable against MemoryDb. Asserted at the
+   * port so it cannot silently rot.
+   */
+  it('DynamoDB refuses a conditional transactWrite onto an existing key', async () => {
+    const pk = `SRPUSER#int-${randomUUID()}`;
+    const guard = { pk, sk: 'META', userId: 1 };
+
+    // First claim wins.
+    await world.deps.db.transactWrite([{ kind: 'put', ifNotExists: true, item: guard }]);
+    expect((await world.deps.db.get(pk, 'META'))!.userId).toBe(1);
+
+    // A second, racing claim must be refused — and must not overwrite.
+    await expect(
+      world.deps.db.transactWrite([
+        { kind: 'put', ifNotExists: true, item: { pk, sk: 'META', userId: 2 } },
+      ]),
+    ).rejects.toBeInstanceOf(ConditionFailedError);
+    expect((await world.deps.db.get(pk, 'META'))!.userId).toBe(1);
+
+    await world.deps.db.delete(pk, 'META');
   });
 });
 

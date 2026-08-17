@@ -64,3 +64,14 @@ export const fileNotFoundInAlbum = () =>
 export const favoritesAlreadyExists = () =>
   new SentinelError(500, 'favorites collection already exists'); // museum: plain error -> 500
 export const conflictError = (message: string) => new ApiError('CONFLICT', 409, message);
+/**
+ * srpUserID is claimed by another account. Museum leans on a UNIQUE constraint
+ * on srp_users.srp_user_id and does not handle the violation, so the driver
+ * error surfaces as a bare 500 — CAPTURED 2026-08-17, both on /users/srp/complete
+ * and /users/srp/update (D38). Reproduced rather than "improved" to 409, same
+ * call as `favoritesAlreadyExists` above: a legitimate client never sees it
+ * (srpUserID is a fresh uuid4), so parity costs nothing and buys exactness.
+ */
+export const srpUserIdTaken = () => new SentinelError(500, 'srpUserID already registered');
+/** Museum: /users/srp/complete is first-time-only; a configured account gets this. */
+export const srpSetupAlreadyComplete = () => badRequest('SRP setup already complete');

@@ -22,6 +22,11 @@ export const setupSrp = (deps: Deps) => async (c: Context) => {
   const body = bodySchema.parse(await c.req.json());
   const { userId } = auth(c);
 
+  // NO srpUserID collision check here, deliberately: museum answers 200 to a
+  // setup naming somebody else's srpUserID and only refuses at complete/update
+  // (captured 2026-08-17, D38). Rejecting early would be a gratuitous divergence
+  // — nothing is committed yet, and an attacker can already mint sessions
+  // through the public /users/srp/create-session. commitSrpAuth is the gate.
   const { sessionID, srpB } = await createAndInsertSrpSession(
     deps,
     body.srpUserID,

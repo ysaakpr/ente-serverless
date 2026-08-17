@@ -349,6 +349,99 @@ source says Y — source won).
     omits it when not, plus that both V2 handlers forward the client MD5s to the
     port. Mutation-checked (dropping `ContentMD5` fails the suite).
 
+- **D38 [SECURITY 2026-08-17] The `SRPUSER#<srpUserID>` guard is now write-once
+  per owner, and `/users/srp/complete` is bound to its caller.** Found by audit,
+  reproduced end-to-end before fixing.
+  - The hole: `commitSrpAuth` wrote the guard with an unconditional put, and
+    `srpUserID` is *public* — `GET /users/srp/attributes?email=` hands it to an
+    unauthenticated caller. So any account could take a victim's srpUserID,
+    register it against a verifier of its own, and repoint the guard. Login
+    resolves `SRPUSER#<id>` → userId and trusts it, so `create-session` then
+    answered with the attacker's `srpB` and the victim's M1 could never match:
+    **permanent lockout of any user whose email address is known.** Not takeover
+    — `verify-session` re-reads the user from the guard, so the attacker only
+    ever minted their own token — the damage was availability, not confidentiality.
+  - Compounding it, `completeSrpSetup` never called `auth(c)` at all: the route
+    sat behind `authed` but acted purely on `setupID`, so any token could
+    complete anyone's pending setup. Its sibling `updateSrp` had the ownership
+    check already; this is the same line.
+  - Fix: `assertSrpUserIdClaimable` refuses an id held by another account, and the
+    guard put carries `ifNotExists` **only when no guard was read**, which closes
+    the read-then-write race without breaking the legitimate case — a password
+    change that keeps the same srpUserID must re-put a row that already exists,
+    and the oracle confirms museum answers 200 to exactly that.
+  - **ORACLE-CAPTURED 2026-08-17** against the pinned image (capture 5 in
+    ORACLE-VERSION), after an initial guess of 409 turned out to be wrong. Museum
+    is NOT exposed to this: its UNIQUE constraint on `srp_users.srp_user_id`
+    refuses the write and the victim's login survives every path. The full
+    captured contract, all of which we now reproduce:
+
+    | case | museum |
+    |---|---|
+    | `srp/setup`, any srpUserID (even foreign, even if caller configured) | 200 |
+    | `srp/complete`, caller already has SRP | 400 `{"code":"BAD_REQUEST","message":"SRP setup already complete"}` |
+    | `srp/complete`, foreign srpUserID, caller has no SRP | 500 `{}` |
+    | `srp/update`, foreign srpUserID | 500 `{}` |
+    | `srp/update`, own srpUserID kept, new verifier | 200 — password changes, id unchanged |
+    | `srp/update`, fresh srpUserID | 200 — rotates |
+    | re-completing a spent setupID | 410 `SESSION_ALREADY_VERIFIED` |
+
+  - Three consequences for our code, all now applied:
+    1. The collision is reproduced as museum's bare **500**, not the 409 first
+       written — same call as `favoritesAlreadyExists`. No legitimate client sees
+       it (srpUserID is a fresh uuid4), so parity costs nothing.
+    2. The early collision check in `setupSrp` was **removed**: museum answers 200
+       there and refuses only at commit, so rejecting early was a gratuitous
+       divergence. `commitSrpAuth` is the authoritative gate.
+    3. `/users/srp/complete` is now **first-time-only** (400 "SRP setup already
+       complete"), which we did not implement at all before. This is museum's own
+       primary defence for the common case and it independently blocks the hijack
+       for any already-configured account.
+  - **One deliberate divergence, kept.** Museum answers **200** to a `complete`
+    carrying another account's setupID and commits the material to whoever CALLS:
+    captured as `stolen=200 ownerSrpAfter=404 thiefSrpAfter=200 thiefGotTheId=true`
+    — the thief takes the srpUserID and the owner is left with no SRP at all. That
+    is a cross-account integrity bug; we answer **403** and commit nothing.
+    `updateSrp` already had this check before the audit.
+  - *Guarded* by `describe('SRP identity guard')` in
+    `test/unit/srp-endpoints.test.ts` — the hijack via the public attributes route,
+    the first-time-only 400, the collision reached past that gate by a no-SRP
+    caller, the same write with the setup row forged directly (so only the
+    transaction condition stands), the 403 divergence, and the same-id password
+    change that must keep working.
+
+- **D39 [SECURITY 2026-08-17] `GET /files/multipart-upload-urls` bounds its
+  part count; the cap now lives in `domain/files.ts` where both multipart routes
+  share it.** Found by the same audit as D38.
+  - The hole: V1 read `count` straight off the query string and passed it to
+    `createMultipart`. `?count=20000` returned 20,000 presigned URLs — a SigV4
+    signing operation and ~200 bytes of response each — so one authenticated GET
+    could burn the API lambda's 30s timeout and 512MB. Verified before the fix.
+  - Root cause worth naming: the ceiling existed as a *private* `MAX_PART_COUNT`
+    in the V2 handler, and V1 was written without it. Hoisted to
+    `MAX_MULTIPART_PART_COUNT` in `domain/files.ts` and imported by both, so the
+    siblings cannot drift again. (`MAX_UPLOAD_URLS` already lived there.)
+  - **Rejects rather than clamps**, unlike `/files/upload-urls`. Those URLs are
+    independent, so returning fewer is harmless; these are parts of ONE object,
+    and a client silently handed fewer would upload an incomplete object and only
+    find out at CompleteMultipartUpload. Past 10k is unsatisfiable at S3 anyway.
+    Matches the V2 multipart route's existing 400.
+  - `count >= 1` is also enforced: `count=0` (and a missing param, which defaults
+    to `0`) previously reached S3 and opened a real multipart upload holding zero
+    parts, billing until the 7-day abort rule swept it.
+  - **ORACLE-CAPTURED 2026-08-17 — exact match, no divergence.** Museum answers
+    `count` 1..10000 with that many partURLs, and **400 `{}`** for 10001, 20000,
+    0, -5, `abc`, and an omitted param; `GET /files/upload-urls?count=80` returns
+    200 with 50. So museum draws the reject-vs-clamp line in exactly the same
+    place, for the same reason, and our responses are byte-identical:
+    `4:200/4 10000:200/10000 10001:400 20000:400 0:400 -5:400 abc:400 omitted:400
+    single80:200/50` from both servers.
+  - *Guarded* by `describe('GET /files/multipart-upload-urls part-count bounds')`
+    in `test/unit/upload.test.ts` — boundary (10000 ok / 10001 rejected), absurd
+    counts, and the non-positive cases asserting `blobs.partMd5s` stays empty so
+    the port was never reached. Mutation-checked: deleting the bounds line fails
+    all three guard tests.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

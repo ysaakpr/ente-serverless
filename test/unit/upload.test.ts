@@ -1,6 +1,6 @@
 /**
- * [UPLOAD] — upload-urls (4), multipart (2; abort-lifecycle is an infra
- * test), POST /files commit (9), PUT /files/update + thumbnail (3).
+ * [UPLOAD] — upload-urls (4), multipart part-count bounds (4; abort-lifecycle
+ * is an infra test), POST /files commit (9), PUT /files/update + thumbnail (3).
  * Includes the M3 gate: encrypt -> upload (single + multipart) -> commit ->
  * download -> decrypt -> byte-identical.
  */
@@ -48,6 +48,49 @@ describe('GET /files/upload-urls', () => {
 
   it('requires auth', async () => {
     expect((await world.request('GET', '/files/upload-urls?count=1')).status).toBe(401);
+  });
+});
+
+/**
+ * The cap is the point: an uncapped `count` let one authenticated GET mint
+ * arbitrarily many presigned URLs (a signing operation each) — a cheap way to
+ * burn the lambda's 30s timeout and 512MB.
+ */
+describe('GET /files/multipart-upload-urls part-count bounds', () => {
+  const mpu = (count: string) =>
+    world.request(`GET`, `/files/multipart-upload-urls?count=${count}`, { token: account.token });
+
+  it('mints exactly the requested parts under the cap', async () => {
+    const res = await mpu('4');
+    expect(res.status).toBe(200);
+    const { urls } = (await res.json()) as {
+      urls: { objectKey: string; partURLs: string[]; completeURL: string };
+    };
+    expect(urls.partURLs).toHaveLength(4);
+    expect(urls.objectKey.startsWith(`${account.userId}/`)).toBe(true);
+  });
+
+  it('10000 parts is allowed, 10001 is 400', async () => {
+    expect((await mpu('10000')).status).toBe(200);
+    expect((await mpu('10001')).status).toBe(400);
+  });
+
+  it('rejects an absurd count instead of fanning out', async () => {
+    expect((await mpu('20000')).status).toBe(400);
+    expect((await mpu('100000000')).status).toBe(400);
+  });
+
+  /** count=0 used to open a real S3 multipart upload holding zero parts. */
+  it('rejects a non-positive or missing count without touching S3', async () => {
+    expect((await mpu('0')).status).toBe(400);
+    expect((await mpu('-5')).status).toBe(400);
+    expect((await mpu('abc')).status).toBe(400);
+    expect(
+      (await world.request('GET', '/files/multipart-upload-urls', { token: account.token })).status,
+    ).toBe(400);
+    // MemoryBlobs records every createMultipart call here, so a still-empty map
+    // proves the handler rejected before reaching the port.
+    expect(world.deps.blobs.partMd5s.size).toBe(0);
   });
 });
 

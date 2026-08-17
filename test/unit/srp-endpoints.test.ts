@@ -1,14 +1,16 @@
 /**
  * [AUTH-SRP] endpoint scenarios: attributes (4), setup (4), complete (4),
- * create-session (5), verify-session (5 of 6 — oracle vector parity pending
- * capture, DECISIONS.md D2), update (3).
+ * identity guard (6 — oracle-captured, D38), create-session (5),
+ * verify-session (5 of 6 — oracle vector parity pending capture,
+ * DECISIONS.md D2), update (3).
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { makeClientKeys, setupSrp, signupAccount, srpLogin } from '../helpers/client.ts';
-import { SrpClient } from '../../src/domain/srp.ts';
+import { computeVerifier, SrpClient } from '../../src/domain/srp.ts';
+import { createAndInsertSrpSession } from '../../src/domain/srpSessions.ts';
 import { b64, fromB64 } from '../../src/lib/b64.ts';
 import { MICROS_PER_HOUR } from '../../src/lib/time.ts';
 
@@ -153,6 +155,269 @@ describe('POST /users/srp/setup + complete', () => {
       body: { setupID: randomUUID(), srpM1: b64(randomBytes(32)) },
     });
     expect(unknown.status).toBe(404);
+  });
+});
+
+/**
+ * srpUserID is disclosed publicly by GET /users/srp/attributes?email=, and the
+ * SRPUSER#<id> guard is what login resolves through. These pin the two holes
+ * that together let one account permanently break another's password login.
+ *
+ * Every status here is CAPTURED from the pinned museum oracle 2026-08-17
+ * (D38) — museum refuses the same writes via a UNIQUE constraint, surfacing as
+ * a bare 500. The one deliberate divergence is the 403 on a foreign setupID,
+ * marked below.
+ */
+describe('SRP identity guard', () => {
+  let world: TestWorld;
+  beforeEach(async () => {
+    world = await makeWorld();
+  });
+
+  /** Register srpUserID against a verifier of our choosing, as `token`. */
+  const claimSrpUserID = async (
+    token: string,
+    srpUserID: string,
+    keys: ReturnType<typeof makeClientKeys>,
+  ): Promise<{ setup: Response; complete?: Response }> => {
+    const salt = new Uint8Array(randomBytes(16));
+    const identity = new TextEncoder().encode(srpUserID);
+    const verifier = computeVerifier(salt, identity, keys.loginSubKey);
+    const client = new SrpClient(salt, identity, keys.loginSubKey, randomBytes(32));
+
+    const setup = await world.request('POST', '/users/srp/setup', {
+      token,
+      body: {
+        srpUserID,
+        srpSalt: b64(salt),
+        srpVerifier: b64(verifier),
+        srpA: b64(client.computeA()),
+      },
+    });
+    if (setup.status !== 200) return { setup };
+    const body = (await setup.clone().json()) as { setupID: string; srpB: string };
+    client.setB(fromB64(body.srpB));
+    const complete = await world.request('POST', '/users/srp/complete', {
+      token,
+      body: { setupID: body.setupID, srpM1: b64(client.computeM1()) },
+    });
+    return { setup, complete };
+  };
+
+  /**
+   * Oracle: setup answers 200 even for a foreign srpUserID, and an
+   * already-configured caller is stopped at complete by the first-time-only
+   * check (400 BAD_REQUEST) before uniqueness is ever consulted.
+   */
+  it('another account cannot claim a victim srpUserID, and login survives', async () => {
+    const victim = await signupAccount(world, 'victim@b.c');
+    const attacker = await signupAccount(world, 'attacker@b.c');
+
+    // The id is public.
+    const pub = await world.request('GET', '/users/srp/attributes?email=victim@b.c');
+    const { attributes } = (await pub.json()) as { attributes: { srpUserID: string } };
+    expect(attributes.srpUserID).toBe(victim.srpUserID);
+
+    const { setup, complete } = await claimSrpUserID(
+      attacker.token,
+      victim.srpUserID,
+      makeClientKeys(),
+    );
+    expect(setup.status).toBe(200); // museum: setup never refuses
+    expect(complete!.status).toBe(400);
+    expect(await complete!.json()).toEqual({
+      code: 'BAD_REQUEST',
+      message: 'SRP setup already complete',
+    });
+
+    // Guard untouched, victim still logs in with their own password.
+    const guard = await world.deps.db.get(`SRPUSER#${victim.srpUserID}`, 'META');
+    expect(guard!.userId).toBe(victim.userId);
+    await expect(srpLogin(world, 'victim@b.c', victim.keys)).resolves.toBeTruthy();
+  });
+
+  /** Museum: /users/srp/complete is first-time-only. */
+  it('complete is refused once the account has SRP (museum 400)', async () => {
+    const account = await signupAccount(world, 'once@b.c');
+    const { setup, complete } = await claimSrpUserID(
+      account.token,
+      randomUUID(), // fresh id, so only the already-complete check can fire
+      account.keys,
+    );
+    expect(setup.status).toBe(200);
+    expect(complete!.status).toBe(400);
+    expect(await complete!.json()).toEqual({
+      code: 'BAD_REQUEST',
+      message: 'SRP setup already complete',
+    });
+  });
+
+  /**
+   * An account with key attributes but NO SRP — the only state in which
+   * /users/srp/complete is reachable, so the state the guard must hold in.
+   * Mirrors how the oracle probes had to be set up.
+   */
+  const signupNoSrp = async (email: string) => {
+    await world.request('POST', '/users/ott', { body: { email, purpose: 'signup' } });
+    const { lastOttCode } = await import('../helpers/client.ts');
+    const verify = await world.request('POST', '/users/verify-email', {
+      body: { email, ott: lastOttCode(world, email) },
+    });
+    const { id, token } = (await verify.json()) as { id: number; token: string };
+    const keys = makeClientKeys();
+    await world.request('PUT', '/users/attributes', {
+      token,
+      body: { keyAttributes: keys.keyAttributes },
+    });
+    return { userId: id, token, keys };
+  };
+
+  it('a fresh account cannot claim a taken srpUserID (past the first-time gate)', async () => {
+    const victim = await signupAccount(world, 'victim2@b.c');
+    const attacker = await signupNoSrp('attacker2@b.c'); // no SRP -> reaches the guard
+
+    const { setup, complete } = await claimSrpUserID(
+      attacker.token,
+      victim.srpUserID,
+      attacker.keys,
+    );
+    expect(setup.status).toBe(200);
+    // Museum's UNIQUE constraint surfaces as a bare 500 here (captured).
+    expect(complete!.status).toBe(500);
+    expect(await complete!.json()).toEqual({});
+
+    const guard = await world.deps.db.get(`SRPUSER#${victim.srpUserID}`, 'META');
+    expect(guard!.userId).toBe(victim.userId);
+    await expect(srpLogin(world, 'victim2@b.c', victim.keys)).resolves.toBeTruthy();
+  });
+
+  it('the write is refused even when the setup row is forged', async () => {
+    const victim = await signupAccount(world, 'victim3@b.c');
+    const attacker = await signupNoSrp('attacker3@b.c');
+
+    // Forge the setup row directly, so only commitSrpAuth's condition stands.
+    const setupID = randomUUID();
+    const salt = new Uint8Array(randomBytes(16));
+    const identity = new TextEncoder().encode(victim.srpUserID);
+    const verifier = computeVerifier(salt, identity, attacker.keys.loginSubKey);
+    const client = new SrpClient(salt, identity, attacker.keys.loginSubKey, randomBytes(32));
+    const session = await createAndInsertSrpSession(
+      world.deps,
+      victim.srpUserID,
+      b64(verifier),
+      b64(client.computeA()),
+    );
+    await world.deps.db.put({
+      pk: `SRPSETUP#${setupID}`,
+      sk: 'META',
+      userId: attacker.userId,
+      sessionID: session.sessionID,
+      srpUserID: victim.srpUserID,
+      salt: b64(salt),
+      verifier: b64(verifier),
+      createdAt: world.deps.clock.nowMicros(),
+    });
+    client.setB(fromB64(session.srpB));
+
+    const complete = await world.request('POST', '/users/srp/complete', {
+      token: attacker.token,
+      body: { setupID, srpM1: b64(client.computeM1()) },
+    });
+    expect(complete.status).toBe(500);
+
+    const guard = await world.deps.db.get(`SRPUSER#${victim.srpUserID}`, 'META');
+    expect(guard!.userId).toBe(victim.userId);
+    await expect(srpLogin(world, 'victim3@b.c', victim.keys)).resolves.toBeTruthy();
+  });
+
+  /**
+   * DELIBERATE DIVERGENCE (D38). Museum answers 200 and commits the material to
+   * the CALLER — captured: the thief took the srpUserID and the owner was left
+   * with no SRP at all. We refuse instead.
+   */
+  it('complete refuses a setupID belonging to another account', async () => {
+    const owner = await signupNoSrp('owner@b.c');
+    const thief = await signupNoSrp('thief@b.c');
+
+    const srpUserID = randomUUID();
+    const salt = new Uint8Array(randomBytes(16));
+    const identity = new TextEncoder().encode(srpUserID);
+    const verifier = computeVerifier(salt, identity, owner.keys.loginSubKey);
+    const client = new SrpClient(salt, identity, owner.keys.loginSubKey, randomBytes(32));
+
+    const setup = await world.request('POST', '/users/srp/setup', {
+      token: owner.token,
+      body: {
+        srpUserID,
+        srpSalt: b64(salt),
+        srpVerifier: b64(verifier),
+        srpA: b64(client.computeA()),
+      },
+    });
+    const body = (await setup.json()) as { setupID: string; srpB: string };
+    client.setB(fromB64(body.srpB));
+
+    const stolen = await world.request('POST', '/users/srp/complete', {
+      token: thief.token,
+      body: { setupID: body.setupID, srpM1: b64(client.computeM1()) },
+    });
+    expect(stolen.status).toBe(403);
+
+    // The thief gained nothing; the owner can still complete their own setup.
+    expect(await world.deps.db.get(`SRPUSER#${srpUserID}`, 'META')).toBeNull();
+    const own = await world.request('POST', '/users/srp/complete', {
+      token: owner.token,
+      body: { setupID: body.setupID, srpM1: b64(client.computeM1()) },
+    });
+    expect(own.status).toBe(200);
+  });
+
+  /**
+   * The legitimate case the conditional guard write must not break: museum
+   * answers 200 to a password change that KEEPS the same srpUserID (captured),
+   * so a blanket ifNotExists on the guard would be wrong.
+   */
+  it('password change keeping the same srpUserID works (update path)', async () => {
+    const account = await signupAccount(world, 'keepid@b.c');
+    const newKeys = makeClientKeys(); // stands in for a new password's subkey
+
+    const salt = new Uint8Array(randomBytes(16));
+    const identity = new TextEncoder().encode(account.srpUserID);
+    const verifier = computeVerifier(salt, identity, newKeys.loginSubKey);
+    const client = new SrpClient(salt, identity, newKeys.loginSubKey, randomBytes(32));
+
+    const setup = await world.request('POST', '/users/srp/setup', {
+      token: account.token,
+      body: {
+        srpUserID: account.srpUserID, // SAME id
+        srpSalt: b64(salt),
+        srpVerifier: b64(verifier),
+        srpA: b64(client.computeA()),
+      },
+    });
+    expect(setup.status).toBe(200);
+    const body = (await setup.json()) as { setupID: string; srpB: string };
+    client.setB(fromB64(body.srpB));
+
+    const update = await world.request('POST', '/users/srp/update', {
+      token: account.token,
+      body: {
+        setupID: body.setupID,
+        srpM1: b64(client.computeM1()),
+        logOutOtherDevices: false,
+      },
+    });
+    expect(update.status).toBe(200);
+
+    // Guard still ours and the id unchanged; new password logs in, old does not.
+    const guard = await world.deps.db.get(`SRPUSER#${account.srpUserID}`, 'META');
+    expect(guard!.userId).toBe(account.userId);
+    const { token } = await srpLogin(world, 'keepid@b.c', {
+      ...account.keys,
+      loginSubKey: newKeys.loginSubKey,
+    });
+    expect(token).toBeTruthy();
+    await expect(srpLogin(world, 'keepid@b.c', account.keys)).rejects.toThrow();
   });
 });
 

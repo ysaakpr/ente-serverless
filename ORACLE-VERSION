@@ -20,5 +20,21 @@ Captures:     full capture-diff parity still pending (DECISIONS.md D2). Two targ
                  recover/remove/disable, including decoding museum's QR PNG to read
                  the otpauth URI parameters (test/unit/two-factor.test.ts +
                  test/unit/totp.test.ts, D36).
+              5. SRP identity-guard + multipart part-count semantics, taken as a
+                 DIFFERENTIAL run (same scenario list driven against museum and
+                 against our server booted on :8581 with the hardcoded-OTT config,
+                 statuses and bodies diffed): srpUserID collision on complete and
+                 update, the first-time-only "SRP setup already complete" 400, the
+                 same-id password change, cross-account setupID completion, and the
+                 multipart/upload-urls count tables. 8 of 9 cases match exactly;
+                 the 1 divergence (foreign setupID -> we 403, museum 200) is
+                 deliberate and written up in D38/D39.
+                 NOTE for future capture runs: museum rate-limits POST /users/ott
+                 per IP and trips after ~10 accounts ({"error":"Rate limit
+                 breached, try later"}), which silently truncates a long scenario
+                 list. The limiter is in-memory — `docker restart
+                 ente-oracle-museum` resets it while Postgres keeps the accounts.
+                 Also: /users/srp/update REQUIRES updatedKeyAttr; omitting it is a
+                 500 with an EMPTY body, which is easy to misread as a real finding.
               Captures 1-2 predate the D31 compose fix and needed the OTT scraped
               from museum's stderr; captures 3-4 ran against the fixed compose.
