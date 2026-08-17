@@ -5,11 +5,14 @@ Derived from `src/infra` as of 2026-08-17; **no cloud deploy has happened yet**,
 so nothing below has been observed running — it is what `tofu apply` will
 attempt.
 
-Assumes the defaults: `region = us-east-1`, `env_name = "dev"`, so
-`prefix = ente-sl-dev`. `<account>` is the 12-digit account ID, filled in at
-plan time from `aws_caller_identity`.
+Names below are written as `ente-sl-dev-*` for continuity, but `region` and
+`env_name` now carry **no defaults** — both are required in `ente-sl.tfvars`, so
+a missing value fails the plan instead of quietly standing up a second `dev`
+deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
+`-prod-`. `<account>` is the 12-digit account ID, filled in at plan time from
+`aws_caller_identity`.
 
-## 1. The inventory — 16 managed resources
+## 1. The inventory — 22 managed resources
 
 ### Stateful (`modules/data`) — carries `prevent_destroy`
 
@@ -17,30 +20,40 @@ plan time from `aws_caller_identity`.
 |---|---|---|---|
 | 1 | `aws_dynamodb_table` | `ente-sl-dev` | PAY_PER_REQUEST, `pk`/`sk`, **3 GSIs** (`gsi1` collection diff + purge due-index, `gsi2` collection feed, `gsi3` tokens/trash/entity/file-data), all `projection_type = ALL`. TTL on `ttl` (OTT expiry). PITR on. SSE on (AWS-owned key). `deletion_protection_enabled = true`. |
 | 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload. Account-ID suffix for global uniqueness. |
-| 3 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
-| 4 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
-| 5 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Two rules: `originals-to-glacier-ir` (day 0, filtered on object tag `tier=original` — D7) and `abort-incomplete-multipart` (7 days). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
+| 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**, `prevent_destroy`. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
+| 4 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
+| 5 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
+| 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (day 0, filtered on object tag `tier=original` — D7), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
 
 ### Stateless (`modules/compute`)
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 6 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
-| 7 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*`. |
-| 8 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
-| 9 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
-| 10 | `aws_lambda_function` | `ente-sl-dev-trash-purge` | nodejs22.x, arm64, 256 MB, 300 s. Drains the 30-day trash **and** the deferred object-sweep queue (D6). |
-| 11 | `aws_cloudwatch_event_rule` | `ente-sl-dev-trash-purge` | `rate(1 day)`. |
-| 12 | `aws_cloudwatch_event_target` | ↑ → the purge function | |
-| 13 | `aws_lambda_permission` | `AllowEventBridge` | Lets `events.amazonaws.com` invoke the purge function. |
-| 14 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-api` | 30-day retention. Created explicitly, so the role does **not** need `logs:CreateLogGroup`. |
-| 15 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-trash-purge` | 30-day retention. |
+| 7 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
+| 8 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*`. |
+| 9 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
+| 10 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
+| 11 | `aws_lambda_permission` | `FunctionURLAllowPublicAccess` | Grants anonymous `lambda:InvokeFunctionUrl`. **Required** — auth NONE alone 403s every caller, CloudFront included. Guard-tested. |
+| 12 | `aws_lambda_function` | `ente-sl-dev-trash-purge` | nodejs22.x, arm64, 256 MB, 300 s. Drains the 30-day trash **and** the deferred object-sweep queue (D6). |
+| 13 | `aws_cloudwatch_event_rule` | `ente-sl-dev-trash-purge` | `rate(1 day)`. |
+| 14 | `aws_cloudwatch_event_target` | ↑ → the purge function | |
+| 15 | `aws_lambda_permission` | `AllowEventBridge` | Lets `events.amazonaws.com` invoke the purge function. |
+| 16 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-api` | 30-day retention. Created explicitly, so the role does **not** need `logs:CreateLogGroup`. |
+| 17 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-trash-purge` | 30-day retention. |
+| 18 | `aws_sns_topic` | `ente-sl-dev-alarms` | Alarm fan-out. |
+| 19 | `aws_sns_topic_subscription` | email → `alarm_email` (defaults to `mail_from`) | **Needs confirming from the inbox.** Until you click AWS's link the subscription stays pending and silently drops every alarm. |
+| 20 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-api-errors` | Lambda `Errors` > 0 over 5 min. |
+| 21 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-trash-purge-errors` | Lambda `Errors` > 0 over **86400 s** — a daily window for a daily cron. The failure this exists for: the purge drains the D6 object-sweep queue, so a silently dead cron means deleted bytes are never reclaimed and the bill grows with no other signal. |
+
+`Errors` counts **failed invocations** — crashes, timeouts, OOM, init failures.
+It does *not* count application errors hono handles and returns, so the SES-500
+on `POST /users/ott` will not fire an alarm. That one is a log concern.
 
 ### Edge (`modules/edge`)
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 16 | `aws_cloudfront_distribution` | comment `ente-sl-dev api` | `PriceClass_100`, IPv6 on, default `*.cloudfront.net` cert, no OAC (deliberate — same finding as immich-serverless). Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies. All 7 methods allowed. Its domain is the `server_url` output the app gets pointed at. |
+| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api` | `PriceClass_200` (see §2.1), IPv6 on, default `*.cloudfront.net` cert, no OAC (deliberate — same finding as immich-serverless). Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies. All 7 methods allowed. Its domain is the `server_url` output the app gets pointed at. |
 
 Everything carries default tags `Project=ente-serverless`, `Env=dev`,
 `ManagedBy=opentofu`.
@@ -50,7 +63,7 @@ Everything carries default tags `Project=ente-serverless`, `Env=dev`,
 - `data.aws_caller_identity.current` — supplies the bucket-name suffix.
 - `data.archive_file.api` / `.trash_purge` — zip `dist/lambda` and
   `dist/trash-purge`. **These fail at plan time if `make build-lambda` has not
-  run.** `dist/` does not currently exist in this tree.
+  run.** `make plan` now depends on `build-lambda`, so this is handled.
 
 ## 2. What tofu does NOT create — the out-of-band prerequisites
 
@@ -59,17 +72,51 @@ These are the actual gating work for the first apply.
 1. **The AWS account and region.** Still open per D4. The region choice binds
    Lambda, DynamoDB, S3 and — critically — **SES**: the mail adapter uses the
    Lambda's own `AWS_REGION`, so the verified identity must live in the same
-   region.
+   region. The region lives in `ente-sl.tfvars` alongside the other deploy
+   config, and the make targets pass only `-var-file`, so plan and apply cannot
+   disagree about it. Note that **tofu ignores your AWS CLI's configured
+   region** — `aws configure get region` says nothing about where this lands.
+   The price class is **settled, not open**: `edge/main.tf` now pins
+   `PriceClass_200`. `PriceClass_100` covers only US, Canada, Europe and
+   Israel, so Asian viewers hitched to a distant edge on every API round-trip.
+   Checked against the AWS price-list API rather than assumed, the upgrade is
+   free in all but name — every region `_200` adds (India, Asia Pacific,
+   Japan, Middle East, South Africa) bills at **$0.0120 per 10k HTTPS
+   requests, identical to Europe**, which `_100` already exposed us to. The
+   only dearer request regions are Australia ($0.0125) and South America
+   ($0.0220), and both sit in `_All`, not `_200`. Worst case is a request that
+   would have hit a US edge at $0.0100 landing on Mumbai at $0.0120: **+20%,
+   or +$0.002 per 10,000 requests**. Egress differs more in percentage terms
+   ($0.085/GB US-CA-EU vs $0.109 India vs $0.120 Asia Pacific) but is
+   near-irrelevant here — CachingDisabled means only small JSON crosses this
+   distribution; bytes come from S3 presigned either way. And CloudFront's
+   **1 TB / 10M-request perpetual free tier survived the Nov 2025 flat-rate
+   plan launch and still applies to pay-as-you-go usage**, which this
+   distribution is on, so realistic volumes bill $0 under either class. At 1M
+   requests + 4 GB/month — roughly 10× a real single-install load — the whole
+   difference is 10–30 cents. Latency, not cost, was always the only axis;
+   nothing on that axis argued for `_100`.
 
-2. **The SES identity, and SES production access.** No tofu resource creates
-   either; `mail_from` is a plain variable asserted to be "an SES-verified
-   identity". Two separate things are needed:
-   - verify the sending identity (domain preferred over a single address);
-   - **request production access**. A fresh account's SES is in the sandbox:
-     mail only to *verified* recipients, 200/day, 1/sec. One-time tokens go to
-     arbitrary user addresses, so **signup is broken until the sandbox exit is
-     granted** — it is a support-ticket turnaround, so start it before anything
-     else.
+2. **The SES identity.** No tofu resource creates it; `mail_from` is an
+   unvalidated string, so a wrong value costs nothing at apply and surfaces at
+   the first signup instead (see below). **A single verified ADDRESS is enough —
+   no domain is required.** Verify your own inbox in the SES console for the
+   deploy region and use that.
+
+   **Production access is NOT on the critical path for a private install** —
+   this corrects an earlier draft of this document, which called the sandbox
+   exit the longest-lead blocker. The sandbox delivers only to *verified*
+   recipients at 200/day, 1/sec; for a server whose users are the owner and a
+   few family members that is an access-control mechanism rather than a limit
+   (verify each person once). Request production access only if strangers must
+   self-serve signup.
+   - *Deliverability caveat:* an `@gmail.com`-style sender cannot align SPF and
+     DKIM with that domain's DMARC, so some receivers will spam-file it.
+     Acceptable for codes sent to yourself; a cheap domain is the real fix.
+   - *Failure signature:* `deps.mail.send()` in `handlers/users/sendOtt.ts` is
+     awaited unhandled and runs *after* `storeOtt`, so an SES rejection is a
+     **500 on `POST /users/ott`** with the OTT already persisted and never
+     delivered. If signup 500s, check the identity before the code.
 
 3. **The deployer principal.** `src/infra/deployer-policy.json` is a policy
    document, not a resource — the IAM user/role that carries it is a manual
@@ -88,15 +135,36 @@ These are the actual gating work for the first apply.
 
 Ordered by how likely each is to bite on the first apply.
 
-- **The public-invoke permission on the Function URL is probably missing.**
-  `aws_lambda_function_url` with `authorization_type = "NONE"` does not, by
-  itself, add the resource-based policy statement that lets anonymous callers
-  in — the usual fix is an explicit `aws_lambda_permission` with
-  `principal = "*"`, `action = "lambda:InvokeFunctionUrl"`,
-  `function_url_auth_type = "NONE"`. I could not verify this against a real
-  apply. **Curl the `api_function_url` output immediately after apply**; if it
-  returns 403, that resource is what's missing. Cheap to check, and it fails
-  closed rather than dangerously.
+- **~~The public-invoke permission on the Function URL is missing.~~**
+  *(fixed 2026-08-17, before the first apply.)* `authorization_type = "NONE"`
+  does not by itself add the resource-based policy statement that admits
+  anonymous callers — the console adds it silently when you create a public
+  Function URL by hand, the API does not. Without it every request 403s,
+  CloudFront's included, which reads as a broken edge while the lambda is fine.
+  Now row 10 (`aws_lambda_permission.api_public_url`), with a guard test that
+  was mutation-checked. `make smoke` still checks it post-apply, because a
+  guard proves the config, not the deployment.
+
+- **The bucket name embeds the account id, so wrong-account credentials plan a
+  destroy of the photo store.** *(finding 2026-08-17, hit on the first replan.)*
+  `local.suffix = data.aws_caller_identity.current.account_id`, so the desired
+  bucket name is a function of whoever is authenticated. Running `plan` with an
+  ambient profile pointing at a different account (easy when the machine already
+  has a deployer for another project) computes a different name, and tofu reads a
+  name change as **destroy-and-recreate** — `bucket` is the force-new attribute.
+  `prevent_destroy` did stop it, which is exactly what it is for, but the plan
+  reads like a config bug rather than a wrong profile.
+  - **The rails were uneven:** the bucket and table are protected; the lambdas,
+    the IAM role and the SNS topic are not, and would have been replaced without
+    comment.
+  - Fixed by `make guard-account`, a prerequisite of `plan`, `deploy` and
+    `destroy`. It compares `sts:GetCallerIdentity` against the account already
+    recorded in `terraform.tfstate` and refuses on mismatch, naming both
+    accounts. Needs no new configuration — the state is the source of truth —
+    and it no-ops on a first deploy when there is no state yet. Guard-tested.
+  - *Corollary worth internalising:* moving this deployment to another AWS
+    account is **not** a re-point, it is a fresh deployment. The bucket name
+    cannot follow you.
 
 - **GLACIER_IR's 90-day minimum collides with the 30-day trash purge.** Objects
   transition to GIR on day 0, and GIR bills a 90-day minimum duration (plus a
@@ -148,11 +216,16 @@ Ordered by how likely each is to bite on the first apply.
   must vary on `Origin`, since `Access-Control-Allow-Origin` echoes the
   caller. The S3 bucket keeps its own separate CORS config (row 4).
 
-- **Teardown is deliberately hard.** `prevent_destroy` on the table and bucket,
-  `deletion_protection_enabled` on the table, no `force_destroy` on the bucket.
-  Destroying dev means editing the tf, disabling deletion protection, and
-  emptying the bucket by hand. Correct for a photo store; just don't expect
-  `tofu destroy` to work.
+- **Teardown is deliberately hard, and the targets reflect that.**
+  `prevent_destroy` on the table and bucket, `deletion_protection_enabled` on
+  the table, no `force_destroy` on the bucket. So `make destroy` is scoped to
+  `module.compute` + `module.edge` only — it removes the lambdas, the cron, the
+  logs and the distribution, and cannot reach a photo. A bare `tofu destroy`
+  would fail on the rails anyway; `make destroy-data` refuses outright and
+  prints the four manual steps instead. Guard-tested so the scoping can't be
+  widened by an edit. **Re-applying after a destroy mints a new CloudFront
+  domain and a new function URL**, so every client needs re-pointing — that,
+  not data loss, is the real cost of tearing the stateless half down.
 
 - **The deployer policy is a privilege-escalation path if leaked.** It grants
   `iam:CreateRole` + `iam:PutRolePolicy` + `iam:PassRole` on `ente-sl-*` with no
@@ -160,10 +233,53 @@ Ordered by how likely each is to bite on the first apply.
   Fine when the deployer *is* the account owner; not fine if it ever becomes a
   CI credential. Add a permissions boundary before that happens.
 
-- **The policy may need a few additions on the first apply.** It was written by
-  hand, not derived from a real run; provider read calls occasionally want a
-  permission not on the list. Expect to iterate once, rather than treating a
-  denial as a config bug.
+- **The deployer policy did need widening on the first apply — now resolved.**
+  *(finding 2026-08-17, from a real apply.)* It failed on
+  `s3:GetReplicationConfiguration` while reading back the bucket it had just
+  created. The cause is an S3 naming trap worth remembering: **several
+  bucket-level IAM action names do not match their API names**, so a
+  `s3:GetBucket*` wildcard silently fails to cover them. The API is
+  `GetBucketReplication`; the IAM action is `s3:GetReplicationConfiguration`.
+  `GetAnalyticsConfiguration`, `GetMetricsConfiguration` and
+  `GetIntelligentTieringConfiguration` are the same shape, and the provider
+  reads several of them on every `aws_s3_bucket` refresh.
+  Fixed by widening the *actions* to `s3:Get*` / `s3:Put*` / `s3:List*` while
+  keeping the *resource* pinned to `arn:aws:s3:::ente-sl-*`, which ends the
+  whack-a-mole without loosening blast radius. SNS got the same treatment
+  (`sns:Get*`/`List*`/`Set*`) pre-emptively, since `aws_sns_topic` reads a data
+  protection policy that the enumerated list missed.
+  - **Consequence, and the reason for the new `Deny`:** the store used to be
+    protected only by *omitting* `s3:DeleteBucket` and `dynamodb:DeleteTable`.
+    An omission means nothing once action wildcards are in play, so both are now
+    explicitly denied in a `NeverDeleteTheStore` statement — a Deny cannot be
+    widened by a later wildcard. Lift it only as one of the deliberate steps in
+    `make destroy-data`. Guard-tested.
+  - **A Deny over an omission is decorative — learned the hard way, 2026-08-17.**
+    The `Deny` was first added on top of actions the policy never granted, which
+    withheld nothing that deny-by-default hadn't already withheld. The tell came
+    during a deliberate teardown: removing the `Deny` changed nothing and the
+    destroy still failed `AccessDenied: no identity-based policy allows
+    s3:DeleteBucket`. **A Deny is only a rail if there is an Allow beneath it.**
+    So `s3:Delete*` and `dynamodb:DeleteTable` are now permanently allowed and
+    `NeverDeleteTheStore` is the single thing withholding them — which also makes
+    the teardown procedure honest: remove one statement and the destroy genuinely
+    becomes possible. The guard asserts *both* halves (allowed, and denied),
+    wildcard-aware, so this cannot regress into decoration again.
+  - **Listing actions cannot be resource-scoped — cost one more apply.**
+    `logs:DescribeLogGroups` failed even though `logs:Describe*` was granted,
+    because AWS authorises listing calls against a placeholder ARN with an
+    **empty name** — `arn:aws:logs:REGION:ACCT:log-group::log-stream:` — which
+    can never match `log-group:/aws/lambda/ente-sl-*`. The scoped grant looks
+    right and fails only mid-apply. Such actions now live in a separate
+    `ListingNeedsWildcard` statement on `Resource: "*"`; they are read-only
+    metadata calls, so the widening is immaterial. `cloudwatch:DescribeAlarms`
+    is in there defensively — the alarms actually read fine under a scoped ARN,
+    but AWS's authorization reference lists it with no resource types.
+    Guard-tested.
+  - *Aside:* a JSON policy cannot carry comments, and IAM rejects any
+    unrecognised statement key with `MalformedPolicyDocument` — so the rationale
+    lives here rather than inline. A guard now asserts every statement uses only
+    IAM-recognised keys.
 
 ### Confirmed sound
 
@@ -202,15 +318,43 @@ restore is not — 500 GB out is roughly $15 retrieval + $36 egress.
 
 ## 5. Prep checklist, in order
 
-1. Decide the AWS account and region (closes half of D4). Note the region binds SES.
-2. Verify the SES identity in that region **and file the sandbox-exit request** — longest lead time, start first.
-3. Create the deployer principal from `src/infra/deployer-policy.json`; configure credentials locally.
-4. `cp src/infra/dev/ente-sl.tfvars.example src/infra/dev/ente-sl.tfvars`, fill in `hashing_key` and `mail_from`, **back the key up off-machine**.
-5. `make build-lambda` — `dist/` must exist before plan.
-6. `tofu -chdir=src/infra/dev init` (regenerates `.terraform/` and the lock file, both dropped by the repo split).
-7. `tofu -chdir=src/infra/dev plan -var-file=ente-sl.tfvars` — expect **16 to add**. Read it before applying.
-8. Apply. CloudFront takes ~5–15 minutes to reach Deployed; everything else is quick.
-9. Immediately curl the `api_function_url` output and the `server_url` output (`/ping`). A 403 on the former means the missing invoke permission from §3.
-10. Replay the M1–M6 gate scripts against `server_url`, then the stock app over the internet (build plan M7).
+Steps 1–4 are the out-of-band work; from step 5 on it is all make targets.
+
+1. **Decide the account and region** (closes half of D4). The region binds SES,
+   so this must come first. The price class no longer factors in — §2.1 settles
+   it at `PriceClass_200` — but the region still fixes where the origin lives,
+   which is the round-trip the nearer edge cannot shorten.
+2. **Verify one SES identity in that region** — your own email address is
+   enough; no domain, no support ticket, no waiting. Stay in the sandbox and
+   verify each intended user's address as a recipient (see §2.2). File for
+   production access only if strangers must self-serve signup.
+3. **Create the deployer principal** from `src/infra/deployer-policy.json`.
+   Put its keys in a dedicated profile (`AWS_PROFILE=ente-sl`) rather than
+   reusing an existing deployer, so the credential in play is always explicit.
+   The IAM console may warn that `cloudfront:CreateDistributionWithTags` is an
+   unrecognized action — that is a validator quirk, the action is real and
+   `default_tags` means the provider needs it. Save anyway; don't remove it.
+4. **`cp src/infra/dev/ente-sl.tfvars.example src/infra/dev/ente-sl.tfvars`**,
+   fill in `region`, `mail_from` and `hashing_key`, and **back the key up
+   off-machine before applying** (D4a).
+5. **`make infra-init`** — regenerates `.terraform/` and the lock file, both
+   dropped by the repo split.
+6. **`make plan`** — rebuilds the bundles first (so `dist/` can never be stale
+   at plan time), refuses with instructions if the tfvars file is missing, and
+   saves `tfplan`. Expect **22 to add, 0 to change, 0 to destroy**. Read it.
+7. **`make deploy`** — applies the *saved* plan, so what ships is what you
+   reviewed, then prints the outputs. CloudFront takes 5–15 minutes to reach
+   Deployed; the other 21 resources are quick. Then confirm the SNS
+   subscription email, or the alarms in rows 20-21 never reach you.
+8. **`make smoke`** — pings the function URL and the distribution. Two 200s
+   means the edge is live. A 403 on the function URL would mean row 10 went
+   missing; a guard makes that unlikely now, but the config is not the
+   deployment.
+9. **Replay the M1–M6 gate scripts against `server_url`**, then the stock app
+   over the internet (build plan M7).
+
+To tear the stateless half back down: `make destroy` (data preserved; clients
+need re-pointing at the new `server_url` afterwards). There is no target that
+deletes the photos — see the teardown entry in §3.
 
 Tooling on this machine is ready: OpenTofu 1.12.5, AWS CLI 2.36.24.

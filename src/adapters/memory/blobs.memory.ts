@@ -36,7 +36,17 @@ export class MemoryBlobs implements Blobs {
     this.objects.delete(key);
   }
 
-  async presignPut(key: string, expiresInSeconds: number): Promise<string> {
+  /**
+   * Recorded so tests can assert the MD5s a handler was given actually reach the
+   * port. The real adapter binds them into the signature (D37) and a dropped
+   * value is invisible locally — memory and LocalStack both ignore signatures,
+   * so only real S3 would have complained.
+   */
+  presignedMd5 = new Map<string, string | undefined>();
+  partMd5s = new Map<string, readonly string[] | undefined>();
+
+  async presignPut(key: string, expiresInSeconds: number, contentMd5?: string): Promise<string> {
+    this.presignedMd5.set(key, contentMd5);
     return `memory://put/${encodeURIComponent(key)}?expires=${expiresInSeconds}`;
   }
 
@@ -44,7 +54,13 @@ export class MemoryBlobs implements Blobs {
     return `memory://get/${encodeURIComponent(key)}?expires=${expiresInSeconds}`;
   }
 
-  async createMultipart(key: string, partCount: number, expiresInSeconds: number): Promise<MultipartUrls> {
+  async createMultipart(
+    key: string,
+    partCount: number,
+    expiresInSeconds: number,
+    partMd5s?: readonly string[],
+  ): Promise<MultipartUrls> {
+    this.partMd5s.set(key, partMd5s);
     const uploadID = `mpu-${this.multiparts.size + 1}`;
     this.multiparts.set(uploadID, { key, parts: new Map() });
     const partUrls = Array.from(

@@ -2,19 +2,36 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "NeverDeleteTheStore",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "dynamodb:DeleteTable"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ListingNeedsWildcard",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups",
+        "cloudwatch:DescribeAlarms"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "TofuStateAndData",
       "Effect": "Allow",
       "Action": [
         "dynamodb:CreateTable",
-        "dynamodb:DescribeTable",
-        "dynamodb:DescribeContinuousBackups",
-        "dynamodb:DescribeTimeToLive",
-        "dynamodb:UpdateTable",
-        "dynamodb:UpdateTimeToLive",
-        "dynamodb:UpdateContinuousBackups",
+        "dynamodb:DeleteTable",
+        "dynamodb:Describe*",
+        "dynamodb:List*",
         "dynamodb:TagResource",
         "dynamodb:UntagResource",
-        "dynamodb:ListTagsOfResource"
+        "dynamodb:UpdateContinuousBackups",
+        "dynamodb:UpdateTable",
+        "dynamodb:UpdateTimeToLive"
       ],
       "Resource": "arn:aws:dynamodb:*:*:table/ente-sl-*"
     },
@@ -23,18 +40,15 @@
       "Effect": "Allow",
       "Action": [
         "s3:CreateBucket",
-        "s3:GetBucket*",
-        "s3:PutBucket*",
-        "s3:GetLifecycleConfiguration",
-        "s3:PutLifecycleConfiguration",
-        "s3:GetEncryptionConfiguration",
-        "s3:PutEncryptionConfiguration",
-        "s3:GetAccelerateConfiguration",
-        "s3:ListBucket",
-        "s3:PutObject",
-        "s3:GetObject"
+        "s3:Get*",
+        "s3:Put*",
+        "s3:List*",
+        "s3:Delete*"
       ],
-      "Resource": ["arn:aws:s3:::ente-sl-*", "arn:aws:s3:::ente-sl-*/*"]
+      "Resource": [
+        "arn:aws:s3:::ente-sl-*",
+        "arn:aws:s3:::ente-sl-*/*"
+      ]
     },
     {
       "Sid": "Lambda",
@@ -42,22 +56,17 @@
       "Action": [
         "lambda:CreateFunction",
         "lambda:DeleteFunction",
-        "lambda:GetFunction",
-        "lambda:GetFunctionConfiguration",
-        "lambda:GetFunctionCodeSigningConfig",
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
         "lambda:CreateFunctionUrlConfig",
-        "lambda:GetFunctionUrlConfig",
         "lambda:UpdateFunctionUrlConfig",
         "lambda:DeleteFunctionUrlConfig",
         "lambda:AddPermission",
         "lambda:RemovePermission",
-        "lambda:GetPolicy",
-        "lambda:ListVersionsByFunction",
         "lambda:TagResource",
         "lambda:UntagResource",
-        "lambda:ListTags"
+        "lambda:Get*",
+        "lambda:List*"
       ],
       "Resource": "arn:aws:lambda:*:*:function:ente-sl-*"
     },
@@ -67,16 +76,17 @@
       "Action": [
         "iam:CreateRole",
         "iam:DeleteRole",
+        "iam:DeleteRolePolicy",
         "iam:GetRole",
-        "iam:PassRole",
-        "iam:TagRole",
-        "iam:UntagRole",
-        "iam:ListRolePolicies",
+        "iam:GetRolePolicy",
         "iam:ListAttachedRolePolicies",
         "iam:ListInstanceProfilesForRole",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "iam:PassRole",
         "iam:PutRolePolicy",
-        "iam:GetRolePolicy",
-        "iam:DeleteRolePolicy"
+        "iam:TagRole",
+        "iam:UntagRole"
       ],
       "Resource": "arn:aws:iam::*:role/ente-sl-*"
     },
@@ -86,13 +96,12 @@
       "Action": [
         "events:PutRule",
         "events:DeleteRule",
-        "events:DescribeRule",
         "events:PutTargets",
         "events:RemoveTargets",
-        "events:ListTargetsByRule",
-        "events:ListTagsForResource",
         "events:TagResource",
-        "events:UntagResource"
+        "events:UntagResource",
+        "events:Describe*",
+        "events:List*"
       ],
       "Resource": "arn:aws:events:*:*:rule/ente-sl-*"
     },
@@ -102,13 +111,42 @@
       "Action": [
         "logs:CreateLogGroup",
         "logs:DeleteLogGroup",
-        "logs:DescribeLogGroups",
         "logs:PutRetentionPolicy",
-        "logs:ListTagsForResource",
         "logs:TagResource",
-        "logs:UntagResource"
+        "logs:UntagResource",
+        "logs:Describe*",
+        "logs:List*"
       ],
       "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/ente-sl-*"
+    },
+    {
+      "Sid": "AlarmTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:Get*",
+        "sns:List*",
+        "sns:Set*"
+      ],
+      "Resource": "arn:aws:sns:*:*:ente-sl-*"
+    },
+    {
+      "Sid": "Alarms",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource",
+        "cloudwatch:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:cloudwatch:*:*:alarm:ente-sl-*"
     },
     {
       "Sid": "CloudFront",
@@ -116,25 +154,30 @@
       "Action": [
         "cloudfront:CreateDistribution",
         "cloudfront:CreateDistributionWithTags",
-        "cloudfront:GetDistribution",
         "cloudfront:UpdateDistribution",
         "cloudfront:DeleteDistribution",
         "cloudfront:TagResource",
         "cloudfront:UntagResource",
-        "cloudfront:ListTagsForResource"
+        "cloudfront:Get*",
+        "cloudfront:List*"
       ],
       "Resource": "*"
     },
     {
       "Sid": "SesIdentityRead",
       "Effect": "Allow",
-      "Action": ["ses:GetIdentityVerificationAttributes", "ses:VerifyEmailIdentity"],
+      "Action": [
+        "ses:GetIdentityVerificationAttributes",
+        "ses:VerifyEmailIdentity"
+      ],
       "Resource": "*"
     },
     {
       "Sid": "AccountRead",
       "Effect": "Allow",
-      "Action": ["sts:GetCallerIdentity"],
+      "Action": [
+        "sts:GetCallerIdentity"
+      ],
       "Resource": "*"
     }
   ]

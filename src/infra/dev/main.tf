@@ -28,6 +28,10 @@ module "compute" {
 
   hashing_key = var.hashing_key
   mail_from   = var.mail_from
+
+  # One address by default: the operator and the sender are the same person on a
+  # self-host. Set alarm_email in the tfvars only to split them.
+  alarm_email = coalesce(var.alarm_email, var.mail_from)
 }
 
 # CloudFront — the URL the stock ente app gets pointed at (7-tap custom endpoint).

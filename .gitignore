@@ -6,4 +6,10 @@ dist/
 .terraform.lock.hcl
 tfplan
 *.tfvars
+# An editor swap file of ente-sl.tfvars holds hashing_key in cleartext, and
+# `*.tfvars` above does NOT match `.ente-sl.tfvars.swp`. D4a says that key must
+# never reach git; this is the hole it would slip through.
+*.swp
+*.swo
+*~
 .DS_Store

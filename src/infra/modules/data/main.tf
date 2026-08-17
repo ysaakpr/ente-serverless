@@ -127,6 +127,26 @@ resource "aws_s3_bucket" "objects" {
   }
 }
 
+/**
+ * Versioning turns every delete into a delete marker, so the object sweep (D6),
+ * a leaked token, or a client-side mass-delete all become recoverable for the
+ * window set by expire-noncurrent-versions below. Deliberately needs NO IAM
+ * change: the execution role holds s3:DeleteObject, which on a versioned bucket
+ * writes a marker rather than destroying a version, so the API physically
+ * cannot hard-delete a photo. Only the lifecycle rule reclaims bytes.
+ */
+resource "aws_s3_bucket_versioning" "objects" {
+  bucket = aws_s3_bucket.objects.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "aws_s3_bucket_public_access_block" "objects" {
   bucket                  = aws_s3_bucket.objects.id
   block_public_acls       = true
@@ -182,6 +202,34 @@ resource "aws_s3_bucket_lifecycle_configuration" "objects" {
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
+    }
+  }
+
+  /**
+   * The recovery window for the versioning above, and the price of it: deleted
+   * and overwritten bytes keep billing until this fires. 30 days is chosen to
+   * mirror museum's trash retention, so a photo is recoverable for ~30 days in
+   * the trash and ~30 more after the sweep hard-deletes it.
+   *
+   * Cost note: a noncurrent version of an ORIGINAL is already in GLACIER_IR,
+   * which bills a 90-day minimum, so expiring it at 30 days incurs a prorated
+   * early-deletion charge for the remaining ~60 (about $0.008/GB at GIR
+   * prices). That is the deliberate trade — cheap insurance on irreplaceable
+   * data. Raise this to 90 to avoid the penalty entirely, at the cost of
+   * holding deleted bytes three times as long.
+   *
+   * Delete markers are left to accumulate: they carry no storage charge, and
+   * expired_object_delete_marker alongside a filter is a known source of
+   * perpetual diffs.
+   */
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
     }
   }
 }

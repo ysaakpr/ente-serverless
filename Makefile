@@ -5,7 +5,8 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 	TABLE_NAME=ente-serverless BUCKET_NAME=ente-objects \
 	HASHING_KEY=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
 
-.PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test
+.PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
+	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data
 
 test:
 	npx vitest run test/unit
@@ -84,3 +85,103 @@ build-lambda:
 
 capture-diff:
 	node --experimental-transform-types tools/capture-diff.ts
+
+# ---------------------------------------------------------------------------
+# AWS deploy (M7, decision D4). Everything environment-specific — region,
+# hashing_key, mail_from — lives in src/infra/dev/ente-sl.tfvars (gitignored).
+# These targets pass ONLY -var-file, so plan and apply can never disagree about
+# which region they are addressing. Note that tofu reads the region from that
+# file, NOT from your AWS CLI config: the two being different is normal and
+# harmless, but it means `aws configure get region` tells you nothing about
+# where this deploys.
+#
+# Credentials come from the environment. Use a dedicated profile so the deployer
+# is always explicit:   AWS_PROFILE=ente-sl make plan
+# ---------------------------------------------------------------------------
+TF     = tofu -chdir=src/infra/dev
+# Path is relative to src/infra/dev, because of tofu -chdir above.
+TFVARS = ente-sl.tfvars
+TFPLAN = tfplan
+
+infra-init:
+	$(TF) init
+
+# The objects bucket embeds the account id in its NAME, so running plan/apply
+# with credentials for a different account renames it — and tofu reads a rename
+# as destroy-and-recreate of the photo store. prevent_destroy does stop that,
+# but only after a plan that reads like a config bug rather than a wrong
+# profile. Worse, the lambdas/role/topic carry no such rail and WOULD be
+# replaced. So: compare the caller against the account already recorded in
+# state. No extra config — the state file is the source of truth, and a first
+# deploy (no state yet) skips the check.
+STATE = src/infra/dev/terraform.tfstate
+
+guard-account:
+	@test -s $(STATE) || exit 0; \
+	WANT=$$(grep -o 'arn:aws:dynamodb:[^"]*' $(STATE) | head -1 | cut -d: -f5); \
+	test -n "$$WANT" || exit 0; \
+	HAVE=$$(aws sts get-caller-identity --query Account --output text 2>/dev/null); \
+	test "$$WANT" = "$$HAVE" || { \
+		echo "ACCOUNT MISMATCH — refusing to continue."; \
+		echo "  state was built in : $$WANT"; \
+		echo "  your credentials are: $$HAVE"; \
+		echo "  The bucket name embeds the account id, so tofu would plan to REPLACE"; \
+		echo "  the photo store. Select the right profile, e.g.:"; \
+		echo "      AWS_PROFILE=ente-sl make plan"; \
+		echo "  If you genuinely mean to move accounts, that is a fresh deployment:"; \
+		echo "  clean up the old one and start from an empty state, do not re-point this one."; \
+		exit 1; }
+
+# archive_file zips dist/ AT PLAN TIME, so the bundles are rebuilt first —
+# an absent or stale dist/ otherwise fails the plan, not the apply.
+plan: build-lambda guard-account
+	@test -f src/infra/dev/$(TFVARS) || { \
+		echo "missing src/infra/dev/$(TFVARS)"; \
+		echo "  cp src/infra/dev/ente-sl.tfvars.example src/infra/dev/$(TFVARS)"; \
+		echo "  then fill in region, mail_from, and hashing_key (openssl rand -base64 32)"; \
+		echo "  BACK UP hashing_key first — losing it orphans every email->user mapping (D4a)"; \
+		exit 1; }
+	$(TF) plan -var-file=$(TFVARS) -out=$(TFPLAN)
+
+# Applies the SAVED plan, so what ships is exactly what you reviewed.
+# CloudFront takes 5-15 min to reach Deployed; the other 16 resources are quick.
+deploy: guard-account
+	@test -f src/infra/dev/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
+	$(TF) apply $(TFPLAN)
+	@rm -f src/infra/dev/$(TFPLAN)
+	@$(MAKE) --no-print-directory outputs
+
+outputs:
+	@$(TF) output
+
+# Post-deploy check. 403 on the function URL means the anonymous
+# InvokeFunctionUrl permission went missing; 200 on both means the edge is live.
+smoke:
+	@FU=$$($(TF) output -raw api_function_url); CF=$$($(TF) output -raw server_url); \
+	printf '  function-url /ping -> '; curl -sS -o /dev/null -w '%{http_code}\n' "$${FU}ping"; \
+	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}\n' "$$CF/ping"; \
+	echo "  point the app at: $$CF"
+
+# Tears down the STATELESS half only: both lambdas, the function URL, the cron,
+# the log groups and the distribution. module.data — the table and the objects
+# bucket — is deliberately out of scope; it carries prevent_destroy and holds
+# every photo. Costs a redeploy, not a memory.
+# Re-applying afterwards mints a NEW CloudFront domain and a NEW function URL,
+# so every client has to be re-pointed at the new server_url.
+destroy: guard-account
+	@echo "==> destroying module.compute + module.edge — table and bucket are preserved"
+	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge
+
+# There is deliberately no target that destroys module.data.
+destroy-data:
+	@echo "REFUSING: module.data is the table and the objects bucket — every photo in the deployment."
+	@echo ""
+	@echo "Three safety rails guard it. If you genuinely mean this, lift them by hand"
+	@echo "so that each one is a separate conscious step:"
+	@echo "  1. empty the bucket — tofu cannot delete a non-empty one (no force_destroy, on purpose)"
+	@echo "  2. remove both prevent_destroy blocks in src/infra/modules/data/main.tf"
+	@echo "  3. set deletion_protection_enabled = false on the table and apply THAT alone"
+	@echo "  4. then, finally: $(TF) destroy -var-file=$(TFVARS)"
+	@echo ""
+	@echo "Back up hashing_key and the tfstate before step 1 (D4a)."
+	@exit 1

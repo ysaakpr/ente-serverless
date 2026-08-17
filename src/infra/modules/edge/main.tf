@@ -2,8 +2,17 @@
  * CloudFront in front of the Function URL. No OAC — that finding transfers
  * as-is from immich-serverless: with IAM auth the POST body hash breaks; the
  * Function URL stays auth NONE and CloudFront is the canonical path.
- * Bytes never pass through here (presigned S3 does the byte path), so the
- * cheap price class is fine.
+ * Bytes never pass through here (presigned S3 does the byte path), so only
+ * small JSON crosses this distribution.
+ *
+ * PriceClass_200 over _100 costs nothing worth counting: every region _200
+ * adds (India, Asia, Japan, Middle East, South Africa) bills at $0.0120 per
+ * 10k HTTPS requests — the same rate as Europe, which _100 already includes.
+ * The only dearer regions (Australia $0.0125, South America $0.0220) are in
+ * _All, not _200. Worst case is a US-served request at $0.0100 moving to a
+ * Mumbai edge at $0.0120: +$0.002 per 10k. The perpetual 1 TB / 10M-request
+ * free tier still applies to pay-as-you-go, so in practice this is $0 either
+ * way. Buys a nearer edge for Asian viewers on every API round-trip.
  */
 
 locals {
@@ -13,7 +22,7 @@ locals {
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
   comment         = "ente-sl-${var.env_name} api"
-  price_class     = "PriceClass_100"
+  price_class     = "PriceClass_200"
   is_ipv6_enabled = true
 
   origin {

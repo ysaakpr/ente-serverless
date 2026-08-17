@@ -34,9 +34,10 @@ export const configFromEnv = (): Config => ({
   hardcodedOttSuffix: process.env.HARDCODED_OTT_SUFFIX,
   hardcodedOttValue: process.env.HARDCODED_OTT_VALUE,
   presignExpirySeconds: Number(process.env.PRESIGN_EXPIRY_SECONDS ?? 7 * 24 * 3600),
-  // Effectively unlimited by default (1 PiB) — decision D11: it's the user's
-  // own bucket and bill, so quota should never interfere unless configured.
-  freePlanStorageBytes: Number(process.env.FREE_PLAN_STORAGE_BYTES ?? 1024 ** 5),
+  // 10 TiB by default (decision D11, revised 2026-08-17): it's the user's own
+  // bucket and bill, but a real ceiling beats "unlimited" as a backstop
+  // against a runaway client. Raise it with FREE_PLAN_STORAGE_BYTES.
+  freePlanStorageBytes: Number(process.env.FREE_PLAN_STORAGE_BYTES ?? 10 * 1024 ** 4),
   maxFileSizeBytes: Number(process.env.MAX_FILE_SIZE_BYTES ?? 10 * 1024 * 1024 * 1024),
   port: Number(process.env.PORT ?? 8080),
   logRequests: process.env.LOG_REQUESTS === '1',

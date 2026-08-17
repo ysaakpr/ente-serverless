@@ -22,9 +22,23 @@ export interface Blobs {
   get(key: string): Promise<Buffer>;
   head(key: string): Promise<BlobHead | null>;
   delete(key: string): Promise<void>;
-  presignPut(key: string, expiresInSeconds: number): Promise<string>;
+  /**
+   * `contentMd5` MUST be bound into the signature whenever the client will send
+   * a Content-MD5 header. Real S3 rejects an unsigned Content-MD5 outright —
+   * `AccessDenied: There were headers present in the request which were not
+   * signed / HeadersNotSigned: content-md5` — because it is an integrity header.
+   * LocalStack does not verify signatures at all, which is how the opposite
+   * assumption survived in D26 until the first real upload (D37).
+   */
+  presignPut(key: string, expiresInSeconds: number, contentMd5?: string): Promise<string>;
   presignGet(key: string, expiresInSeconds: number): Promise<string>;
-  createMultipart(key: string, partCount: number, expiresInSeconds: number): Promise<MultipartUrls>;
+  /** `partMd5s[i]` is bound into part i+1's signature — same rule as above. */
+  createMultipart(
+    key: string,
+    partCount: number,
+    expiresInSeconds: number,
+    partMd5s?: readonly string[],
+  ): Promise<MultipartUrls>;
   /**
    * Object tags drive the storage-class lifecycle: museum's key layout puts
    * originals AND thumbnails under the same `userID/uuid` prefix, so the

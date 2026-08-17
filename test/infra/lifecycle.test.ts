@@ -21,8 +21,20 @@ const allTfFiles = (dir: string): string[] => {
   return out;
 };
 
-const allTf = () => allTfFiles(INFRA).map((f) => ({ file: f, text: readFileSync(f, 'utf8') }));
-const dataTf = () => readFileSync(join(INFRA, 'modules/data/main.tf'), 'utf8');
+// Structural assertions must read CONFIG, never comments. Without this a rail
+// that has been commented out still satisfies a string match — exactly what
+// happened when a teardown left `# Was: prevent_destroy = true` behind and the
+// guards stayed green anyway. Hash line comments and slash-star block comments
+// are stripped; `//` is deliberately left alone, because tf string literals
+// legitimately contain `https://`.
+const stripComments = (text: string): string =>
+  text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/#.*$/gm, '');
+
+const readTf = (rel: string) => stripComments(readFileSync(join(INFRA, rel), 'utf8'));
+
+const allTf = () =>
+  allTfFiles(INFRA).map((f) => ({ file: f, text: stripComments(readFileSync(f, 'utf8')) }));
+const dataTf = () => readTf('modules/data/main.tf');
 
 describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
   it('no DEEP_ARCHIVE anywhere in the infra', () => {
@@ -50,6 +62,74 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
 
   it('abandoned multipart uploads are swept', () => {
     expect(dataTf()).toContain('abort_incomplete_multipart_upload');
+  });
+});
+
+/**
+ * Versioning is the only thing standing between a bug in the object sweep (D6)
+ * and permanently destroyed photos, so it is guarded as tightly as the storage
+ * classes. Its paired expiry rule is what stops it costing forever.
+ */
+describe('bucket versioning guards', () => {
+  it('the objects bucket is versioned, and the resource cannot be destroyed', () => {
+    const text = dataTf();
+    const at = text.indexOf('resource "aws_s3_bucket_versioning"');
+    expect(at, 'objects bucket is NOT versioned').toBeGreaterThan(-1);
+    const block = text.slice(at, text.indexOf('\n}\n', at));
+    expect(block).toMatch(/status\s*=\s*"Enabled"/);
+    expect(block).toContain('prevent_destroy = true');
+  });
+
+  it('noncurrent versions expire, so the safety net cannot bill forever', () => {
+    const text = dataTf();
+    const rule = text.slice(text.indexOf('expire-noncurrent-versions'));
+    expect(rule, 'no expire-noncurrent-versions rule').not.toBe('');
+    expect(rule).toContain('noncurrent_version_expiration');
+    const days = Number(rule.match(/noncurrent_days\s*=\s*(\d+)/)![1]);
+    // Below 30 stops mirroring museum's trash window; above 90 holds deleted
+    // bytes longer than GLACIER_IR's minimum duration for no added protection.
+    expect(days).toBeGreaterThanOrEqual(30);
+    expect(days).toBeLessThanOrEqual(90);
+  });
+
+  it('the execution role cannot hard-delete a version', () => {
+    // s3:DeleteObject on a versioned bucket only writes a delete marker.
+    // DeleteObjectVersion would let the API destroy a photo outright.
+    const iam = readTf('modules/compute/iam.tf');
+    expect(iam).not.toContain('s3:DeleteObjectVersion');
+  });
+});
+
+describe('alarm guards', () => {
+  const computeTf = () => readTf('modules/compute/main.tf');
+
+  it('both lambdas have an Errors alarm wired to the SNS topic', () => {
+    const text = computeTf();
+    expect(text).toContain('aws_sns_topic" "alarms');
+    const alarms = text.match(/resource "aws_cloudwatch_metric_alarm"/g) ?? [];
+    expect(alarms).toHaveLength(2);
+    for (const fn of ['aws_lambda_function.api', 'aws_lambda_function.trash_purge']) {
+      expect(text, `no alarm references ${fn}`).toContain(`FunctionName = ${fn}.function_name`);
+    }
+    // Regex, not an exact string: `tofu fmt` realigns this block whenever a
+    // longer attribute name is added, and that must not fail the guard.
+    expect(text).toMatch(/alarm_actions\s*=\s*\[aws_sns_topic\.alarms\.arn\]/);
+  });
+
+  it('the daily cron is evaluated over a daily window, not a 5-minute one', () => {
+    const text = computeTf();
+    const purge = text.slice(text.indexOf('"trash_purge_errors"'));
+    expect(Number(purge.match(/period\s*=\s*(\d+)/)![1])).toBe(86400);
+  });
+
+  it('the deployer policy can create the topic and the alarms', () => {
+    const policy = JSON.parse(readFileSync(join(INFRA, 'deployer-policy.json'), 'utf8')) as {
+      Statement: Array<{ Action: string[] }>;
+    };
+    const actions = policy.Statement.flatMap((s) => s.Action);
+    for (const needed of ['sns:CreateTopic', 'sns:Subscribe', 'cloudwatch:PutMetricAlarm']) {
+      expect(actions, `deployer cannot ${needed}`).toContain(needed);
+    }
   });
 });
 
@@ -113,6 +193,18 @@ describe('deploy target guards', () => {
     expect(target('plan')).toMatch(/^plan:.*build-lambda/);
   });
 
+  it('every state-mutating target checks the account first', () => {
+    // The bucket name embeds the account id, so wrong-account credentials plan a
+    // rename, which tofu executes as destroy-and-recreate. prevent_destroy saves
+    // the bucket and table; nothing saves the lambdas, role or SNS topic.
+    for (const name of ['plan', 'deploy', 'destroy']) {
+      expect(target(name), `${name} does not depend on guard-account`).toMatch(
+        new RegExp(`^${name}:.*guard-account`),
+      );
+    }
+    expect(target('guard-account')).toContain('ACCOUNT MISMATCH');
+  });
+
   it('destroy is scoped to the stateless modules only — never a bare destroy', () => {
     const body = target('destroy');
     expect(body).toContain('-target=module.compute');
@@ -124,6 +216,28 @@ describe('deploy target guards', () => {
     for (const name of ['plan', 'deploy', 'destroy']) {
       expect(target(name), `${name} hardcodes -var region=`).not.toMatch(/-var\s+region=/);
     }
+  });
+});
+
+describe('config/tofu default agreement (D11)', () => {
+  it('free_plan_storage_bytes matches the config.ts default (10 TiB)', () => {
+    const TEN_TIB = 10 * 1024 ** 4;
+
+    const tf = readFileSync(join(INFRA, 'modules/compute/variables.tf'), 'utf8');
+    const block = tf.slice(tf.indexOf('variable "free_plan_storage_bytes"'));
+    const tfDefault = Number(block.match(/default\s*=\s*(\d+)/)![1]);
+
+    const config = readFileSync(join(import.meta.dirname, '../../src/config.ts'), 'utf8');
+    const expr = config.match(/FREE_PLAN_STORAGE_BYTES\s*\?\?\s*([0-9*\s.]+)\)/)![1]!;
+    // The default is written as an expression (10 * 1024 ** 4); evaluate the
+    // literal arithmetic rather than duplicating the constant here.
+    const configDefault = Number(
+      // eslint-disable-next-line no-new-func
+      Function(`"use strict";return (${expr})`)(),
+    );
+
+    expect(configDefault).toBe(TEN_TIB);
+    expect(tfDefault).toBe(configDefault);
   });
 });
 
@@ -153,8 +267,7 @@ describe('table + compute guards', () => {
   });
 
   it('the Function URL uses auth NONE (CloudFront is the canonical path)', () => {
-    const compute = readFileSync(join(INFRA, 'modules/compute/main.tf'), 'utf8');
-    expect(compute).toContain('authorization_type = "NONE"');
+    expect(readTf('modules/compute/main.tf')).toContain('authorization_type = "NONE"');
   });
 
   it('the public Function URL also grants anonymous lambda:InvokeFunctionUrl', () => {
@@ -162,7 +275,7 @@ describe('table + compute guards', () => {
     // policy statement is a separate resource that the console adds silently
     // and the API does not. Deleting it would look like a working plan and a
     // dead deployment.
-    const compute = readFileSync(join(INFRA, 'modules/compute/main.tf'), 'utf8');
+    const compute = readTf('modules/compute/main.tf');
     const stmt = compute.slice(compute.indexOf('resource "aws_lambda_permission" "api_public_url"'));
     expect(stmt, 'no api_public_url permission').not.toBe('');
     const block = stmt.slice(0, stmt.indexOf('\n}'));
@@ -171,10 +284,76 @@ describe('table + compute guards', () => {
     expect(block).toMatch(/function_url_auth_type\s*=\s*"NONE"/);
   });
 
+  it('the table carries deletion protection', () => {
+    // The second, independent rail on the table: prevent_destroy stops tofu,
+    // deletion_protection_enabled stops everyone else including the console.
+    expect(dataTf()).toMatch(/deletion_protection_enabled\s*=\s*true/);
+  });
+
   it('stateful resources carry prevent_destroy', () => {
     const text = dataTf();
     const count = (text.match(/prevent_destroy = true/g) ?? []).length;
     expect(count).toBeGreaterThanOrEqual(2); // table + objects bucket
+  });
+
+  it('every deployer-policy statement uses only IAM-recognised keys', () => {
+    // IAM rejects a document containing an unknown statement key outright
+    // (MalformedPolicyDocument), and JSON has no comment syntax to reach for —
+    // so an explanatory key added in good faith breaks the whole policy.
+    const allowed = new Set([
+      'Sid', 'Effect', 'Principal', 'NotPrincipal',
+      'Action', 'NotAction', 'Resource', 'NotResource', 'Condition',
+    ]);
+    const policy = JSON.parse(readFileSync(join(INFRA, 'deployer-policy.json'), 'utf8')) as {
+      Statement: Array<Record<string, unknown>>;
+    };
+    for (const st of policy.Statement) {
+      const extra = Object.keys(st).filter((k) => !allowed.has(k));
+      expect(extra, `statement ${String(st.Sid)} has non-IAM keys`).toEqual([]);
+    }
+  });
+
+  it('the store-delete Deny is load-bearing, not decorative', () => {
+    // A Deny stacked on an OMISSION does nothing: the actions were already
+    // denied by default, so removing the Deny for a teardown changes nothing and
+    // the destroy still 403s (which is exactly what happened on 2026-08-17).
+    // So assert BOTH halves: the deletes are allowed, and the Deny is what
+    // actually withholds them. Then lifting the Deny genuinely enables teardown.
+    const policy = JSON.parse(readFileSync(join(INFRA, 'deployer-policy.json'), 'utf8')) as {
+      Statement: Array<{ Effect: string; Action: string[] }>;
+    };
+    const acts = (effect: string) =>
+      policy.Statement.filter((s) => s.Effect === effect).flatMap((s) => s.Action);
+    const allowed = acts('Allow');
+    // Wildcards count: s3:Delete* covers s3:DeleteBucket.
+    const covers = (list: string[], action: string) =>
+      list.some((a) => a === action || (a.endsWith('*') && action.startsWith(a.slice(0, -1))));
+
+    for (const action of ['s3:DeleteBucket', 'dynamodb:DeleteTable']) {
+      expect(covers(allowed, action), `${action} is not Allowed — the Deny would be decorative`).toBe(true);
+      expect(acts('Deny'), `${action} is not Denied — the rail is missing`).toContain(action);
+    }
+  });
+
+  it('listing actions are granted on * — resource-scoping them silently 403s', () => {
+    // logs:DescribeLogGroups is a LIST call: AWS authorises it against a
+    // placeholder ARN with an EMPTY name
+    // (arn:aws:logs:...:log-group::log-stream:), which can never match a scoped
+    // pattern like log-group:/aws/lambda/ente-sl-*. Scoping it looks correct,
+    // reads correct, and fails mid-apply — it cost one apply on 2026-08-17.
+    // cloudwatch:DescribeAlarms is here defensively, not from observation: the
+    // alarms did read fine under a scoped ARN, but AWS's service authorization
+    // reference lists DescribeAlarms with no resource types, so relying on that
+    // leniency is not worth another mid-apply failure.
+    const policy = JSON.parse(readFileSync(join(INFRA, 'deployer-policy.json'), 'utf8')) as {
+      Statement: Array<{ Effect: string; Action: string[]; Resource: string | string[] }>;
+    };
+    for (const action of ['logs:DescribeLogGroups', 'cloudwatch:DescribeAlarms']) {
+      const ok = policy.Statement.some(
+        (s) => s.Effect === 'Allow' && s.Action.includes(action) && s.Resource === '*',
+      );
+      expect(ok, `${action} must be Allowed on Resource "*", not a scoped ARN`).toBe(true);
+    }
   });
 
   it('deployer policy is valid JSON scoped to ente-sl-*', () => {

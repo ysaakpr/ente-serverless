@@ -3,9 +3,23 @@
 # Generate once:  openssl rand -base64 32
 hashing_key = "REPLACE-ME-base64-32-bytes"
 
-# Must be an SES-verified identity IN `region` below, and the account must be
-# out of the SES sandbox or mail only reaches pre-verified recipients.
-mail_from = "verified-identity@your-domain"
+# Any SES-verified identity in `region` below. A plain ADDRESS is fine — you do
+# NOT need a domain. Verify your own inbox in the SES console for that region
+# (it mails you a confirmation link) and put it here.
+#
+# Staying in the SES sandbox is fine for a private server, and is the default:
+# it caps sending at 200/day and delivers only to *verified* recipients, which
+# here is a feature rather than a limit — verify each person who should be able
+# to hold an account, once each. Only request production access if strangers
+# need to sign themselves up.
+#
+# Deliverability: sending from an @gmail.com-style address means SPF/DKIM cannot
+# align with that domain's DMARC, so mail may be spam-filed. Tolerable for codes
+# you send to yourself; a ~$12/yr domain fixes it properly if it annoys you.
+#
+# Misconfiguration shows up at runtime, not at apply: SES rejecting the send
+# makes POST /users/ott return 500 with the code already stored but undelivered.
+mail_from = "you@example.com"
 
 # The single source of truth for where this deploys. `make plan` / `make deploy`
 # pass only -var-file, so plan and apply can never disagree on the region — and
@@ -13,3 +27,15 @@ mail_from = "verified-identity@your-domain"
 # Moving it later means a SECOND deployment, not a migration: the table and
 # bucket carry prevent_destroy.
 region = "ap-southeast-1"
+
+# Optional. Where CloudWatch alarms are mailed; omit and it follows mail_from.
+# Either way, CONFIRM the subscription link AWS sends, or alarms go nowhere.
+# alarm_email = "ops@example.com"
+
+# Names everything: table ente-sl-<env>, bucket ente-sl-<env>-objects-<account>,
+# both lambdas, the IAM role, the log groups, the Env tag. The deployer policy is
+# scoped to ente-sl-* so any value works.
+# SET THIS BEFORE THE FIRST APPLY. Changing it afterwards renames the table and
+# the bucket, which forces a replacement that prevent_destroy will refuse —
+# recovering from that means editing the module and doing `tofu state mv`.
+env_name = "prod"

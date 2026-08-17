@@ -72,11 +72,17 @@ source says Y — source won).
   `{storageBonuses: []}`, billing free plan `{storage, duration: 100,
   period: "days"}`, subscription id = userID. Shapes from source; self-host
   capture should be copied verbatim once the oracle runs.
-- **D11 [DECIDED 2026-08-16] Free plan storage default = effectively
-  unlimited (1 PiB).** Museum's constant is 10 GiB; ours stays env-configurable
-  (`FREE_PLAN_STORAGE_BYTES`) but defaults to 1 PiB in config.ts and the tofu
-  variable so quota never interferes on a self-host. The 426 quota path stays
-  covered by tests via the override.
+- **D11 [DECIDED 2026-08-16, REVISED 2026-08-17] Free plan storage default =
+  10 TiB.** Museum's constant is 10 GiB; ours stays env-configurable
+  (`FREE_PLAN_STORAGE_BYTES`) but defaults high, because it's the user's own
+  bucket and bill and quota should not interfere on a self-host. Originally
+  1 PiB ("effectively unlimited"); lowered to **10 TiB = 10995116277760** on
+  request — still far past any realistic library, but a real ceiling rather
+  than a number chosen to never trigger, so a runaway client hits 426 instead
+  of an S3 invoice. Binary units throughout, matching museum's 10 GiB
+  (10737418240) and the rest of this repo. Set in config.ts and the tofu
+  variable `free_plan_storage_bytes`; the 426 quota path stays covered by
+  tests via the override.
 
 ## Corrections to the build plan (source beat the plan doc)
 
@@ -183,8 +189,9 @@ source says Y — source won).
     the first account); ours is the userID. Stable per user either way, and we
     have no subscription table to draw a serial from. Revisit only if a client
     is found to depend on it.
-  - *Known divergence:* free-plan storage is env-configured (`1 PiB` default)
-    where museum ships 10 GiB — pre-existing self-host decision, not new here.
+  - *Known divergence:* free-plan storage is env-configured (`10 TiB` default,
+    D11) where museum ships 10 GiB — pre-existing self-host decision, not new
+    here.
 
 - **D32 [GATE FINDING 2026-08-17] The auth token must also be accepted as a
   `?token=` query param.** The desktop (Electron) client logged a wall of
@@ -307,6 +314,40 @@ source says Y — source won).
     invisible locally (dev runs the TS directly) and would have surfaced only
     as a 500 in the deployed Lambda; caught by invoking the built artifact,
     and guarded in test/infra (mutation-checked). Bundle is 481 KB.
+
+- **D37 [GATE FINDING 2026-08-17, first cloud upload] Presigned PUTs must bind
+  Content-MD5 into the signature. This CORRECTS D26's sub-divergence.** D26
+  claimed "SigV4 query auth ignores unsigned headers, verified against
+  LocalStack, so the app's headers still pass". That is false against real S3.
+  The app sends `Content-MD5` on every single-part PUT and on every multipart
+  part; real S3 treats Content-MD5 as an integrity header and refuses a request
+  carrying one the signature does not cover:
+  `AccessDenied / "There were headers present in the request which were not
+  signed" / HeadersNotSigned: content-md5`. Every upload in the first cloud
+  backup failed this way (~2000 files, 4 retries each), while every local suite
+  stayed green — **LocalStack and the memory adapter do not verify signatures at
+  all**, so nothing local could ever have caught it. Same prod/local drift class
+  as D33.
+  - *Fix needed no protocol change:* the handler already received the values and
+    discarded them. `POST /files/upload-url` parsed `contentMD5`,
+    `POST /files/multipart-upload-url` parsed and length-checked `partMd5s`, and
+    both then called the port without them. They are now threaded through
+    `Blobs.presignPut(key, expiry, contentMd5?)` and
+    `Blobs.createMultipart(key, partCount, expiry, partMd5s?)`.
+  - *Mechanism, verified rather than assumed:* passing `ContentMD5` on the
+    command is sufficient and necessary — the presigner signs the header because
+    it is present and non-hoistable. `signableHeaders: ['content-md5']` was
+    tried and **does nothing**: with no such header set it signs nothing, and
+    with one set it changes no output. It is deliberately absent so the adapter
+    carries no cargo-cult option.
+  - *Content-Length is deliberately left unsigned.* S3's error named only
+    content-md5; signing content-length makes presigned PUTs brittle. Revisit
+    only if a capture or a real error names it.
+  - *Guarded* in `test/unit/presign-md5.test.ts`, which needs neither AWS nor
+    docker because SigV4 presigning is pure local computation: it asserts
+    `X-Amz-SignedHeaders` contains `content-md5` when an MD5 is supplied and
+    omits it when not, plus that both V2 handlers forward the client MD5s to the
+    port. Mutation-checked (dropping `ContentMD5` fails the suite).
 
 ## Environment facts discovered while building
 

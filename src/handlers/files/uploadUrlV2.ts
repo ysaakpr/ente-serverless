@@ -6,9 +6,13 @@
  *  - POST /files/multipart-upload-url         {contentLength, partLength, partMd5s}
  *                                             -> bare {objectKey, partURLs, completeURL}
  * src: pkg/controller/file.go GetUploadURLWithMetadata /
- * GetMultipartUploadURLWithMetadata. Divergence D26: we presign without
- * binding Content-MD5/Content-Length into the signature (unsigned headers are
- * ignored by SigV4 query auth, so the app's headers still pass).
+ * GetMultipartUploadURLWithMetadata.
+ *
+ * The MD5s the client sends here are bound into the presigned signature, which
+ * is NOT optional: real S3 rejects a PUT carrying an unsigned Content-MD5
+ * (D37, which corrects D26's LocalStack-derived assumption that unsigned
+ * headers are ignored). Content-Length is deliberately left unsigned — S3 named
+ * only content-md5, and signing content-length makes presigned PUTs brittle.
  */
 
 import type { Context } from 'hono';
@@ -40,7 +44,11 @@ export const getUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   await assertQuota(deps, userId, body.contentLength);
 
   const objectKey = `${userId}/${deps.rand.uuid()}`;
-  const url = await deps.blobs.presignPut(objectKey, deps.config.presignExpirySeconds);
+  const url = await deps.blobs.presignPut(
+    objectKey,
+    deps.config.presignExpirySeconds,
+    body.contentMD5,
+  );
   return c.json({ objectKey, url });
 };
 
@@ -68,6 +76,7 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
     objectKey,
     partCount,
     deps.config.presignExpirySeconds,
+    body.partMd5s ?? undefined,
   );
   return c.json({
     objectKey,

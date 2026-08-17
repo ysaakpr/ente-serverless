@@ -63,10 +63,19 @@ export class S3Blobs implements Blobs {
     );
   }
 
-  async presignPut(key: string, expiresInSeconds: number): Promise<string> {
+  /**
+   * Passing ContentMD5 is all that is needed to land `content-md5` in
+   * X-Amz-SignedHeaders — the presigner signs the header because it is present
+   * and cannot be hoisted to the query string. Real S3 rejects a PUT whose
+   * Content-MD5 is NOT signed, so this argument is load-bearing, not a nicety
+   * (D37). Verified: `signableHeaders: ['content-md5']` adds nothing here and is
+   * deliberately not used — with no such header set it signs nothing at all.
+   * Undefined leaves the header off, so MD5-less callers stay signed host-only.
+   */
+  async presignPut(key: string, expiresInSeconds: number, contentMd5?: string): Promise<string> {
     return getSignedUrl(
       getS3Client(this.config),
-      new PutObjectCommand({ Bucket: this.bucket, Key: key }),
+      new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentMD5: contentMd5 }),
       { expiresIn: expiresInSeconds },
     );
   }
@@ -79,7 +88,12 @@ export class S3Blobs implements Blobs {
     );
   }
 
-  async createMultipart(key: string, partCount: number, expiresInSeconds: number): Promise<MultipartUrls> {
+  async createMultipart(
+    key: string,
+    partCount: number,
+    expiresInSeconds: number,
+    partMd5s?: readonly string[],
+  ): Promise<MultipartUrls> {
     const client = getS3Client(this.config);
     const created = await client.send(
       new CreateMultipartUploadCommand({ Bucket: this.bucket, Key: key }),
@@ -94,6 +108,8 @@ export class S3Blobs implements Blobs {
             Key: key,
             UploadId: uploadID,
             PartNumber: i + 1,
+            // Per-part MD5 — the app sends one per part, so each must be signed.
+            ContentMD5: partMd5s?.[i],
           }),
           { expiresIn: expiresInSeconds },
         ),
