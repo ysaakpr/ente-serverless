@@ -5,7 +5,7 @@ import { MemoryDb } from '../../src/adapters/memory/db.memory.ts';
 import { MemoryBlobs } from '../../src/adapters/memory/blobs.memory.ts';
 import { MemoryMail } from '../../src/adapters/memory/mail.memory.ts';
 import { RealRand, TestClock } from '../../src/adapters/memory/system.memory.ts';
-import { configFromEnv } from '../../src/config.ts';
+import { configFromEnv, type Config } from '../../src/config.ts';
 import { IdGenerator } from '../../src/domain/ids.ts';
 import { buildApp } from '../../src/app.ts';
 import { sodiumReady } from '../../src/domain/tokens.ts';
@@ -20,7 +20,15 @@ export interface TestWorld {
   ) => Promise<Response>;
 }
 
-export const makeWorld = async (): Promise<TestWorld> => {
+/**
+ * `config` overrides are applied BEFORE buildApp, which matters for the knobs
+ * read at wiring time rather than per request — `logRequests` registers the
+ * access-log middleware or does not. Anything read per request can just be
+ * mutated on `world.deps.config` afterwards.
+ */
+export const makeWorld = async (
+  configOverrides: Partial<Config> = {},
+): Promise<TestWorld> => {
   await sodiumReady();
   const clock = new TestClock();
   const deps = {
@@ -33,6 +41,7 @@ export const makeWorld = async (): Promise<TestWorld> => {
       ...configFromEnv(),
       hardcodedOttSuffix: undefined,
       hardcodedOttValue: undefined,
+      ...configOverrides,
     },
     ids: new IdGenerator(clock),
     hashingKey: new Uint8Array(32).fill(7),

@@ -7,12 +7,12 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 |---|---|---|---|---|---|
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
-| auth-token.test.ts | query-param auth (gate finding D32) | M5 | 8 | 8 | ✅ |
+| auth-token.test.ts | query-param auth (gate finding D32) | M5 | 13 | 13 | ✅ |
 | collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
 | cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
 | e2e.int.test.ts | integration (LocalStack) | M1/M3 | 7 | 7 | ✅ |
 | entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
-| file-data.test.ts | [FILE-DATA] | M6 | 7 | 7 | ✅ |
+| file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
 | lifecycle.test.ts | infra guards | M7 | 27 | 27 | ✅ |
@@ -33,4 +33,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
 
-**Total: 235/235 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 243/243 passing.** CI must fail if any implemented endpoint is below 100%.

@@ -21,6 +21,7 @@ import type { Deps } from '../deps.ts';
 import { keys } from '../domain/model.ts';
 import { tokenHash } from '../domain/tokens.ts';
 import { appFromClientPackage, type App } from '../domain/apps.ts';
+import { MICROS_PER_SECOND } from '../lib/time.ts';
 
 export interface AuthInfo {
   userId: number;
@@ -50,6 +51,22 @@ export const requireAuth = (deps: Deps) => async (c: Context, next: Next) => {
   if (!token) return c.json({ error: 'missing token' }, 401);
   const row = await deps.db.get<TokenRow>(keys.token(tokenHash(token)).pk, 'META');
   if (!row) return c.json({ error: 'invalid token' }, 401);
+
+  // Optional idle expiry (SESSION_IDLE_EXPIRY_SECONDS, default 0 = off, which is
+  // museum parity — see D40). `lastUsedTime` is bumped below on every hit but was
+  // never READ before this, so a token recovered from anywhere stayed valid for
+  // ever. Falls back to creationTime because the bump is fire-and-forget and may
+  // legitimately be missing. An expired token is revoked and reported exactly
+  // like a revoked one, so this adds no new wire shape.
+  const idleLimit = deps.config.sessionIdleExpirySeconds;
+  if (idleLimit > 0) {
+    const lastSeen = Math.max(row.lastUsedTime ?? 0, row.creationTime ?? 0);
+    if (deps.clock.nowMicros() - lastSeen > idleLimit * MICROS_PER_SECOND) {
+      deps.db.delete(row.pk, row.sk).catch(() => {});
+      return c.json({ error: 'invalid token' }, 401);
+    }
+  }
+
   c.set('auth', {
     userId: row.userId,
     token,

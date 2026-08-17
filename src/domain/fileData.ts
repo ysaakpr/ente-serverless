@@ -29,10 +29,30 @@ export interface FdRow {
   [attr: string]: unknown;
 }
 
+/**
+ * Shape of every objectID this server issues: `pv_<uuid>` / `pi_<uuid>` from
+ * previewUploadUrl. PUT /files/video-data takes the id back from the CLIENT and
+ * interpolates it into an S3 key, so it has to be checked on the way in — an id
+ * carrying `/` or `..` would otherwise be pasted straight into the object path.
+ * Deliberately a little looser than a strict uuid match (any URL-safe token after
+ * the prefix) so a client that decorates the id still works, while `/`, `\` and
+ * `.` stay impossible. See D41.
+ */
+const OBJECT_ID_RE = /^p[vi]_[A-Za-z0-9_-]{1,64}$/;
+
+export const isValidObjectId = (objectId: string): boolean => OBJECT_ID_RE.test(objectId);
+
 // ente/filedata/path.go
 export const basePrefix = (fileId: number, ownerId: number) => `${ownerId}/file-data/${fileId}/`;
-export const objectKey = (fileId: number, ownerId: number, type: FdType, objectId: string) =>
-  `${basePrefix(fileId, ownerId)}${type}/${objectId}`;
+export const objectKey = (fileId: number, ownerId: number, type: FdType, objectId: string) => {
+  // Invariant, not input validation: the edge already rejects malformed ids with
+  // a 400. This is the backstop so no future caller can build an escaping key —
+  // whether S3 itself would normalise `..` is beside the point (D41).
+  if (!isValidObjectId(objectId)) {
+    throw new Error(`refusing to build an object key from objectID ${JSON.stringify(objectId)}`);
+  }
+  return `${basePrefix(fileId, ownerId)}${type}/${objectId}`;
+};
 export const metadataKey = (fileId: number, ownerId: number, type: FdType, objectId?: string | null) =>
   type === 'vid_preview'
     ? `${objectKey(fileId, ownerId, type, objectId!)}_playlist`

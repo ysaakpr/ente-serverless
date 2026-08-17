@@ -10,12 +10,13 @@ import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import {
   getOwnedFile,
+  isValidObjectId,
   metadataKey,
   objectKey,
   upsertFdRow,
   writeMetadataObject,
 } from '../../domain/fileData.ts';
-import { badRequest } from '../../lib/errors.ts';
+import { badRequest, errBadRequestSentinel } from '../../lib/errors.ts';
 import { ApiError } from '../../lib/errors.ts';
 
 const putSchema = z.object({
@@ -58,6 +59,10 @@ const videoSchema = z.object({
 
 export const putVideoData = (deps: Deps) => async (c: Context) => {
   const body = videoSchema.parse(await c.req.json());
+  // objectID is client-supplied and lands in an S3 key; check it BEFORE anything
+  // else touches it. 400 {} is the shape museum answers on this route for every
+  // malformed objectID we probed (D41).
+  if (!isValidObjectId(body.objectID)) throw errBadRequestSentinel();
   const { userId } = auth(c);
   await getOwnedFile(deps, userId, body.fileID);
 

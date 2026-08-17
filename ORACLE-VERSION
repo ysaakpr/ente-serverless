@@ -36,5 +36,18 @@ Captures:     full capture-diff parity still pending (DECISIONS.md D2). Two targ
                  ente-oracle-museum` resets it while Postgres keeps the accounts.
                  Also: /users/srp/update REQUIRES updatedKeyAttr; omitting it is a
                  500 with an EMPTY body, which is easy to misread as a real finding.
+              6. tokens/file-data semantics (D40, D41). Read museum's Postgres
+                 schema directly (docker exec ente-oracle-postgres psql -U pguser
+                 -d ente_db -c '\d tokens'), which is the fastest authoritative
+                 answer for "does museum track X": the tokens table has NO expiry
+                 column, so museum sessions never expire. Plus a differential of
+                 PUT /files/video-data objectID shapes — museum answers 400 {} to
+                 all of them, including a well-formed id on a nonexistent fileID.
+                 LIMIT of this oracle: it cannot exercise any upload path from the
+                 host. docker-compose.oracle.yml does not publish MinIO's port and
+                 museum presigns for the in-network host `minio:3200`, so the
+                 signature breaks if you rewrite the host. Anything needing a
+                 committed file (file-data quota accounting, real vid_preview
+                 commits) needs the client run INSIDE the compose network.
               Captures 1-2 predate the D31 compose fix and needed the OTT scraped
               from museum's stderr; captures 3-4 ran against the fixed compose.

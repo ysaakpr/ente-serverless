@@ -442,6 +442,77 @@ source says Y — source won).
     the port was never reached. Mutation-checked: deleting the bounds line fails
     all three guard tests.
 
+- **D40 [SECURITY 2026-08-17] Session tokens can now expire on idle, but the
+  default is OFF because museum has no expiry at all.** Second of the audit's
+  medium findings.
+  - The gap: `requireAuth` WROTE `lastUsedTime` on every request and never read
+    it, and nothing else bounded a token's life. A token recovered from anywhere
+    stayed valid for ever. Combined with `?token=` riding the query string on
+    every private route (D32, not removable — the image-src redirects need it),
+    that is a long tail.
+  - **ORACLE-CAPTURED**: museum's `tokens` table is `user_id, token,
+    creation_time, ip, user_agent, is_deleted, last_used_at, app` — **no expiry
+    column of any kind**. So museum tokens never expire, and making ours expire
+    unconditionally would log real devices out of a photo app. Hence
+    `SESSION_IDLE_EXPIRY_SECONDS`, default `0` = off = museum parity. Switching it
+    on is a deliberate, documented divergence the operator opts into.
+  - When set, `requireAuth` compares now against `max(lastUsedTime, creationTime)`
+    — the creationTime fallback matters because the bump is fire-and-forget and
+    may legitimately be missing — then REVOKES the row and answers the same
+    `401 {"error":"invalid token"}` a revoked token gets. No new wire shape, so an
+    expired session is indistinguishable from a logged-out one.
+  - Scope correction to the original finding: **no log sink currently captures
+    query strings.** CloudFront has no `logging_config`, the bucket has no access
+    logging, and our own access log renders `c.req.path`. So the token-in-logs
+    exposure was latent, not active. It is now guarded by
+    `describe('access log never contains the token')` in
+    `test/unit/auth-token.test.ts`, which asserts the log line carries no `?`, no
+    `token=`, and not the token itself — so a future switch to `c.req.url` cannot
+    quietly start leaking bearer tokens into CloudWatch.
+  - *Guarded* by `describe('session idle expiry')`: off-by-default (a token idled
+    ten years still authenticates), the opt-in revoking and 401ing, activity
+    inside the window keeping a session alive indefinitely (which fails if the
+    `lastUsedTime` bump is not being read), and the missing-`lastUsedTime`
+    fallback. Mutation-checked.
+
+- **D41 [SECURITY 2026-08-17] The client-supplied `objectID` is validated before
+  it reaches an S3 key, and `objectKey()` refuses to build an escaping key.**
+  Third of the audit's findings.
+  - The gap: `PUT /files/video-data` took `objectID` as `z.string().min(1)` and
+    `objectKey()` interpolated it into
+    `<owner>/file-data/<fileID>/<type>/<objectID>`, then persisted it for the read
+    side to rebuild. Every id this server issues is `pv_<uuid>` / `pi_<uuid>` from
+    `previewUploadUrl`, so the commit had no business accepting anything else.
+    Whether S3 would actually resolve a `..` segment is beside the point — closing
+    it is cheap and the alternative is arguing about S3 key normalisation.
+  - Two layers on purpose: `isValidObjectId` at the edge for a clean 400, and the
+    same predicate asserted inside `objectKey()` as an invariant, so a future
+    ingress cannot reintroduce the hole. The pattern is deliberately looser than a
+    strict uuid (`p[vi]_` + up to 64 URL-safe chars) so a client that decorates the
+    id still works, while `/`, `\` and `.` stay impossible.
+  - **ORACLE-CAPTURED, and it moved us TOWARDS parity.** Museum answers 400 `{}`
+    to every objectID shape on this route. Measured differentially against the
+    pinned image, five shapes (one well-formed, four malformed):
+    - before: `ours 404 404 404 404 404` vs `museum 400 400 400 400 400`
+    - after:  `ours 404 400 400 400 400` vs `museum 400 400 400 400 400`
+  - **Pre-existing divergence left alone, now measured:** the remaining case is a
+    well-formed objectID with a nonexistent fileID, where `getOwnedFile` answers
+    404 and museum answers 400. It predates this fix (the "before" row above is
+    HEAD). Not fixed here because museum is inconsistent per route — captured:
+    `/files/video-data` 400, `/files/data` (mldata) **404**,
+    `/files/data/preview-upload-url` 400 — so getting it right needs a
+    route-specific not-found status and more captures than this finding warrants.
+  - **Known gap, deliberately not changed:** file-data bytes (mldata,
+    vid_preview) never pass `assertQuota`, unlike the main upload path. Museum's
+    `file_data` table carries `size` with an index `(user_id, data_type,
+    is_deleted) INCLUDE (size)` — shaped exactly for a per-user SUM, which is
+    strong evidence museum does count it, but not proof that it feeds the quota
+    rather than reporting. Confirming it needs a real upload, which this oracle
+    cannot do from the host: docker-compose.oracle.yml does not publish MinIO's
+    port and museum's presigned URLs are signed for the in-network host `minio:3200`.
+    Left unchanged rather than guessed, since over-counting would hand users
+    spurious 426s.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

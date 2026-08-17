@@ -10,6 +10,7 @@ import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { signupAccount, type Account } from '../helpers/client.ts';
 import { createAlbum, uploadAndCommit, type UploadedFile } from '../helpers/upload.ts';
 import { b64 } from '../../src/lib/b64.ts';
+import { objectKey } from '../../src/domain/fileData.ts';
 
 let world: TestWorld;
 let account: Account;
@@ -217,5 +218,78 @@ describe('type gates + authz', () => {
     );
     expect(foreignPreview.status).toBe(403);
     expect((await world.request('PUT', '/files/data', { body: {} })).status).toBe(401);
+  });
+});
+
+/**
+ * objectID is the ONE client-controlled value that reaches an S3 key: PUT
+ * /files/video-data takes it back from the caller and objectKey() interpolates it
+ * into `<owner>/file-data/<fileID>/<type>/<objectID>`. Museum answers 400 {} to
+ * every malformed shape we probed on this route (D41).
+ */
+describe('objectID validation on PUT /files/video-data', () => {
+  const REJECTED = [
+    '../../../../9999/file-data/1/mldata', // escape to another user's prefix
+    'pv_a/../../escape',
+    'pv_a/b',
+    'pv_a.b', // no dots: blocks any `..` segment by construction
+    'plain-not-prefixed',
+    'xx_11111111',
+    `pv_${'a'.repeat(65)}`, // past the length bound
+  ];
+
+  it('rejects traversal and malformed ids with 400, writing nothing', async () => {
+    for (const objectID of REJECTED) {
+      const res = await world.request('PUT', '/files/video-data', {
+        token: account.token,
+        body: {
+          fileID: up.fileId,
+          objectID,
+          objectSize: 10,
+          playlist: 'cA==',
+          playlistHeader: 'aA==',
+        },
+      });
+      expect(res.status, objectID).toBe(400);
+    }
+
+    // No fd row was created by any of them.
+    const preview = await world.request(
+      'GET',
+      `/files/data/preview?fileID=${up.fileId}&type=vid_preview`,
+      { token: account.token },
+    );
+    expect(preview.status).toBe(404);
+  });
+
+  it('still accepts the server-issued objectID (round-trip unaffected)', async () => {
+    const urlRes = await world.request(
+      'GET',
+      `/files/data/preview-upload-url?fileID=${up.fileId}&type=vid_preview`,
+      { token: account.token },
+    );
+    const { objectID, url } = (await urlRes.json()) as { objectID: string; url: string };
+    const bytes = new Uint8Array(randomBytes(64));
+    await world.deps.blobs.uploadViaUrl(url, bytes);
+
+    const commit = await world.request('PUT', '/files/video-data', {
+      token: account.token,
+      body: {
+        fileID: up.fileId,
+        objectID,
+        objectSize: bytes.length,
+        playlist: b64(randomBytes(32)),
+        playlistHeader: b64(randomBytes(24)),
+      },
+    });
+    expect(commit.status).toBe(200);
+  });
+
+  /** The backstop: even if a future caller skips the edge check, no escaping key. */
+  it('objectKey refuses to build an escaping key at all', () => {
+    expect(() => objectKey(1, 2, 'vid_preview', 'pv_ok')).not.toThrow();
+    for (const bad of ['../x', 'pv_a/b', 'pv_a..b', '']) {
+      expect(() => objectKey(1, 2, 'vid_preview', bad), bad).toThrow(/refusing to build/);
+    }
   });
 });

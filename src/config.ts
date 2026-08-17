@@ -21,6 +21,13 @@ export interface Config {
   port: number;
   /** Per-request access log (make lan / make dev — the M5 gate needs it). */
   logRequests: boolean;
+  /**
+   * Idle lifetime for a session token, seconds. 0 = never expires, which is
+   * museum's behaviour and therefore the default: its `tokens` table has no
+   * expiry column at all (oracle schema, D40), so switching this on is a
+   * deliberate divergence that WILL log real devices out once they idle past it.
+   */
+  sessionIdleExpirySeconds: number;
 }
 
 export const configFromEnv = (): Config => ({
@@ -41,4 +48,5 @@ export const configFromEnv = (): Config => ({
   maxFileSizeBytes: Number(process.env.MAX_FILE_SIZE_BYTES ?? 10 * 1024 * 1024 * 1024),
   port: Number(process.env.PORT ?? 8080),
   logRequests: process.env.LOG_REQUESTS === '1',
+  sessionIdleExpirySeconds: Number(process.env.SESSION_IDLE_EXPIRY_SECONDS ?? 0),
 });
