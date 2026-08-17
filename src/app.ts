@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { handler } from './lib/http.ts';
 import { requireAuth } from './middleware/auth.ts';
+import { cors } from './middleware/cors.ts';
 
 import { ping } from './handlers/health/ping.ts';
 import { sendOtt } from './handlers/users/sendOtt.ts';
@@ -83,6 +84,11 @@ export const buildApp = (deps: Deps): Hono => {
       );
     });
   }
+
+  // Browser clients (web/desktop) preflight every call; museum answers CORS on
+  // every response and short-circuits OPTIONS. Registered after the logger so
+  // preflights still show up in the gate log. (D29)
+  app.use('*', cors());
 
   // [HEALTH]
   app.get('/ping', handler(ping(deps)));
