@@ -62,10 +62,21 @@ infra-test:
 	npx vitest run test/infra
 
 # Zip payloads for the tofu compute module (plain esbuild — no container).
+#
+# ESM_REQUIRE_SHIM: bundled CJS deps that call require() at runtime (qrcode's
+# PNG renderer does `require("fs")`) throw "Dynamic require ... is not
+# supported" in an ESM bundle. Local dev never sees it — node runs the TS
+# directly — so this only ever fails in the deployed Lambda. D36.
+# The import is aliased because src/lib/sodium.ts (D25) already imports
+# createRequire, and esbuild hoists that to the same top-level scope.
+ESM_REQUIRE_SHIM = import{createRequire as __entRequire}from'module';const require=__entRequire(import.meta.url);
+
 build-lambda:
 	npx esbuild src/lambda.ts --bundle --platform=node --format=esm --target=node22 \
+		--banner:js="$(ESM_REQUIRE_SHIM)" \
 		--outfile=dist/lambda/index.mjs --external:@aws-sdk/* --external:libsodium-wrappers
 	npx esbuild src/workers/trashPurge.ts --bundle --platform=node --format=esm --target=node22 \
+		--banner:js="$(ESM_REQUIRE_SHIM)" \
 		--outfile=dist/trash-purge/index.mjs --external:@aws-sdk/* --external:libsodium-wrappers
 	cp -R node_modules/libsodium-wrappers dist/lambda/node_modules/libsodium-wrappers 2>/dev/null || \
 		(mkdir -p dist/lambda/node_modules && cp -R node_modules/libsodium-wrappers node_modules/libsodium dist/lambda/node_modules/)

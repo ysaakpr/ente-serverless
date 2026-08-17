@@ -57,9 +57,15 @@ describe('billing stubs', () => {
   it('plans/v2 is public with a freePlan; subscription + verify return the free sub', async () => {
     const plans = await world.request('GET', '/billing/plans/v2');
     expect(plans.status).toBe(200);
-    const plansBody = (await plans.json()) as { plans: unknown[]; freePlan: { period: string } };
-    expect(plansBody.plans).toEqual([]);
-    expect(plansBody.freePlan.period).toBe('days');
+    // Captured 2026-08-17 — museum sends period "year" (D34), freePlan first.
+    expect(await plans.json()).toEqual({
+      freePlan: {
+        storage: world.deps.config.freePlanStorageBytes,
+        duration: 100,
+        period: 'year',
+      },
+      plans: [],
+    });
 
     const sub = await world.request('GET', '/billing/subscription', { token: account.token });
     const subBody = (await sub.json()) as { subscription: { productID: string } };
@@ -70,6 +76,15 @@ describe('billing stubs', () => {
       body: { paymentProvider: 'stripe', productID: 'free', verificationData: '' },
     });
     expect(((await verify.json()) as { subscription: { productID: string } }).subscription.productID).toBe('free');
+  });
+
+  it('user-plans mirrors plans/v2 but requires a token (gate finding D34)', async () => {
+    expect((await world.request('GET', '/billing/user-plans')).status).toBe(401);
+
+    const authed = await world.request('GET', '/billing/user-plans', { token: account.token });
+    expect(authed.status).toBe(200);
+    const publicPlans = await world.request('GET', '/billing/plans/v2');
+    expect(await authed.json()).toEqual(await publicPlans.json());
   });
 
   it('subscription requires auth', async () => {

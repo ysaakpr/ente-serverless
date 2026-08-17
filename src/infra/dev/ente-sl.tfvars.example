@@ -2,4 +2,14 @@
 # losing it orphans every email->user mapping (decision D4a).
 # Generate once:  openssl rand -base64 32
 hashing_key = "REPLACE-ME-base64-32-bytes"
-mail_from   = "verified-identity@your-domain"
+
+# Must be an SES-verified identity IN `region` below, and the account must be
+# out of the SES sandbox or mail only reaches pre-verified recipients.
+mail_from = "verified-identity@your-domain"
+
+# The single source of truth for where this deploys. `make plan` / `make deploy`
+# pass only -var-file, so plan and apply can never disagree on the region — and
+# your AWS CLI's own configured region is irrelevant to tofu, which reads this.
+# Moving it later means a SECOND deployment, not a migration: the table and
+# bucket carry prevent_destroy.
+region = "ap-southeast-1"

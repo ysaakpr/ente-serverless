@@ -11,6 +11,12 @@ export const keys = {
   userKeys: (userId: number) => ({ pk: `USER#${userId}`, sk: 'KEYS' }),
   userSrp: (userId: number) => ({ pk: `USER#${userId}`, sk: 'SRP' }),
   userUsage: (userId: number) => ({ pk: `USER#${userId}`, sk: 'USAGE' }),
+  /** Enabled 2FA: the TOTP secret + the client-encrypted copy for recovery. */
+  userTwoFactor: (userId: number) => ({ pk: `USER#${userId}`, sk: '2FA' }),
+  /** Secret handed out by /two-factor/setup, pending an /enable that proves it. */
+  twoFactorSetup: (userId: number) => ({ pk: `USER#${userId}`, sk: '2FASETUP' }),
+  /** Half-authenticated login awaiting a TOTP code; keyed by hash, like tokens. */
+  twoFactorSession: (sessionHash: string) => ({ pk: `2FASESSION#${sessionHash}`, sk: 'META' }),
   emailGuard: (emailHash: string) => ({ pk: `EMAIL#${emailHash}`, sk: 'META' }),
   srpUserGuard: (srpUserID: string) => ({ pk: `SRPUSER#${srpUserID}`, sk: 'META' }),
   srpSession: (sessionID: string) => ({ pk: `SRPSESSION#${sessionID}`, sk: 'META' }),

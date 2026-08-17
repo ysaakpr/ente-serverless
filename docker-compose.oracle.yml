@@ -25,8 +25,12 @@ services:
       ENTE_S3_B2_EU_CEN_ENDPOINT: http://minio:3200
       ENTE_S3_B2_EU_CEN_REGION: eu-central-2
       ENTE_S3_B2_EU_CEN_BUCKET: b2-eu-cen
-      ENTE_INTERNAL_HARDCODED-OTT_LOCAL-DOMAIN-SUFFIX: '@example.org'
-      ENTE_INTERNAL_HARDCODED-OTT_LOCAL-DOMAIN-VALUE: '123456'
+      # Underscores, NOT hyphens: museum's viper replacer maps both '.' and '-'
+      # in the config key (internal.hardcoded-ott.local-domain-suffix) to '_'.
+      # The hyphenated spelling silently does not bind — museum then mails a
+      # random OTT and every scripted capture 401s (D31).
+      ENTE_INTERNAL_HARDCODED_OTT_LOCAL_DOMAIN_SUFFIX: '@example.org'
+      ENTE_INTERNAL_HARDCODED_OTT_LOCAL_DOMAIN_VALUE: '123456'
 
   postgres:
     image: postgres:15

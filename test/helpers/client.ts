@@ -179,7 +179,12 @@ export const srpLogin = async (
   if (verify.status !== 200) throw new Error(`verify-session failed: ${verify.status}`);
   const body = (await verify.json()) as Record<string, unknown>;
   if (!client.checkM2(fromB64(body.srpM2 as string))) throw new Error('server M2 invalid');
-  return { token: openEncryptedToken(body.encryptedToken as string, keys), response: body };
+  // With 2FA enabled the server returns a twoFactorSessionID and no token at
+  // all; callers in that case read `response.twoFactorSessionID` instead.
+  const token = body.encryptedToken
+    ? openEncryptedToken(body.encryptedToken as string, keys)
+    : '';
+  return { token, response: body };
 };
 
 /** Pull the last OTT code for an email out of the mail spy. */

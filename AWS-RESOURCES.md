@@ -119,6 +119,14 @@ Ordered by how likely each is to bite on the first apply.
   Acceptable for a single-owner account; Secrets Manager or an SSM SecureString
   is the upgrade if this ever grows a second operator.
 
+- **Auth tokens can travel in the query string.** Museum accepts `?token=` on
+  every private route and the web/desktop client relies on it for thumbnails
+  (D32), so we match it. Query strings are logged by CloudFront/ALB access logs
+  by default and leak via `Referer` — if access logging is ever switched on for
+  this distribution, redact `token`, and never enable a cache policy that keys
+  on the full query string for these routes. Our own gate logger prints the
+  path only (verified), so `make lan` does not echo tokens.
+
 - **No abuse protection at the edge.** The Function URL is auth NONE, and there
   is no WAF, no rate limiting, and no geo restriction on the distribution. The
   app-level limits museum has are implemented (OTT: 10 active codes, 20 wrong
@@ -132,10 +140,13 @@ Ordered by how likely each is to bite on the first apply.
   possible here for the documented reason, so an origin shared-secret header is
   the realistic option if this matters later.
 
-- **No CORS on the API itself.** Only the S3 bucket has CORS. The mobile app
-  does not care, but pointing the ente **web** client at this `server_url`
-  would fail preflight — hono registers no CORS middleware and CloudFront adds
-  none. A known limitation, not a blocker for the mobile gate.
+- **CORS is served by the API itself, not the edge.** ~~No CORS on the API~~
+  (fixed 2026-08-17, D29): hono now answers preflights and sets museum's
+  header set on every response via `src/middleware/cors.ts`, so the ente
+  **web**/desktop client works against `server_url`. CloudFront still adds
+  none of its own — if a cache policy is ever put in front of these routes it
+  must vary on `Origin`, since `Access-Control-Allow-Origin` echoes the
+  caller. The S3 bucket keeps its own separate CORS config (row 4).
 
 - **Teardown is deliberately hard.** `prevent_destroy` on the table and bucket,
   `deletion_protection_enabled` on the table, no `force_destroy` on the bucket.

@@ -30,6 +30,14 @@ import {
   updateEmailMfa,
 } from './handlers/users/accountExtras.ts';
 import { deleteAccount, getDeleteChallenge } from './handlers/users/deleteAccount.ts';
+import {
+  disableTwoFactor,
+  enableTwoFactor,
+  recoverTwoFactor,
+  removeTwoFactor,
+  setupTwoFactor,
+  verifyTwoFactor,
+} from './handlers/users/twoFactor.ts';
 import { getUploadUrls } from './handlers/files/uploadUrls.ts';
 import { getMultipartUploadUrlV2, getUploadUrlV2, uploadEligibility } from './handlers/files/uploadUrlV2.ts';
 import { getMultipartUploadUrls } from './handlers/files/multipartUploadUrls.ts';
@@ -51,8 +59,14 @@ import { getCollectionById } from './handlers/collections/getById.ts';
 import { createEntityKey, ensureEntityKey, getEntityKey } from './handlers/entity/key.ts';
 import { createEntity, deleteEntity, entityDiff, updateEntity } from './handlers/entity/data.ts';
 import { getFeatureFlags, getRemoteStoreValue, updateRemoteStoreValue } from './handlers/stubs/remoteStore.ts';
-import { getPlansV2, getSubscription, verifySubscription } from './handlers/stubs/billing.ts';
+import {
+  getPlansV2,
+  getSubscription,
+  getUserPlans,
+  verifySubscription,
+} from './handlers/stubs/billing.ts';
 import { pushToken, reportEvent, storageBonusDetails } from './handlers/stubs/misc.ts';
+import { emergencyContactsInfo } from './handlers/stubs/emergencyContacts.ts';
 import {
   contactsDiff,
   deleteSuggestions,
@@ -116,6 +130,15 @@ export const buildApp = (deps: Deps): Hono => {
   app.put('/users/email-mfa', authed, handler(updateEmailMfa(deps)));
   app.get('/users/two-factor/status', authed, handler(twoFactorStatus(deps)));
   app.get('/users/two-factor/recovery-status', authed, handler(twoFactorRecoveryStatus(deps)));
+
+  // [AUTH-2FA] TOTP (D36). verify/recover/remove are PUBLIC — the caller holds
+  // a twoFactorSessionID, not a token, which is the whole point.
+  app.post('/users/two-factor/setup', authed, handler(setupTwoFactor(deps)));
+  app.post('/users/two-factor/enable', authed, handler(enableTwoFactor(deps)));
+  app.post('/users/two-factor/disable', authed, handler(disableTwoFactor(deps)));
+  app.post('/users/two-factor/verify', handler(verifyTwoFactor(deps)));
+  app.get('/users/two-factor/recover', handler(recoverTwoFactor(deps)));
+  app.post('/users/two-factor/remove', handler(removeTwoFactor(deps)));
   app.put('/users/recovery-key', authed, handler(setRecoveryKey(deps)));
   app.get('/users/public-key', authed, handler(getPublicKey(deps)));
   app.get('/users/accounts-token', authed, handler(getAccountsToken(deps)));
@@ -184,6 +207,8 @@ export const buildApp = (deps: Deps): Hono => {
   app.post('/remote-store/update', authed, handler(updateRemoteStoreValue(deps)));
   app.get('/remote-store/feature-flags', authed, handler(getFeatureFlags(deps)));
   app.get('/billing/plans/v2', handler(getPlansV2(deps)));
+  app.get('/billing/user-plans', authed, handler(getUserPlans(deps))); // D34
+
   app.get('/billing/subscription', authed, handler(getSubscription(deps)));
   app.post('/billing/verify-subscription', authed, handler(verifySubscription(deps)));
   app.get('/storage-bonus/details', authed, handler(storageBonusDetails(deps)));
@@ -196,6 +221,7 @@ export const buildApp = (deps: Deps): Hono => {
   app.get('/collection-actions/pending-remove', authed, handler(pendingRemoveActions(deps)));
   app.get('/collection-actions/delete-suggestions', authed, handler(deleteSuggestions(deps)));
   app.get('/contacts/diff', authed, handler(contactsDiff(deps)));
+  app.get('/emergency-contacts/info', authed, handler(emergencyContactsInfo(deps))); // D35
 
   // [TRASH]
   app.post('/files/trash', authed, handler(trashFiles(deps)));

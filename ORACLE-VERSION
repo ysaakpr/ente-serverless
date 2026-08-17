@@ -3,4 +3,22 @@ museum image: ghcr.io/ente/server@sha256:f646b68a1b8d27e3375a67e3719ed6af97e9501
                source the contract shapes were pinned against)
 app APK:      io.ente.photos — pin at M5 device-gate time: record the then-current
               Play Store version here before running the gate (decision D1b)
-Captures:     none yet — capture-diff parity pending (DECISIONS.md D2)
+Captures:     full capture-diff parity still pending (DECISIONS.md D2). Two targeted
+              captures taken 2026-08-17 against the pinned image:
+              1. CORS preflight + actual-response headers (OPTIONS/POST /users/ott,
+                 GET /ping) — transcribed in src/middleware/cors.ts, asserted in
+                 test/unit/cors.test.ts (D29);
+              2. GET /users/details/v2 for a fresh free account, read twice —
+                 established that museum's body is stable and its free-sub expiry
+                 is creation + 100 calendar years, period "year"
+                 (test/unit/subscription.test.ts, D30);
+              3. auth-token transport across six private routes — `?token=` is
+                 accepted everywhere, header wins over query, and the 401 bodies
+                 are {"error":"missing token"} / {"error":"invalid token"}
+                 (test/unit/auth-token.test.ts, D32).
+              4. the whole TOTP two-factor flow — setup/enable/status/login/verify/
+                 recover/remove/disable, including decoding museum's QR PNG to read
+                 the otpauth URI parameters (test/unit/two-factor.test.ts +
+                 test/unit/totp.test.ts, D36).
+              Captures 1-2 predate the D31 compose fix and needed the OTT scraped
+              from museum's stderr; captures 3-4 ran against the fixed compose.

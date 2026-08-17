@@ -52,6 +52,22 @@ resource "aws_lambda_function_url" "api" {
   authorization_type = "NONE"
 }
 
+/**
+ * auth NONE does NOT by itself admit anonymous callers: the function still
+ * needs a resource-based policy granting lambda:InvokeFunctionUrl to everyone.
+ * Creating a public Function URL in the console adds this statement for you
+ * (it names it FunctionURLAllowPublicAccess); the API does not, so tofu must.
+ * Without it every request 403s — including CloudFront's, which makes the whole
+ * deployment look broken at the edge while the lambda itself is fine.
+ */
+resource "aws_lambda_permission" "api_public_url" {
+  statement_id           = "FunctionURLAllowPublicAccess"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.api.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
+}
+
 resource "aws_lambda_function" "trash_purge" {
   function_name = "${local.prefix}-trash-purge"
   role          = aws_iam_role.api.arn

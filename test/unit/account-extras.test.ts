@@ -85,11 +85,26 @@ describe('PUT /users/email-mfa', () => {
 });
 
 describe('two-factor status + recovery-key + public-key + accounts-token', () => {
-  it('2FA status is {"status": false}; recovery-status zeros', async () => {
+  it('2FA status + recovery-status match the captured museum shapes', async () => {
     const status = await world.request('GET', '/users/two-factor/status', { token: account.token });
     expect(await status.json()).toEqual({ status: false });
     const rec = await world.request('GET', '/users/two-factor/recovery-status', { token: account.token });
     expect(rec.status).toBe(200);
+    // Capture 2026-08-17: allowAdminReset is true, not the false we invented.
+    expect(await rec.json()).toEqual({ allowAdminReset: true, isPasskeyRecoveryEnabled: false });
+  });
+
+  it('emergency-contacts/info returns museum\'s four empty lists (D35)', async () => {
+    expect((await world.request('GET', '/emergency-contacts/info')).status).toBe(401);
+
+    const res = await world.request('GET', '/emergency-contacts/info', { token: account.token });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      contacts: [],
+      recoverSessions: [],
+      othersEmergencyContact: [],
+      othersRecoverySession: [],
+    });
   });
 
   it('recovery-key is write-once (second write 500, museum plain error)', async () => {

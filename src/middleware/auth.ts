@@ -1,6 +1,19 @@
 /**
- * X-Auth-Token middleware. Museum's middleware rejects with 401 and an empty
- * JSON body; token lookup is by hash, lastUsed bumped on every hit.
+ * Auth middleware. Token lookup is by hash, lastUsed bumped on every hit.
+ *
+ * The token arrives EITHER in X-Auth-Token OR in a `token` query param, header
+ * first. The query fallback is not optional: /files/preview/:fileID and
+ * /files/download/:fileID answer 307 redirects and the web/desktop client
+ * loads them as image sources, which cannot carry custom headers (D32).
+ *
+ * Oracle capture 2026-08-17 (ghcr.io/ente/server@sha256:f646b68a…), against
+ * /users/details/v2, /collections/v2, /files/preview/1, /files/download/1,
+ * /files/preview/v2/1, /trash/v2/diff:
+ *   - `?token=` is accepted on EVERY private route, not just the redirects;
+ *   - valid header + garbage query -> 200, garbage header + valid query -> 401,
+ *     i.e. a present header wins and there is no second chance;
+ *   - 401 bodies are {"error":"missing token"} and {"error":"invalid token"} —
+ *     NOT the bare {} this file previously claimed.
  */
 
 import type { Context, Next } from 'hono';
@@ -31,10 +44,12 @@ export interface TokenRow {
 }
 
 export const requireAuth = (deps: Deps) => async (c: Context, next: Next) => {
-  const token = c.req.header('X-Auth-Token');
-  if (!token) return c.json({}, 401);
+  // `||`, not `??`: Go reads the header into a string and falls through on the
+  // zero value, so an empty header behaves the same as an absent one.
+  const token = c.req.header('X-Auth-Token') || c.req.query('token');
+  if (!token) return c.json({ error: 'missing token' }, 401);
   const row = await deps.db.get<TokenRow>(keys.token(tokenHash(token)).pk, 'META');
-  if (!row) return c.json({}, 401);
+  if (!row) return c.json({ error: 'invalid token' }, 401);
   c.set('auth', {
     userId: row.userId,
     token,

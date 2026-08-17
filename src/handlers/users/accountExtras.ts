@@ -1,8 +1,8 @@
 /**
  * The smaller [ACCOUNT] routes:
  *  - PUT /users/email-mfa — flag store; disabling requires SRP (409 CONFLICT)
- *  - GET /users/two-factor/status — {"status": false} (core: no TOTP)
- *  - GET /users/two-factor/recovery-status — zeros (capture-gated, D10)
+ *  - GET /users/two-factor/status — real TOTP state since D36
+ *  - GET /users/two-factor/recovery-status — allowAdminReset true (captured)
  *  - PUT /users/recovery-key — write-once recovery fields into key attributes
  *  - GET /users/public-key?email= — {"publicKey"}
  *  - GET /users/accounts-token — stub (no accounts.ente.io here; capture-gated)
@@ -15,6 +15,7 @@ import { auth } from '../../middleware/auth.ts';
 import { keys } from '../../domain/model.ts';
 import { getKeyAttributes, getUserIdByEmail, putKeyAttributes } from '../../domain/users.ts';
 import { generateToken } from '../../domain/tokens.ts';
+import { isTwoFactorEnabled } from '../../domain/twoFactor.ts';
 import { conflictError, errNotFound, SentinelError } from '../../lib/errors.ts';
 
 export const updateEmailMfa = (deps: Deps) => async (c: Context) => {
@@ -28,11 +29,13 @@ export const updateEmailMfa = (deps: Deps) => async (c: Context) => {
   return c.body(null, 200);
 };
 
-export const twoFactorStatus = (_deps: Deps) => async (c: Context) =>
-  c.json({ status: false });
+export const twoFactorStatus = (deps: Deps) => async (c: Context) =>
+  c.json({ status: await isTwoFactorEnabled(deps, auth(c).userId) });
 
+// Capture 2026-08-17: museum answers allowAdminReset TRUE for a fresh account
+// (we had invented false). 2FA itself is still unimplemented — see D35.
 export const twoFactorRecoveryStatus = (_deps: Deps) => async (c: Context) =>
-  c.json({ allowAdminReset: false, isPasskeyRecoveryEnabled: false });
+  c.json({ allowAdminReset: true, isPasskeyRecoveryEnabled: false });
 
 const recoverySchema = z.object({
   masterKeyEncryptedWithRecoveryKey: z.string(),

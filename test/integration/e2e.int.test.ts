@@ -181,6 +181,64 @@ describe('M3 gate on LocalStack (real presigned HTTP)', () => {
   });
 });
 
+describe('thumbnail fetch as a browser performs it (D32/D33)', () => {
+  it('307 by query token, and the redirect target answers CORS', async () => {
+    const keys = makeClientKeys();
+    const { token } = await fullSignup(uniqueEmail(), keys);
+
+    const col = await world.request('POST', '/collections', {
+      token,
+      body: {
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        type: 'album',
+      },
+    });
+    const albumId = ((await col.json()) as { collection: { id: number } }).collection.id;
+
+    const fileKey = sodium.crypto_secretbox_keygen();
+    const nonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+    const cipher = sodium.crypto_secretbox_easy(randomBytes(4096), nonce, fileKey);
+    const thumbCipher = sodium.crypto_secretbox_easy(randomBytes(1024), nonce, fileKey);
+
+    const urlsRes = await world.request('GET', '/files/upload-urls?count=2', { token });
+    const { urls } = (await urlsRes.json()) as { urls: Array<{ objectKey: string; url: string }> };
+    expect((await fetch(urls[0]!.url, { method: 'PUT', body: cipher })).status).toBe(200);
+    expect((await fetch(urls[1]!.url, { method: 'PUT', body: thumbCipher })).status).toBe(200);
+
+    const commit = await world.request('POST', '/files', {
+      token,
+      body: {
+        id: 0,
+        collectionID: albumId,
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        file: { objectKey: urls[0]!.objectKey, decryptionHeader: b64(nonce), size: cipher.length },
+        thumbnail: { objectKey: urls[1]!.objectKey, decryptionHeader: b64(nonce) },
+        metadata: { encryptedData: b64(randomBytes(64)), decryptionHeader: b64(randomBytes(24)) },
+        updationTime: Date.now() * 1000,
+      },
+    });
+    expect(commit.status).toBe(200);
+    const { id: fileId } = (await commit.json()) as { id: number };
+
+    // No X-Auth-Token: exactly what an image load from the desktop app sends.
+    const redirect = await world.request('GET', `/files/preview/${fileId}?token=${token}`);
+    expect(redirect.status).toBe(307);
+    const location = redirect.headers.get('location')!;
+    expect(location).toBeTruthy();
+
+    // The browser follows the 307 and enforces CORS on THAT response; after a
+    // cross-origin redirect it sends Origin: null, which only `*` satisfies.
+    for (const origin of ['http://localhost:3000', 'null']) {
+      const served = await fetch(location, { headers: { Origin: origin } });
+      expect(served.status, origin).toBe(200);
+      expect(served.headers.get('access-control-allow-origin'), origin).toBe('*');
+      expect(Buffer.from(await served.arrayBuffer()), origin).toEqual(Buffer.from(thumbCipher));
+    }
+  });
+});
+
 describe('SES delivery on LocalStack', () => {
   it('OTT email for a non-hardcoded domain lands in SES', async () => {
     const email = `real-${randomUUID().slice(0, 8)}@example.com`;

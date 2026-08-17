@@ -5,26 +5,31 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 
 | Suite file | Tags | Milestone | Scenarios | Passing | |
 |---|---|---|---|---|---|
-| account-extras.test.ts | [ACCOUNT] completeness | M7 | 9 | 9 | ✅ |
+| account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
+| auth-token.test.ts | query-param auth (gate finding D32) | M5 | 8 | 8 | ✅ |
 | collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
-| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 4 | 4 | ✅ |
+| cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
+| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 5 | 5 | ✅ |
 | entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
 | file-data.test.ts | [FILE-DATA] | M6 | 7 | 7 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
-| lifecycle.test.ts | infra guards | M7 | 8 | 8 | ✅ |
+| lifecycle.test.ts | infra guards | M7 | 11 | 11 | ✅ |
 | ping.test.ts | [HEALTH] | M1 | 2 | 2 | ✅ |
 | send-ott.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
 | srp-endpoints.test.ts | [AUTH-SRP] | M1 | 16 | 16 | ✅ |
 | srp-math.test.ts | [AUTH-SRP] | M1 | 5 | 5 | ✅ |
-| stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 8 | 8 | ✅ |
+| stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 9 | 9 | ✅ |
+| subscription.test.ts | [BILLING] free-sub determinism (gate finding D30) | M5 | 7 | 7 | ✅ |
+| totp.test.ts | [AUTH-2FA] TOTP math (RFC 6238) | M5 | 11 | 11 | ✅ |
 | trash-origin.test.ts | [TRASH] origin collection (gate finding D28) | M4/M5 | 3 | 3 | ✅ |
 | trash-purge.test.ts | [TRASH] cron | M4 | 2 | 2 | ✅ |
 | trash.test.ts | [TRASH] + M4 gate | M4 | 8 | 8 | ✅ |
+| two-factor.test.ts | [AUTH-2FA] TOTP flow (gate finding D36) | M5 | 16 | 16 | ✅ |
 | upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 5 | 5 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 15 | 15 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
 
-**Total: 148/148 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 202/202 passing.** CI must fail if any implemented endpoint is below 100%.

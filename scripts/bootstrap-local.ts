@@ -8,7 +8,7 @@ import {
   DynamoDBClient,
   ResourceInUseException,
 } from '@aws-sdk/client-dynamodb';
-import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
+import { CreateBucketCommand, PutBucketCorsCommand, S3Client } from '@aws-sdk/client-s3';
 import { SESClient, VerifyEmailIdentityCommand } from '@aws-sdk/client-ses';
 
 const endpoint = process.env.AWS_ENDPOINT_URL ?? 'http://127.0.0.1:4567';
@@ -66,6 +66,28 @@ try {
   if (!name.includes('BucketAlreadyOwnedByYou') && !name.includes('BucketAlreadyExists')) throw err;
   console.log(`bucket ${bucketName} exists`);
 }
+
+// Same rule the tofu puts on the real bucket (src/infra/modules/data/main.tf).
+// Without it LocalStack serves the bytes with no Access-Control-Allow-Origin,
+// so the browser/desktop client discards every thumbnail it follows a 307 to
+// and the gallery renders blank — D33.
+await s3.send(
+  new PutBucketCorsCommand({
+    Bucket: bucketName,
+    CORSConfiguration: {
+      CORSRules: [
+        {
+          AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD'],
+          AllowedOrigins: ['*'],
+          AllowedHeaders: ['*'],
+          ExposeHeaders: ['ETag'],
+          MaxAgeSeconds: 3000,
+        },
+      ],
+    },
+  }),
+);
+console.log(`applied CORS to bucket ${bucketName}`);
 
 try {
   await ses.send(new VerifyEmailIdentityCommand({ EmailAddress: 'verify@ente.local' }));
