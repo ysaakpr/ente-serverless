@@ -1,0 +1,60 @@
+# The contract oracle: real museum + Postgres + MinIO (ente's quickstart
+# topology, pinned). Runs on :8580 so it never collides with our server.
+# Pin the tag in ORACLE-VERSION and update both together.
+services:
+  museum:
+    # Pinned by digest (decision D1, 2026-08-16) — keep in lockstep with ORACLE-VERSION.
+    image: ghcr.io/ente/server@sha256:f646b68a1b8d27e3375a67e3719ed6af97e9501a81e0af9a2ec7f57ce2b3264e
+    container_name: ente-oracle-museum
+    ports:
+      - '8580:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      ENTE_DB_HOST: postgres
+      ENTE_DB_PORT: 5432
+      ENTE_DB_NAME: ente_db
+      ENTE_DB_USER: pguser
+      ENTE_DB_PASSWORD: pgpass
+      ENTE_S3_ARE_LOCAL_BUCKETS: 'true'
+      ENTE_S3_B2_EU_CEN_KEY: minioadmin
+      ENTE_S3_B2_EU_CEN_SECRET: minioadmin
+      ENTE_S3_B2_EU_CEN_ENDPOINT: http://minio:3200
+      ENTE_S3_B2_EU_CEN_REGION: eu-central-2
+      ENTE_S3_B2_EU_CEN_BUCKET: b2-eu-cen
+      ENTE_INTERNAL_HARDCODED-OTT_LOCAL-DOMAIN-SUFFIX: '@example.org'
+      ENTE_INTERNAL_HARDCODED-OTT_LOCAL-DOMAIN-VALUE: '123456'
+
+  postgres:
+    image: postgres:15
+    container_name: ente-oracle-postgres
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpass
+      POSTGRES_DB: ente_db
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-q', '-d', 'ente_db', '-U', 'pguser']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio
+    container_name: ente-oracle-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --address ":3200" --console-address ":3201"
+
+  minio-provision:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: |
+      sh -c '
+      while ! mc alias set h0 http://minio:3200 minioadmin minioadmin 2>/dev/null; do sleep 0.5; done;
+      mc mb -p h0/b2-eu-cen || true
+      '

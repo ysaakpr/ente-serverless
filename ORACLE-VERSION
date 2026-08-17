@@ -1,0 +1,6 @@
+museum image: ghcr.io/ente/server@sha256:f646b68a1b8d27e3375a67e3719ed6af97e9501a81e0af9a2ec7f57ce2b3264e
+              (was :latest, frozen 2026-08-16 — decision D1, matches the main-branch
+               source the contract shapes were pinned against)
+app APK:      io.ente.photos — pin at M5 device-gate time: record the then-current
+              Play Store version here before running the gate (decision D1b)
+Captures:     none yet — capture-diff parity pending (DECISIONS.md D2)

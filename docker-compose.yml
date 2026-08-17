@@ -1,0 +1,15 @@
+# Local backend: LocalStack (DynamoDB + S3 + SES). Nothing here needs AWS.
+services:
+  localstack:
+    image: localstack/localstack:3
+    container_name: ente-sl-localstack
+    ports:
+      - '4567:4566'
+    environment:
+      - SERVICES=dynamodb,s3,ses
+      - PERSISTENCE=0
+    healthcheck:
+      test: ['CMD', 'curl', '-sf', 'http://localhost:4566/_localstack/health']
+      interval: 5s
+      timeout: 3s
+      retries: 20

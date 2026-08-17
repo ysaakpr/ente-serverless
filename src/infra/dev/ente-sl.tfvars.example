@@ -1,0 +1,5 @@
+# Copy to ente-sl.tfvars (gitignored) and fill in. BACK UP hashing_key:
+# losing it orphans every email->user mapping (decision D4a).
+# Generate once:  openssl rand -base64 32
+hashing_key = "REPLACE-ME-base64-32-bytes"
+mail_from   = "verified-identity@your-domain"
