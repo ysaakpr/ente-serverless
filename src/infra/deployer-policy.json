@@ -15,7 +15,8 @@
       "Effect": "Allow",
       "Action": [
         "logs:DescribeLogGroups",
-        "cloudwatch:DescribeAlarms"
+        "cloudwatch:DescribeAlarms",
+        "wafv2:ListWebACLs"
       ],
       "Resource": "*"
     },
@@ -66,7 +67,9 @@
         "lambda:TagResource",
         "lambda:UntagResource",
         "lambda:Get*",
-        "lambda:List*"
+        "lambda:List*",
+        "lambda:PutFunctionConcurrency",
+        "lambda:DeleteFunctionConcurrency"
       ],
       "Resource": "arn:aws:lambda:*:*:function:ente-sl-*"
     },
@@ -159,7 +162,10 @@
         "cloudfront:TagResource",
         "cloudfront:UntagResource",
         "cloudfront:Get*",
-        "cloudfront:List*"
+        "cloudfront:List*",
+        "cloudfront:CreateResponseHeadersPolicy",
+        "cloudfront:UpdateResponseHeadersPolicy",
+        "cloudfront:DeleteResponseHeadersPolicy"
       ],
       "Resource": "*"
     },
@@ -179,6 +185,32 @@
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "SpendCeilingBudget",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ViewBudget",
+        "budgets:ModifyBudget",
+        "budgets:TagResource",
+        "budgets:UntagResource",
+        "budgets:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:budgets::*:budget/ente-sl-*"
+    },
+    {
+      "Sid": "WafRateRule",
+      "Effect": "Allow",
+      "Action": [
+        "wafv2:CreateWebACL",
+        "wafv2:UpdateWebACL",
+        "wafv2:DeleteWebACL",
+        "wafv2:GetWebACL",
+        "wafv2:TagResource",
+        "wafv2:UntagResource",
+        "wafv2:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:wafv2:*:*:global/*/ente-sl-*/*"
     }
   ]
 }

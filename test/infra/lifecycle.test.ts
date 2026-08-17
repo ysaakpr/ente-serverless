@@ -219,6 +219,114 @@ describe('deploy target guards', () => {
   });
 });
 
+/**
+ * Security review 2026-08-17, findings 4 and 6: spend ceilings (budget page,
+ * reserved concurrency, WAF rate rule) and the origin lock + response headers
+ * that make the edge controls non-bypassable. Guarded the same way as the
+ * FunctionURLAllowPublicAccess statement: structure, not comments.
+ */
+describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
+  const computeTf = () => readTf('modules/compute/main.tf');
+  const edgeTf = () => readTf('modules/edge/main.tf');
+  const devTf = () => readTf('dev/main.tf');
+
+  it('the API lambda carries the concurrency knob (hard invocation ceiling)', () => {
+    const api = computeTf().slice(computeTf().indexOf('resource "aws_lambda_function" "api"'));
+    const block = api.slice(0, api.indexOf('resource "', 10));
+    expect(block).toMatch(/reserved_concurrent_executions\s*=/);
+    const varsTf = readTf('modules/compute/variables.tf');
+    const v = varsTf.slice(varsTf.indexOf('variable "api_reserved_concurrency"'));
+    const def = Number(v.match(/default\s*=\s*(-?\d+)/)![1]);
+    // -1 = unreserved (the only deployable value while the account sits at the
+    // default Lambda quota, which is itself a tighter ceiling); positive = the
+    // real reservation once the quota is raised. 0 would disable the function.
+    expect(def === -1 || def > 0).toBe(true);
+    expect(def).not.toBe(0);
+  });
+
+  it('an ACTUAL-spend budget pages through the alarms topic', () => {
+    const text = computeTf();
+    const budget = text.slice(text.indexOf('resource "aws_budgets_budget"'));
+    expect(budget, 'no budget resource').not.toBe('');
+    const block = budget.slice(0, budget.indexOf('\nresource "'));
+    expect(block).toMatch(/notification_type\s*=\s*"ACTUAL"/);
+    expect(block).toContain('subscriber_sns_topic_arns = [aws_sns_topic.alarms.arn]');
+  });
+
+  it('the topic policy admits Budgets AND restates the CloudWatch grant', () => {
+    // aws_sns_topic_policy REPLACES the account-default policy — dropping the
+    // CloudWatch principal would silently mute both Errors alarms.
+    const text = computeTf();
+    const policy = text.slice(text.indexOf('resource "aws_sns_topic_policy"'));
+    expect(policy, 'no explicit topic policy').not.toBe('');
+    const block = policy.slice(0, policy.indexOf('\nresource "'));
+    expect(block).toContain('budgets.amazonaws.com');
+    expect(block).toContain('cloudwatch.amazonaws.com');
+  });
+
+  it('the origin injects x-origin-secret and the app reads the same header', () => {
+    const edge = edgeTf();
+    const origin = edge.slice(edge.indexOf('custom_header'));
+    expect(origin).toMatch(/name\s*=\s*"x-origin-secret"/);
+    expect(origin).toMatch(/value\s*=\s*var\.origin_secret/);
+
+    const compute = computeTf();
+    expect(compute).toMatch(/ORIGIN_SECRET\s*=\s*var\.origin_secret/);
+
+    const app = readFileSync(join(import.meta.dirname, '../../src/app.ts'), 'utf8');
+    expect(app).toContain("header('x-origin-secret')");
+  });
+
+  it('the origin secret is generated, not a tfvars value', () => {
+    // A findings doc must never be able to pair the hostname with the secret;
+    // random_password keeps it only in state.
+    expect(devTf()).toContain('resource "random_password" "origin_secret"');
+    expect(devTf()).toMatch(/origin_secret\s*=\s*random_password\.origin_secret\.result/);
+  });
+
+  it('a WAF rate rule guards the unauthenticated POST auth routes', () => {
+    const edge = edgeTf();
+    expect(edge).toContain('resource "aws_wafv2_web_acl"');
+    expect(edge).toMatch(/web_acl_id\s*=\s*aws_wafv2_web_acl\.api\.arn/);
+    expect(edge).toContain('rate_based_statement');
+    for (const path of ['/users/ott', '/users/srp/', '/users/two-factor/']) {
+      expect(edge, `WAF rate rule does not cover ${path}`).toContain(`"${path}"`);
+    }
+    // CLOUDFRONT scope only exists in us-east-1 — the aliased provider is
+    // load-bearing, not decoration.
+    expect(edge).toMatch(/scope\s*=\s*"CLOUDFRONT"/);
+    expect(edge).toMatch(/provider\s*=\s*aws\.use1/);
+    expect(devTf()).toMatch(/alias\s*=\s*"use1"/);
+  });
+
+  it('the distribution attaches the security response-headers policy', () => {
+    const edge = edgeTf();
+    expect(edge).toContain('resource "aws_cloudfront_response_headers_policy"');
+    expect(edge).toMatch(/response_headers_policy_id\s*=\s*aws_cloudfront_response_headers_policy\.api\.id/);
+    expect(edge).toContain('strict_transport_security');
+    expect(edge).toContain('content_type_options');
+    // no-referrer is the one that earns its place: it stops ?token= URLs (D32)
+    // riding out in a Referer header.
+    expect(edge).toMatch(/referrer_policy\s*=\s*"no-referrer"/);
+  });
+
+  it('the deployer policy covers the new resources', () => {
+    const policy = JSON.parse(readFileSync(join(INFRA, 'deployer-policy.json'), 'utf8')) as {
+      Statement: Array<{ Effect: string; Action: string[] }>;
+    };
+    const allowed = policy.Statement.filter((s) => s.Effect === 'Allow').flatMap((s) => s.Action);
+    for (const action of [
+      'budgets:ModifyBudget',
+      'wafv2:CreateWebACL',
+      'wafv2:ListWebACLs',
+      'lambda:PutFunctionConcurrency',
+      'cloudfront:CreateResponseHeadersPolicy',
+    ]) {
+      expect(allowed, `deployer cannot ${action}`).toContain(action);
+    }
+  });
+});
+
 describe('config/tofu default agreement (D11)', () => {
   it('free_plan_storage_bytes matches the config.ts default (10 TiB)', () => {
     const TEN_TIB = 10 * 1024 ** 4;

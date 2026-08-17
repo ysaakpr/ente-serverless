@@ -31,3 +31,20 @@ variable "alarm_email" {
   type    = string
   default = null
 }
+
+# Optional overrides for the finding-4 spend ceilings (D43), settable from the
+# tfvars — a tfvars value only reaches a module through a root declaration
+# like these two, so their absence here silently discards the setting.
+
+# -1 = unreserved (the only deployable value at the default Lambda quota);
+# set ~50-100 after a Service Quotas raise. Thumbnail loads burst hard, so
+# undersizing this shows up as 429 waves in the gallery.
+variable "api_reserved_concurrency" {
+  type    = number
+  default = -1
+}
+
+variable "monthly_budget_usd" {
+  type    = number
+  default = 25
+}

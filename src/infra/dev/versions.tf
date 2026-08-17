@@ -11,6 +11,10 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.6"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   # Local state, deliberately — same reasoning as immich-serverless: one

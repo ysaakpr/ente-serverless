@@ -513,6 +513,96 @@ source says Y — source won).
     Left unchanged rather than guessed, since over-counting would hand users
     spurious 426s.
 
+- **D42 [SECURITY 2026-08-17] TOTP verification is now capped at 5 attempts per
+  two-factor session — a deliberate, observable divergence.** Finding 1 of the
+  security review (SECURITY-REVIEW.md).
+  - The gap: `verifyTwoFactor` counted nothing, and a wrong code threw BEFORE
+    `consumeTwoFactorSession`, so one half-authenticated session admitted
+    unlimited parallel guesses for its full 10-minute validity. With
+    `TOTP_SKEW_STEPS = 1`, 3 of 10⁶ codes are accepted at any instant; at
+    ~1000 req/s that is ~600k guesses per session with expected hits ≈ 1.8 —
+    and the attacker can mint fresh sessions at will, since reaching this
+    endpoint already requires the password. 2FA reduced to a delay.
+  - **Divergence, stated honestly:** D36 captured the 2FA endpoint SHAPES and
+    recorded no attempt cap — meaning museum's behaviour past N failures was
+    never captured, not that it is known to be uncapped. After this change a
+    client sees `429 {}` where it previously saw `401 {}` forever. Same
+    category as the OTT hashed-at-rest note in `ott.ts`: hardening the oracle
+    never specified. If capture-parity later contradicts this, re-capture past
+    20 wrong codes and revisit — but shipping uncapped 2FA to a public URL is
+    the worse of the two risks.
+  - Mechanics: `TWO_FACTOR_ATTEMPT_LIMIT = 5` (matches `SRP_ATTEMPT_CAP`, the
+    closest "prove a secret for this session" analogue; absorbs clock-drift
+    retries at skew ±1). The counter lives on the SESSION row — already
+    TTL'd, and an attacker can only burn a session they created — never on
+    the user partition, where it would be a lockout weapon against the
+    account owner. The increment is the F0 atomic `addToCountersReturning`
+    (increment first, judge second), and it happens BEFORE the code compare,
+    so a correct code past the cap still 429s and a crash mid-handler can
+    never hand out a free attempt. `POST /users/two-factor/remove` inherits
+    the same counter for consistency and log signal (its secret is
+    high-entropy; brute force was never the concern there).
+  - *Guarded* by `two-factor.test.ts`: 5 wrong codes → 401, past the cap →
+    429 even for a CORRECT code, a fresh login still works (no victim
+    lockout), 50 parallel wrong codes stored as exactly 50 (the F0 regression
+    guard at this call site), and the shared counter on `remove`.
+
+- **D43 [SECURITY 2026-08-17] Spend ceilings and an origin lock: budget page,
+  reserved concurrency, WAF rate rule, security response headers, and a
+  shared-secret header that closes the direct Function URL.** Findings 4, 6
+  and the infra half of 7 from SECURITY-REVIEW.md, shipped as one edge pass.
+  - Layer 1, the budget: `aws_budgets_budget` pages the alarms topic at 80%
+    and 100% of ACTUAL spend ($25/mo default, `monthly_budget_usd`). Note the
+    explicit `aws_sns_topic_policy` REPLACES the account-default policy, so it
+    restates the CloudWatch grant — dropping that would silently mute both
+    Errors alarms (guarded by test).
+  - Layer 2, `reserved_concurrent_executions` on the API function
+    (`api_reserved_concurrency`, default **-1 = unreserved**). The intended 50
+    did not survive contact with the account: AWS requires 10 executions to
+    stay unreserved account-wide, and this account still sits at the default
+    Lambda quota (~10 total), so NO reservation is deployable — and that
+    account-wide 10 is itself a tighter invocation ceiling than 50, so the
+    protection exists regardless, enforced by AWS. After a Service Quotas
+    raise, set ~50 in the tfvars. Double edge stated honestly: exhausted, a
+    reservation throttles legitimate users too — the right trade for a
+    single-owner deployment, the wrong one for a shared one.
+  - Layer 3, the WAF rate rule (300 req / 5 min / IP on `/users/ott`,
+    `/users/srp/*`, `/users/two-factor/*`) — only meaningful because of the
+    **origin lock**: CloudFront injects `x-origin-secret` (a `random_password`
+    that lives only in state, deliberately not in tfvars) and the app 403s
+    bare requests when `ORIGIN_SECRET` is set. Off in `make dev`/`make lan`,
+    which never traverse CloudFront. OBSERVABLE: the direct Function URL now
+    answers `403 {}` to everyone — that URL was never the supported endpoint
+    (`server_url` is the CloudFront domain), so no client change.
+  - Response headers ride a CloudFront `response_headers_policy` — at the
+    edge, NOT in the app, which stays byte-faithful to museum's header set
+    (D29): HSTS 1y, `X-Content-Type-Options: nosniff`, and `Referrer-Policy:
+    no-referrer`, the one that earns its place by keeping `?token=` URLs
+    (D32) out of Referer headers.
+  - CLOUDFRONT-scope WAF only exists in us-east-1: the edge module takes an
+    aliased `aws.use1` provider from the env root regardless of `var.region`.
+  - Audit rows now store only the RIGHTMOST `X-Forwarded-For` entry
+    (`src/lib/ip.ts`) — the CloudFront-appended, unforgeable-through-that-path
+    address — instead of the verbatim client-controlled header. Fully sound
+    only combined with the origin lock above; a strict improvement either way.
+  - *Guarded* by `test/infra/lifecycle.test.ts` (`spend ceiling + edge
+    hardening guards`), `test/unit/origin-lock.test.ts`, and the XFF cases in
+    `auth-token.test.ts`.
+
+- **D44 [SECURITY 2026-08-17] Presigned-URL validity split by verb; PUT cut to
+  24 hours, GET deliberately left at museum's 7 days pending an M5 re-run.**
+  Finding 5. One knob (`PRESIGN_EXPIRY_SECONDS`, still honoured as a fallback
+  for both) fed two very different lifetimes: a download URL consumed in
+  seconds but valid a week rides in `<img>` sources and 307 Locations, and a
+  week-long presigned PUT is a standing write grant to a key. PUT now defaults
+  to 24h (`PRESIGN_PUT_EXPIRY_SECONDS`) — big uploads on slow links stay
+  viable, window cut 7×. GET is NOT shortened yet: D26 and D32 were both gate
+  findings where real client behaviour contradicted a reasonable server-side
+  assumption, and a client that caches thumbnail URLs would start 404ing after
+  an hour. Shorten `PRESIGN_GET_EXPIRY_SECONDS` only after the next M5 device
+  gate proves the gallery survives idling past the window. Guarded by
+  `test/unit/presign-expiry.test.ts`.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

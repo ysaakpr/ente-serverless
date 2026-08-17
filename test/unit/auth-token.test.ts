@@ -145,6 +145,51 @@ describe('session idle expiry', () => {
 });
 
 /**
+ * Finding 7 of the 2026-08-17 security review: X-Forwarded-For is
+ * client-settable, so login paths must store only the RIGHTMOST entry —
+ * CloudFront appends the viewer's real address there, so a spoofed prefix
+ * cannot poison what GET /users/sessions later shows as the session origin.
+ */
+describe('X-Forwarded-For handling on login', () => {
+  it('stores the rightmost entry, not the spoofable prefix', async () => {
+    const { lastOttCode } = await import('../helpers/client.ts');
+    await world.request('POST', '/users/ott', { body: { email: 'xff@b.c', purpose: 'signup' } });
+    const res = await world.request('POST', '/users/verify-email', {
+      body: { email: 'xff@b.c', ott: lastOttCode(world, 'xff@b.c') },
+      headers: { 'x-forwarded-for': '1.2.3.4, 5.6.7.8' },
+    });
+    expect(res.status).toBe(200);
+    const { token } = (await res.json()) as { token: string };
+
+    const row = await world.deps.db.get(`TOKEN#${tokenHash(token)}`, 'META');
+    expect(row!.ip).toBe('5.6.7.8');
+  });
+
+  it('a single-entry header (no proxy chain) is stored as-is', async () => {
+    const { lastOttCode } = await import('../helpers/client.ts');
+    await world.request('POST', '/users/ott', { body: { email: 'xff1@b.c', purpose: 'signup' } });
+    const res = await world.request('POST', '/users/verify-email', {
+      body: { email: 'xff1@b.c', ott: lastOttCode(world, 'xff1@b.c') },
+      headers: { 'x-forwarded-for': '9.9.9.9' },
+    });
+    const { token } = (await res.json()) as { token: string };
+    const row = await world.deps.db.get(`TOKEN#${tokenHash(token)}`, 'META');
+    expect(row!.ip).toBe('9.9.9.9');
+  });
+
+  it('a missing header stores the empty string, as before', async () => {
+    const { lastOttCode } = await import('../helpers/client.ts');
+    await world.request('POST', '/users/ott', { body: { email: 'xff2@b.c', purpose: 'signup' } });
+    const res = await world.request('POST', '/users/verify-email', {
+      body: { email: 'xff2@b.c', ott: lastOttCode(world, 'xff2@b.c') },
+    });
+    const { token } = (await res.json()) as { token: string };
+    const row = await world.deps.db.get(`TOKEN#${tokenHash(token)}`, 'META');
+    expect(row!.ip).toBe('');
+  });
+});
+
+/**
  * The token travels in the query string on every private route (D32), so the
  * access log must never render a query string — that is the one place a bearer
  * token could start leaking into CloudWatch. Guarding the logger rather than

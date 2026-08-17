@@ -45,7 +45,7 @@ export const getUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const objectKey = `${userId}/${deps.rand.uuid()}`;
   const url = await deps.blobs.presignPut(
     objectKey,
-    deps.config.presignExpirySeconds,
+    deps.config.presignPutExpirySeconds,
     body.contentMD5,
   );
   return c.json({ objectKey, url });
@@ -74,7 +74,7 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const multipart = await deps.blobs.createMultipart(
     objectKey,
     partCount,
-    deps.config.presignExpirySeconds,
+    deps.config.presignPutExpirySeconds,
     body.partMd5s ?? undefined,
   );
   return c.json({

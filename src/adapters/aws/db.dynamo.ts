@@ -201,6 +201,26 @@ export class DynamoDb implements Db {
     );
   }
 
+  async addToCountersReturning(
+    pk: string,
+    sk: string,
+    deltas: Record<string, number>,
+    set?: Record<string, unknown>,
+  ): Promise<Record<string, number>> {
+    const { expression, names, values } = buildCounter(deltas, set);
+    const res = await getDocClient(this.config).send(
+      new UpdateCommand({
+        TableName: this.table,
+        Key: { pk, sk },
+        UpdateExpression: expression,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValues: 'UPDATED_NEW',
+      }),
+    );
+    return (res.Attributes ?? {}) as Record<string, number>;
+  }
+
   async transactWrite(ops: TransactOp[]): Promise<void> {
     const items = ops.map((op) => {
       if (op.kind === 'put') {

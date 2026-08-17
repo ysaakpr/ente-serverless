@@ -35,15 +35,20 @@ import {
   getPendingSecret,
   getTwoFactor,
   putPendingSecret,
+  recordTwoFactorAttempt,
   resolveTwoFactorSession,
+  resolveTwoFactorSessionRow,
+  TWO_FACTOR_ATTEMPT_LIMIT,
 } from '../../domain/twoFactor.ts';
 import { getKeyAttributes, getUser, tokenRow } from '../../domain/users.ts';
 import { encryptToken, generateToken, tokenHash } from '../../domain/tokens.ts';
+import { clientIp } from '../../lib/ip.ts';
 import {
   errBadRequestSentinel,
   errInvalidPassword,
   errNotFound,
   errPermissionDenied,
+  errTooManyBadRequest,
 } from '../../lib/errors.ts';
 
 /** 200 with a zero-length body — museum returns no JSON here. */
@@ -110,7 +115,7 @@ const issueLogin = async (deps: Deps, c: Context, userId: number) => {
       tokenHash(token),
       token,
       appFromClientPackage(c.req.header('X-Client-Package')),
-      c.req.header('x-forwarded-for') ?? '',
+      clientIp(c),
       c.req.header('user-agent') ?? '',
     ),
   );
@@ -126,16 +131,21 @@ const verifySchema = z.object({ sessionID: z.string(), code: z.string() });
 export const verifyTwoFactor = (deps: Deps) => async (c: Context) => {
   const body = verifySchema.parse(await c.req.json());
 
-  const userId = await resolveTwoFactorSession(deps, body.sessionID);
-  if (userId === null) throw errInvalidPassword();
+  const session = await resolveTwoFactorSessionRow(deps, body.sessionID);
+  if (session === null) throw errInvalidPassword();
 
-  const row = await getTwoFactor(deps, userId);
+  // Attempt cap (D42): count BEFORE comparing — even a correct code past the
+  // cap must 429, or the cap gates only the response, not the compare.
+  const attemptCount = await recordTwoFactorAttempt(deps, session);
+  if (attemptCount > TWO_FACTOR_ATTEMPT_LIMIT) throw errTooManyBadRequest();
+
+  const row = await getTwoFactor(deps, session.userId);
   if (!row || !verifyTotp(row.secret, body.code, deps.clock.nowMicros())) {
     throw errInvalidPassword();
   }
 
   await consumeTwoFactorSession(deps, body.sessionID);
-  return issueLogin(deps, c, userId);
+  return issueLogin(deps, c, session.userId);
 };
 
 export const recoverTwoFactor = (deps: Deps) => async (c: Context) => {
@@ -163,15 +173,20 @@ const removeSchema = z.object({ sessionID: z.string(), secret: z.string() });
 export const removeTwoFactor = (deps: Deps) => async (c: Context) => {
   const body = removeSchema.parse(await c.req.json());
 
-  const userId = await resolveTwoFactorSession(deps, body.sessionID);
-  if (userId === null) throw errPermissionDenied();
+  const session = await resolveTwoFactorSessionRow(deps, body.sessionID);
+  if (session === null) throw errPermissionDenied();
 
-  const row = await getTwoFactor(deps, userId);
+  // Same counter as verify — the secret is high-entropy so brute force is not
+  // the concern here; the cap is for consistency and log signal (D42).
+  const attemptCount = await recordTwoFactorAttempt(deps, session);
+  if (attemptCount > TWO_FACTOR_ATTEMPT_LIMIT) throw errTooManyBadRequest();
+
+  const row = await getTwoFactor(deps, session.userId);
   if (!row || !secretsMatch(row.secret, body.secret)) throw errPermissionDenied();
 
-  await clearTwoFactor(deps, userId);
+  await clearTwoFactor(deps, session.userId);
   await consumeTwoFactorSession(deps, body.sessionID);
-  return issueLogin(deps, c, userId);
+  return issueLogin(deps, c, session.userId);
 };
 
 /** Length-independent constant-time-ish compare for the recovery secret. */

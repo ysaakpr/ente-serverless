@@ -99,6 +99,25 @@ export const buildApp = (deps: Deps): Hono => {
     });
   }
 
+  // Origin lock (finding 4, 2026-08-17 review): with ORIGIN_SECRET set, only
+  // requests carrying the CloudFront-injected header are served, so the
+  // directly-reachable Function URL stops bypassing every edge control.
+  // Registered before CORS on purpose — a direct probe gets a bare 403 with
+  // no museum-shaped headers to study. CloudFront adds the header to every
+  // origin request including preflights, so browsers are unaffected.
+  if (deps.config.originSecret) {
+    const expected = deps.config.originSecret;
+    app.use('*', async (c, next) => {
+      const got = c.req.header('x-origin-secret') ?? '';
+      let diff = got.length ^ expected.length;
+      for (let i = 0; i < expected.length; i++) {
+        diff |= (got.charCodeAt(i) || 0) ^ expected.charCodeAt(i);
+      }
+      if (diff !== 0) return c.json({}, 403);
+      await next();
+    });
+  }
+
   // Browser clients (web/desktop) preflight every call; museum answers CORS on
   // every response and short-circuits OPTIONS. Registered after the logger so
   // preflights still show up in the gate log. (D29)

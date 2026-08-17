@@ -10,6 +10,7 @@ import { appFromClientPackage } from '../../domain/apps.ts';
 import { emailHash, normalizeEmail } from '../../domain/tokens.ts';
 import { consumeOtt } from '../../domain/ott.ts';
 import { onVerificationSuccess } from '../../domain/verification.ts';
+import { clientIp } from '../../lib/ip.ts';
 
 const bodySchema = z.object({
   email: z.string().min(1),
@@ -26,7 +27,7 @@ export const verifyEmail = (deps: Deps) => async (c: Context) => {
 
   const response = await onVerificationSuccess(deps, email, {
     app,
-    ip: c.req.header('x-forwarded-for') ?? '',
+    ip: clientIp(c),
     ua: c.req.header('user-agent') ?? '',
   });
   return c.json(response);

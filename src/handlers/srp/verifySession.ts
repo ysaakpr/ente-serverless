@@ -12,6 +12,7 @@ import { verifySrpSession } from '../../domain/srpSessions.ts';
 import { FAKE_VERIFIER_B64 } from '../../domain/srp.ts';
 import { onVerificationSuccess } from '../../domain/verification.ts';
 import { getUser } from '../../domain/users.ts';
+import { clientIp } from '../../lib/ip.ts';
 import { errInvalidPassword } from '../../lib/errors.ts';
 
 const bodySchema = z.object({
@@ -41,7 +42,7 @@ export const verifySrpSessionHandler = (deps: Deps) => async (c: Context) => {
 
   const response = await onVerificationSuccess(deps, user.email, {
     app: appFromClientPackage(c.req.header('X-Client-Package')),
-    ip: c.req.header('x-forwarded-for') ?? '',
+    ip: clientIp(c),
     ua: c.req.header('user-agent') ?? '',
   });
   return c.json({ ...response, srpM2 });

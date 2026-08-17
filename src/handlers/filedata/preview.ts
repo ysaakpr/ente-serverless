@@ -39,10 +39,10 @@ export const previewUploadUrl = (deps: Deps) => async (c: Context) => {
     await upsertFdRow(deps, userId, fileId, type, { objectID });
   }
   if (isMultiPart) {
-    const multipart = await deps.blobs.createMultipart(key, count, deps.config.presignExpirySeconds);
+    const multipart = await deps.blobs.createMultipart(key, count, deps.config.presignPutExpirySeconds);
     return c.json({ objectID, partURLs: multipart.partUrls, completeURL: multipart.completeUrl });
   }
-  return c.json({ objectID, url: await deps.blobs.presignPut(key, deps.config.presignExpirySeconds) });
+  return c.json({ objectID, url: await deps.blobs.presignPut(key, deps.config.presignPutExpirySeconds) });
 };
 
 export const previewUrl = (deps: Deps) => async (c: Context) => {
@@ -53,5 +53,5 @@ export const previewUrl = (deps: Deps) => async (c: Context) => {
   const row = await getFdRow(deps, fileId, type);
   if (!row || row.isDeleted || !row.objectID) throw errNotFound();
   const key = objectKey(fileId, userId, type, row.objectID);
-  return c.json({ url: await deps.blobs.presignGet(key, deps.config.presignExpirySeconds) });
+  return c.json({ url: await deps.blobs.presignGet(key, deps.config.presignGetExpirySeconds) });
 };

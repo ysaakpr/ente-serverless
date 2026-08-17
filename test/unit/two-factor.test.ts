@@ -10,7 +10,11 @@ import sodium from '../../src/lib/sodium.ts';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { lastOttCode, openEncryptedToken, signupAccount, srpLogin, type Account } from '../helpers/client.ts';
 import { totpCode, TOTP_PERIOD_SECONDS } from '../../src/domain/totp.ts';
-import { TWO_FACTOR_SESSION_VALIDITY_MICROS } from '../../src/domain/twoFactor.ts';
+import {
+  TWO_FACTOR_ATTEMPT_LIMIT,
+  TWO_FACTOR_SESSION_VALIDITY_MICROS,
+} from '../../src/domain/twoFactor.ts';
+import { tokenHash } from '../../src/domain/tokens.ts';
 import { b64 } from '../../src/lib/b64.ts';
 import { MICROS_PER_MINUTE, MICROS_PER_SECOND } from '../../src/lib/time.ts';
 
@@ -206,6 +210,81 @@ describe('login once 2FA is on', () => {
       body: { sessionID: b64(randomBytes(32)), code: '123456' },
     });
     expect(res.status).toBe(401);
+  });
+
+  /**
+   * Attempt cap (security review 2026-08-17 finding 1, D42): without it one
+   * session admits unlimited parallel guesses for its whole 10-minute life,
+   * reducing 2FA to a delay for anyone who already holds the password.
+   */
+  it(`caps wrong codes: 429 past ${TWO_FACTOR_ATTEMPT_LIMIT}, even for a CORRECT code`, async () => {
+    const secret = await enable2fa();
+    const { response } = await srpLogin(world, '2fa@b.c', account.keys);
+    const sessionID = response.twoFactorSessionID as string;
+
+    for (let i = 0; i < TWO_FACTOR_ATTEMPT_LIMIT; i++) {
+      const res = await world.request('POST', '/users/two-factor/verify', {
+        body: { sessionID, code: '000000' },
+      });
+      expect(res.status).toBe(401);
+    }
+    const past = await world.request('POST', '/users/two-factor/verify', {
+      body: { sessionID, code: '000000' },
+    });
+    expect(past.status).toBe(429);
+    expect(await past.json()).toEqual({});
+
+    // The cap gates the COMPARE, not just the response: a correct code after
+    // the cap must not mint a token.
+    const correct = await world.request('POST', '/users/two-factor/verify', {
+      body: { sessionID, code: totpCode(secret, now()) },
+    });
+    expect(correct.status).toBe(429);
+
+    // The victim is not locked out — a fresh login mints a fresh session.
+    const again = await srpLogin(world, '2fa@b.c', account.keys);
+    const ok = await world.request('POST', '/users/two-factor/verify', {
+      body: { sessionID: again.response.twoFactorSessionID, code: totpCode(secret, now()) },
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('50 parallel wrong codes are ALL counted (F0 regression guard at this call site)', async () => {
+    await enable2fa();
+    const { response } = await srpLogin(world, '2fa@b.c', account.keys);
+    const sessionID = response.twoFactorSessionID as string;
+
+    await Promise.all(
+      Array.from({ length: 50 }, () =>
+        world.request('POST', '/users/two-factor/verify', {
+          body: { sessionID, code: '000000' },
+        }),
+      ),
+    );
+    const row = await world.deps.db.get(`2FASESSION#${tokenHash(sessionID)}`, 'META');
+    expect(row!.attemptCount).toBe(50);
+  });
+
+  it('remove shares the session counter: wrong secrets past the cap answer 429', async () => {
+    const secret = await enable2fa();
+    const { response } = await srpLogin(world, '2fa@b.c', account.keys);
+    const sessionID = response.twoFactorSessionID as string;
+
+    for (let i = 0; i < TWO_FACTOR_ATTEMPT_LIMIT; i++) {
+      const res = await world.request('POST', '/users/two-factor/remove', {
+        body: { sessionID, secret: 'WRONGSECRET' },
+      });
+      expect(res.status).toBe(403); // captured wrong-secret status, under the cap
+    }
+    const past = await world.request('POST', '/users/two-factor/remove', {
+      body: { sessionID, secret: 'WRONGSECRET' },
+    });
+    expect(past.status).toBe(429);
+    // Even the REAL secret is refused on this burned session.
+    const real = await world.request('POST', '/users/two-factor/remove', {
+      body: { sessionID, secret },
+    });
+    expect(real.status).toBe(429);
   });
 
   it('accepts a code from the neighbouring window (clock skew)', async () => {

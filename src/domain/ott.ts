@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import type { Deps } from '../deps.ts';
 import { keys } from './model.ts';
 import { errExpiredOTT, errIncorrectOTT, errTooManyBadRequest } from '../lib/errors.ts';
-import { MICROS_PER_HOUR } from '../lib/time.ts';
+import { MICROS_PER_HOUR, MICROS_PER_SECOND } from '../lib/time.ts';
 
 export const OTT_VALIDITY_MICROS = MICROS_PER_HOUR; // museum: 60 * 60 * 1000000
 export const OTT_ACTIVE_CODE_LIMIT = 10;
@@ -49,9 +49,14 @@ export const consumeOtt = async (deps: Deps, emailHash: string, app: string, cod
   const now = deps.clock.nowMicros();
 
   const attempts = await deps.db.get(partition, ATTEMPTS_SK);
-  const attemptCount =
-    attempts && (attempts.expiresAt as number) > now ? (attempts.count as number) : 0;
-  if (attemptCount >= OTT_WRONG_ATTEMPT_LIMIT) throw errTooManyBadRequest();
+  const attemptsLive = attempts !== null && (attempts.expiresAt as number) > now;
+  if (attemptsLive && (attempts!.count as number) >= OTT_WRONG_ATTEMPT_LIMIT) {
+    throw errTooManyBadRequest();
+  }
+  // The lock expires with the codes (D12: "locks until codes expire"). A stale
+  // row must be cleared before the atomic ADD below, or its dead count would
+  // keep feeding the cap after the lock should have lifted.
+  if (attempts && !attemptsLive) await deps.db.delete(partition, ATTEMPTS_SK);
 
   const active = await activeRows(deps, emailHash, app);
   if (active.length === 0) throw errExpiredOTT();
@@ -59,12 +64,19 @@ export const consumeOtt = async (deps: Deps, emailHash: string, app: string, cod
   const hash = codeHash(code.trim());
   const match = active.find((r) => r.sk === hash);
   if (!match) {
-    await deps.db.put({
-      pk: partition,
-      sk: ATTEMPTS_SK,
-      count: attemptCount + 1,
-      expiresAt: Math.max(...active.map((r) => r.expiresAt as number)),
-    });
+    // Atomic ADD with the post-increment value (F0): a plain put here is a
+    // read-modify-write that concurrent guesses overwrite, so the 20-attempt
+    // cap never binds under parallel load (finding 3, 2026-08-17 review).
+    // `expiresAt` keeps the lock lifting with the newest code; `ttl` bounds
+    // the row itself, since the ADD conjures it for arbitrary email hashes.
+    const expiresAt = Math.max(...active.map((r) => r.expiresAt as number));
+    const { count } = await deps.db.addToCountersReturning(
+      partition,
+      ATTEMPTS_SK,
+      { count: 1 },
+      { expiresAt, ttl: Math.ceil(expiresAt / MICROS_PER_SECOND) },
+    );
+    if (count! > OTT_WRONG_ATTEMPT_LIMIT) throw errTooManyBadRequest();
     throw errIncorrectOTT();
   }
   await deps.db.delete(partition, hash);

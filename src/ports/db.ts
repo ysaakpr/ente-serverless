@@ -45,6 +45,19 @@ export interface Db {
   query<T extends Item = Item>(pk: string, opts?: QueryOptions): Promise<T[]>;
   /** Atomic numeric ADD; creates the item when missing. */
   addToCounters(pk: string, sk: string, deltas: Record<string, number>): Promise<void>;
+  /**
+   * Atomic ADD that returns the post-increment values, so a caller can enforce
+   * a cap on a number nobody else can have observed (increment first, judge
+   * second). `set` lands alongside the ADD, the way TransactOp counters do.
+   * Creates the item when missing — rows reached this way must carry a `ttl`
+   * (via `set` or on creation) or an attacker can conjure unexpiring rows.
+   */
+  addToCountersReturning(
+    pk: string,
+    sk: string,
+    deltas: Record<string, number>,
+    set?: Record<string, unknown>,
+  ): Promise<Record<string, number>>;
   transactWrite(ops: TransactOp[]): Promise<void>;
 }
 

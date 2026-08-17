@@ -24,7 +24,7 @@ export const getMultipartUploadUrls = (deps: Deps) => async (c: Context) => {
   if (count < 1 || count > MAX_MULTIPART_PART_COUNT) throw errBadRequestSentinel();
 
   const objectKey = `${userId}/${deps.rand.uuid()}`;
-  const multipart = await deps.blobs.createMultipart(objectKey, count, deps.config.presignExpirySeconds);
+  const multipart = await deps.blobs.createMultipart(objectKey, count, deps.config.presignPutExpirySeconds);
   return c.json({
     urls: {
       objectKey,

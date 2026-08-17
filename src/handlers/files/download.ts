@@ -14,7 +14,7 @@ const signedFileUrl = async (deps: Deps, c: Context): Promise<string> => {
   const fileId = Number.parseInt(c.req.param('fileID') ?? '', 10);
   if (!Number.isFinite(fileId)) throw errBadRequestSentinel();
   const file = await getAccessibleFile(deps, auth(c).userId, fileId);
-  return deps.blobs.presignGet(file.file.objectKey!, deps.config.presignExpirySeconds);
+  return deps.blobs.presignGet(file.file.objectKey!, deps.config.presignGetExpirySeconds);
 };
 
 export const downloadFile = (deps: Deps) => async (c: Context) => {

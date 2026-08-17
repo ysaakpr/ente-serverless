@@ -13,14 +13,33 @@ export interface Config {
   /** Emails ending in this suffix get the hardcoded OTT (local dev, like museum quickstart). */
   hardcodedOttSuffix?: string;
   hardcodedOttValue?: string;
-  /** Presigned URL validity (museum PreSignedRequestValidityDuration = 7 days). */
-  presignExpirySeconds: number;
+  /**
+   * Presigned URL validity, split by verb (security review 2026-08-17,
+   * finding 5). Museum's single PreSignedRequestValidityDuration is 7 days for
+   * both. GET keeps that default until an M5 device gate proves the client
+   * re-fetches rather than caches URLs (D26/D32 both punished exactly this
+   * kind of assumption); shorten it with PRESIGN_GET_EXPIRY_SECONDS once
+   * proven. PUT — a week-long write grant to a key — defaults to 24 hours,
+   * which keeps big uploads on slow links viable while cutting the window 7×.
+   * PRESIGN_EXPIRY_SECONDS still overrides both, so nothing breaks mid-deploy.
+   */
+  presignGetExpirySeconds: number;
+  presignPutExpirySeconds: number;
   /** Plan storage for the self-host free plan, bytes (museum self-host default). */
   freePlanStorageBytes: number;
   maxFileSizeBytes: number;
   port: number;
   /** Per-request access log (make lan / make dev — the M5 gate needs it). */
   logRequests: boolean;
+  /**
+   * Origin lock (security review 2026-08-17, finding 4). When set, every
+   * request must carry this value in `x-origin-secret` or be refused 403 —
+   * CloudFront injects the header at the origin, so the direct Function URL
+   * stops being a bypass of every edge control (WAF, response headers).
+   * Unset (make dev / make lan, neither of which goes through CloudFront)
+   * the check is off entirely.
+   */
+  originSecret?: string;
   /**
    * Idle lifetime for a session token, seconds. 0 = never expires, which is
    * museum's behaviour and therefore the default: its `tokens` table has no
@@ -40,7 +59,12 @@ export const configFromEnv = (): Config => ({
   mailFromName: process.env.MAIL_FROM_NAME ?? 'Ente',
   hardcodedOttSuffix: process.env.HARDCODED_OTT_SUFFIX,
   hardcodedOttValue: process.env.HARDCODED_OTT_VALUE,
-  presignExpirySeconds: Number(process.env.PRESIGN_EXPIRY_SECONDS ?? 7 * 24 * 3600),
+  presignGetExpirySeconds: Number(
+    process.env.PRESIGN_GET_EXPIRY_SECONDS ?? process.env.PRESIGN_EXPIRY_SECONDS ?? 7 * 24 * 3600,
+  ),
+  presignPutExpirySeconds: Number(
+    process.env.PRESIGN_PUT_EXPIRY_SECONDS ?? process.env.PRESIGN_EXPIRY_SECONDS ?? 24 * 3600,
+  ),
   // 10 TiB by default (decision D11, revised 2026-08-17): it's the user's own
   // bucket and bill, but a real ceiling beats "unlimited" as a backstop
   // against a runaway client. Raise it with FREE_PLAN_STORAGE_BYTES.
@@ -48,5 +72,6 @@ export const configFromEnv = (): Config => ({
   maxFileSizeBytes: Number(process.env.MAX_FILE_SIZE_BYTES ?? 10 * 1024 * 1024 * 1024),
   port: Number(process.env.PORT ?? 8080),
   logRequests: process.env.LOG_REQUESTS === '1',
+  originSecret: process.env.ORIGIN_SECRET || undefined,
   sessionIdleExpirySeconds: Number(process.env.SESSION_IDLE_EXPIRY_SECONDS ?? 0),
 });

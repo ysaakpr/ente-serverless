@@ -85,6 +85,43 @@ describe('POST /users/verify-email', () => {
     expect(locked.status).toBe(429);
   });
 
+  /**
+   * Finding 3 of the 2026-08-17 security review: the cap must bind under
+   * PARALLEL load — the old read-then-put lost concurrent increments, letting
+   * a 6-digit code be brute-forced from an email address alone.
+   */
+  it('100 parallel wrong codes are all counted; the cap then holds; the lock still lifts', async () => {
+    await sendAndGetCode(world, 'race@b.c');
+    await Promise.all(
+      Array.from({ length: 100 }, () =>
+        world.request('POST', '/users/verify-email', {
+          body: { email: 'race@b.c', ott: '999999' },
+        }),
+      ),
+    );
+    // No lost updates: the stored counter is exactly the number of attempts.
+    const [attemptsRow] = world.deps.db
+      .dump()
+      .filter((r) => r.sk === 'ATTEMPTS' && (r.count as number) > 0);
+    expect(attemptsRow!.count).toBe(100);
+    // ttl bounds the attacker-conjurable row; expiresAt tracks the active code.
+    expect(attemptsRow!.ttl as number).toBeGreaterThan(world.deps.clock.nowMicros() / 1_000_000);
+    expect(attemptsRow!.expiresAt as number).toBeGreaterThan(world.deps.clock.nowMicros());
+
+    const locked = await world.request('POST', '/users/verify-email', {
+      body: { email: 'race@b.c', ott: '999999' },
+    });
+    expect(locked.status).toBe(429);
+
+    // D12: the lock expires WITH the codes — a fresh code after expiry works.
+    world.deps.clock.advance(60 * 60 * 1_000_000 + 1);
+    const code = await sendAndGetCode(world, 'race@b.c');
+    const ok = await world.request('POST', '/users/verify-email', {
+      body: { email: 'race@b.c', ott: code },
+    });
+    expect(ok.status).toBe(200);
+  });
+
   it('token row is stored under a hash key, with the plaintext retrievable for sessions', async () => {
     const code = await sendAndGetCode(world, 't@b.c');
     const res = await world.request('POST', '/users/verify-email', {

@@ -22,6 +22,18 @@ import { MICROS_PER_MINUTE, MICROS_PER_SECOND, type Micros } from '../lib/time.t
  */
 export const TWO_FACTOR_SESSION_VALIDITY_MICROS = 10 * MICROS_PER_MINUTE;
 
+/**
+ * Wrong-code cap per two-factor session (security review 2026-08-17,
+ * finding 1; divergence logged in D42). Museum's capture recorded no cap —
+ * uncapped, a 10-minute session absorbs ~600k guesses at 1000 req/s against
+ * 3-of-10⁶ acceptable codes, which reduces 2FA to a delay. 5 matches
+ * SRP_ATTEMPT_CAP (the closest "prove a secret for this session" analogue)
+ * and comfortably absorbs clock-drift retries at skew ±1. The counter lives
+ * on the SESSION row — 10-minute TTL, attacker can only burn the session
+ * they created — never on the user, where it would be a lockout weapon.
+ */
+export const TWO_FACTOR_ATTEMPT_LIMIT = 5;
+
 export interface TwoFactorRow {
   pk: string;
   sk: string;
@@ -32,12 +44,14 @@ export interface TwoFactorRow {
   [attr: string]: unknown;
 }
 
-interface TwoFactorSessionRow {
+export interface TwoFactorSessionRow {
   pk: string;
   sk: string;
   userId: number;
   createdAt: number;
   ttl: number;
+  /** Bumped atomically per proof attempt; absent until the first wrong code. */
+  attemptCount?: number;
   [attr: string]: unknown;
 }
 
@@ -103,14 +117,14 @@ export const createTwoFactorSession = async (deps: Deps, userId: number): Promis
 };
 
 /**
- * Resolve a session ID to its user, or null when unknown/expired. The TTL is
+ * Resolve a session ID to its row, or null when unknown/expired. The TTL is
  * enforced here as well as by DynamoDB, whose deletion is only eventual.
  */
-export const resolveTwoFactorSession = async (
+export const resolveTwoFactorSessionRow = async (
   deps: Deps,
   sessionID: string,
   now: Micros = deps.clock.nowMicros(),
-): Promise<number | null> => {
+): Promise<TwoFactorSessionRow | null> => {
   if (!sessionID) return null;
   const row = await deps.db.get<TwoFactorSessionRow>(
     keys.twoFactorSession(tokenHash(sessionID)).pk,
@@ -118,7 +132,35 @@ export const resolveTwoFactorSession = async (
   );
   if (!row) return null;
   if (row.createdAt + TWO_FACTOR_SESSION_VALIDITY_MICROS <= now) return null;
-  return row.userId;
+  return row;
+};
+
+/** Resolve a session ID to its user, or null when unknown/expired. */
+export const resolveTwoFactorSession = async (
+  deps: Deps,
+  sessionID: string,
+  now: Micros = deps.clock.nowMicros(),
+): Promise<number | null> => (await resolveTwoFactorSessionRow(deps, sessionID, now))?.userId ?? null;
+
+/**
+ * Count one proof attempt against the session and 429 past the cap. Called
+ * BEFORE the code/secret compare, so a crash after the compare can never
+ * hand out a free attempt, and a correct code past the cap still 429s.
+ * The increment is an atomic ADD (F0): parallel guesses cannot overwrite
+ * each other's count. `ttl` rides along so a row conjured by a lost race
+ * with consumeTwoFactorSession still expires.
+ */
+export const recordTwoFactorAttempt = async (
+  deps: Deps,
+  row: TwoFactorSessionRow,
+): Promise<number> => {
+  const { attemptCount } = await deps.db.addToCountersReturning(
+    row.pk,
+    row.sk,
+    { attemptCount: 1 },
+    { ttl: row.ttl },
+  );
+  return attemptCount!;
 };
 
 /** One-shot: a session is spent once it yields a token. */

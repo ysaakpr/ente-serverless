@@ -15,10 +15,23 @@ import {
   tooManyUnverifiedSessions,
   tooManyWrongAttempts,
 } from '../lib/errors.ts';
-import { MICROS_PER_HOUR } from '../lib/time.ts';
+import { MICROS_PER_HOUR, MICROS_PER_SECOND } from '../lib/time.ts';
 
 export const MAX_UNVERIFIED_SESSIONS_PER_HOUR = 10;
 export const SRP_ATTEMPT_CAP = 5;
+
+/**
+ * Row expiry (security review 2026-08-17, finding 2). create-session is
+ * unauthenticated and writes two rows per call, keyed by a caller-chosen
+ * srpUserID — without a `ttl` that is unbounded table growth for anyone.
+ * The session row must outlive a real create→verify round-trip and the
+ * replay window that produces SESSION_ALREADY_VERIFIED: 1 hour is generous.
+ * The index row feeds the 10-per-hour throttle, which queries back exactly
+ * MICROS_PER_HOUR — its TTL must EXCEED that window or the one rate limit
+ * that works quietly weakens: 2 hours, guarded by test.
+ */
+export const SRP_SESSION_TTL_MICROS = MICROS_PER_HOUR;
+export const SRP_SESSION_INDEX_TTL_MICROS = 2 * MICROS_PER_HOUR;
 
 interface SrpSessionRow {
   pk: string;
@@ -30,6 +43,7 @@ interface SrpSessionRow {
   attemptCount: number;
   isFake: boolean;
   createdAt: number;
+  ttl: number;
   [attr: string]: unknown;
 }
 
@@ -79,6 +93,7 @@ export const createAndInsertSrpSession = async (
         attemptCount: 0,
         isFake,
         createdAt: now,
+        ttl: Math.ceil((now + SRP_SESSION_TTL_MICROS) / MICROS_PER_SECOND),
       },
     },
     {
@@ -88,6 +103,7 @@ export const createAndInsertSrpSession = async (
         sk: `${padTime(now)}#${sessionID}`,
         sessionID,
         isVerified: false,
+        ttl: Math.ceil((now + SRP_SESSION_INDEX_TTL_MICROS) / MICROS_PER_SECOND),
       },
     },
   ]);
@@ -113,7 +129,10 @@ export const verifySrpSession = async (
   if (!session) throw errInvalidPassword(); // do not reveal whether the session exists
 
   if (session.isFake) {
-    await deps.db.update(session.pk, session.sk, { attemptCount: session.attemptCount + 1 });
+    // Atomic ADD, not read-modify-write: concurrent wrong guesses must all
+    // land or SRP_ATTEMPT_CAP does not bind (finding 3 of the 2026-08-17
+    // review). `ttl` rides along so a row conjured after TTL deletion expires.
+    await deps.db.addToCountersReturning(session.pk, session.sk, { attemptCount: 1 }, { ttl: session.ttl });
     throw errInvalidPassword();
   }
   if (session.isVerified) throw sessionAlreadyVerified();
@@ -131,7 +150,7 @@ export const verifySrpSession = async (
   }
 
   if (!ok) {
-    await deps.db.update(session.pk, session.sk, { attemptCount: session.attemptCount + 1 });
+    await deps.db.addToCountersReturning(session.pk, session.sk, { attemptCount: 1 }, { ttl: session.ttl });
     throw errInvalidPassword();
   }
 

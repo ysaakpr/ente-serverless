@@ -20,7 +20,7 @@ export const getUploadUrls = (deps: Deps) => async (c: Context) => {
       const objectKey = `${userId}/${deps.rand.uuid()}`;
       return {
         objectKey,
-        url: await deps.blobs.presignPut(objectKey, deps.config.presignExpirySeconds),
+        url: await deps.blobs.presignPut(objectKey, deps.config.presignPutExpirySeconds),
       };
     }),
   );

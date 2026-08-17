@@ -7,20 +7,23 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 |---|---|---|---|---|---|
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
-| auth-token.test.ts | query-param auth (gate finding D32) | M5 | 13 | 13 | ✅ |
+| auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
 | collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
 | cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
+| db-counters.test.ts | F0 race-free capped counter (security review) | SEC | 4 | 4 | ✅ |
 | e2e.int.test.ts | integration (LocalStack) | M1/M3 | 7 | 7 | ✅ |
 | entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
 | file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
-| lifecycle.test.ts | infra guards | M7 | 27 | 27 | ✅ |
+| lifecycle.test.ts | infra guards | M7 | 35 | 35 | ✅ |
+| origin-lock.test.ts | origin lock (finding 4, D43) | SEC | 4 | 4 | ✅ |
 | ping.test.ts | [HEALTH] | M1 | 2 | 2 | ✅ |
+| presign-expiry.test.ts | presign expiry split (finding 5, D44) | SEC | 3 | 3 | ✅ |
 | presign-md5.test.ts | ? | ? | 5 | 5 | ✅ |
 | send-ott.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
-| srp-endpoints.test.ts | [AUTH-SRP] | M1 | 22 | 22 | ✅ |
+| srp-endpoints.test.ts | [AUTH-SRP] | M1 | 24 | 24 | ✅ |
 | srp-math.test.ts | [AUTH-SRP] | M1 | 5 | 5 | ✅ |
 | stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 9 | 9 | ✅ |
 | subscription.test.ts | [BILLING] free-sub determinism (gate finding D30) | M5 | 7 | 7 | ✅ |
@@ -28,9 +31,9 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | trash-origin.test.ts | [TRASH] origin collection (gate finding D28) | M4/M5 | 3 | 3 | ✅ |
 | trash-purge.test.ts | [TRASH] cron | M4 | 2 | 2 | ✅ |
 | trash.test.ts | [TRASH] + M4 gate | M4 | 8 | 8 | ✅ |
-| two-factor.test.ts | [AUTH-2FA] TOTP flow (gate finding D36) | M5 | 16 | 16 | ✅ |
+| two-factor.test.ts | [AUTH-2FA] TOTP flow (gate finding D36) | M5 | 19 | 19 | ✅ |
 | upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 5 | 5 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
-| verify-email.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
+| verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 
-**Total: 243/243 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 271/271 passing.** CI must fail if any implemented endpoint is below 100%.

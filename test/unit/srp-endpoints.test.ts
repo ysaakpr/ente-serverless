@@ -10,9 +10,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { makeClientKeys, setupSrp, signupAccount, srpLogin } from '../helpers/client.ts';
 import { computeVerifier, SrpClient } from '../../src/domain/srp.ts';
-import { createAndInsertSrpSession } from '../../src/domain/srpSessions.ts';
+import {
+  createAndInsertSrpSession,
+  SRP_ATTEMPT_CAP,
+} from '../../src/domain/srpSessions.ts';
 import { b64, fromB64 } from '../../src/lib/b64.ts';
-import { MICROS_PER_HOUR } from '../../src/lib/time.ts';
+import { MICROS_PER_HOUR, MICROS_PER_SECOND } from '../../src/lib/time.ts';
 
 describe('GET /users/srp/attributes', () => {
   let world: TestWorld;
@@ -521,6 +524,58 @@ describe('POST /users/srp/create-session + verify-session', () => {
     });
     expect(capped.status).toBe(410);
     expect(((await capped.json()) as { code: string }).code).toBe('TOO_MANY_WRONG_ATTEMPTS');
+  });
+
+  /**
+   * Security review 2026-08-17, finding 2: create-session is unauthenticated
+   * and persists two rows per call (real or fake), so both must expire — and
+   * the index row's TTL must exceed the 1-hour rate-limit window it feeds, or
+   * the only working throttle silently weakens for legitimate users.
+   */
+  it('both rows of a session carry a ttl; the index ttl outlives the rate window', async () => {
+    const now = world.deps.clock.nowMicros();
+    const srpUserID = randomUUID(); // unknown -> fake session, the attacker-writable case
+    const create = await world.request('POST', '/users/srp/create-session', {
+      body: { srpUserID, srpA: b64(randomBytes(512)) },
+    });
+    const { sessionID } = (await create.json()) as { sessionID: string };
+
+    const session = await world.deps.db.get(`SRPSESSION#${sessionID}`, 'META');
+    expect(session).not.toBeNull();
+    expect(session!.ttl as number).toBeGreaterThan(now / MICROS_PER_SECOND);
+
+    const [index] = await world.deps.db.query(`SRPSESSBYUSER#${srpUserID}`, {});
+    expect(index).toBeDefined();
+    // Strictly beyond the throttle's look-back window of exactly one hour.
+    expect(index!.ttl as number).toBeGreaterThan((now + MICROS_PER_HOUR) / MICROS_PER_SECOND);
+  });
+
+  /** Finding 3 companion: concurrent wrong M1s must all be counted (atomic ADD). */
+  it('parallel wrong guesses are all recorded and the attempt cap binds', async () => {
+    const account = await signupAccount(world, 'parallel@b.c');
+    const create = await world.request('POST', '/users/srp/create-session', {
+      body: { srpUserID: account.srpUserID, srpA: b64(randomBytes(512)) },
+    });
+    const { sessionID } = (await create.json()) as { sessionID: string };
+
+    const bad = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        world.request('POST', '/users/srp/verify-session', {
+          body: { sessionID, srpUserID: account.srpUserID, srpM1: b64(randomBytes(32)) },
+        }),
+      ),
+    );
+    // No lost increments: the stored counter equals the number of attempts made.
+    const row = await world.deps.db.get(`SRPSESSION#${sessionID}`, 'META');
+    expect(row!.attemptCount).toBe(20);
+    // Every response past the cap read is 401 or 410 — and the next is 410 for sure.
+    expect(bad.every((r) => r.status === 401 || r.status === 410)).toBe(true);
+    const capped = await world.request('POST', '/users/srp/verify-session', {
+      body: { sessionID, srpUserID: account.srpUserID, srpM1: b64(randomBytes(32)) },
+    });
+    expect(capped.status).toBe(410);
+    expect(((await capped.json()) as { code: string }).code).toBe('TOO_MANY_WRONG_ATTEMPTS');
+    expect(20).toBeGreaterThan(SRP_ATTEMPT_CAP); // the test exercises the cap, not below it
   });
 
   it('M1 of wrong size is 400 with the exact museum message', async () => {

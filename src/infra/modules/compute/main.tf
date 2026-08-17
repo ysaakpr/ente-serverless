@@ -32,6 +32,14 @@ resource "aws_lambda_function" "api" {
   memory_size   = 512
   timeout       = 30
 
+  # Spend ceiling, layer 2 (security review 2026-08-17, finding 4): a hard
+  # invocation ceiling so anonymous traffic cannot scale to the account limit.
+  # Double edge, stated honestly: once exhausted, legitimate users throttle
+  # too — for a single-owner deployment that is a far better failure mode than
+  # an unbounded bill. A shared deployment should raise or unset this and lean
+  # on the WAF rate rule instead.
+  reserved_concurrent_executions = var.api_reserved_concurrency
+
   filename         = data.archive_file.api.output_path
   source_code_hash = data.archive_file.api.output_base64sha256
 
@@ -43,6 +51,10 @@ resource "aws_lambda_function" "api" {
       MAIL_FROM               = var.mail_from
       INSTANCE_ID             = local.prefix
       FREE_PLAN_STORAGE_BYTES = tostring(var.free_plan_storage_bytes)
+      # Origin lock (finding 4): the app 403s any request not carrying this
+      # value in x-origin-secret; CloudFront injects it at the origin, so the
+      # public Function URL stops bypassing every edge control.
+      ORIGIN_SECRET = var.origin_secret
     }
   }
 }
@@ -158,6 +170,58 @@ resource "aws_cloudwatch_metric_alarm" "api_errors" {
 
 # Daily cron, so a daily window: a 5-minute period would evaluate ~287 empty
 # windows between runs and tell you nothing.
+# Spend ceiling, layer 1 (finding 4): fixes nothing, but converts a surprise
+# invoice into a page. ACTUAL spend, not forecast — a page should mean money
+# already left. Budgets publishes through SNS, which needs the explicit topic
+# policy below (and that policy REPLACES the account default, so CloudWatch's
+# alarm-publish grant must be restated alongside or the Errors alarms go mute).
+resource "aws_budgets_budget" "monthly" {
+  name         = "${local.prefix}-monthly"
+  budget_type  = "COST"
+  limit_amount = tostring(var.monthly_budget_usd)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  notification {
+    comparison_operator       = "GREATER_THAN"
+    threshold                 = 80
+    threshold_type            = "PERCENTAGE"
+    notification_type         = "ACTUAL"
+    subscriber_sns_topic_arns = [aws_sns_topic.alarms.arn]
+  }
+
+  notification {
+    comparison_operator       = "GREATER_THAN"
+    threshold                 = 100
+    threshold_type            = "PERCENTAGE"
+    notification_type         = "ACTUAL"
+    subscriber_sns_topic_arns = [aws_sns_topic.alarms.arn]
+  }
+}
+
+resource "aws_sns_topic_policy" "alarms" {
+  arn = aws_sns_topic.alarms.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AllowBudgetsPublish"
+        Effect    = "Allow"
+        Principal = { Service = "budgets.amazonaws.com" }
+        Action    = "SNS:Publish"
+        Resource  = aws_sns_topic.alarms.arn
+      },
+      {
+        Sid       = "AllowCloudWatchAlarmsPublish"
+        Effect    = "Allow"
+        Principal = { Service = "cloudwatch.amazonaws.com" }
+        Action    = "SNS:Publish"
+        Resource  = aws_sns_topic.alarms.arn
+      }
+    ]
+  })
+}
+
 resource "aws_cloudwatch_metric_alarm" "trash_purge_errors" {
   alarm_name          = "${local.prefix}-trash-purge-errors"
   alarm_description   = "The daily trash/object-sweep worker failed. Unreclaimed bytes keep billing until it succeeds."

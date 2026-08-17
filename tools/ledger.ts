@@ -52,6 +52,9 @@ const MILESTONES: Record<string, { milestone: string; tags: string }> = {
   'file-data.test.ts': { milestone: 'M6', tags: '[FILE-DATA]' },
   'lifecycle.test.ts': { milestone: 'M7', tags: 'infra guards' },
   'e2e.int.test.ts': { milestone: 'M1/M3', tags: 'integration (LocalStack)' },
+  'db-counters.test.ts': { milestone: 'SEC', tags: 'F0 race-free capped counter (security review)' },
+  'origin-lock.test.ts': { milestone: 'SEC', tags: 'origin lock (finding 4, D43)' },
+  'presign-expiry.test.ts': { milestone: 'SEC', tags: 'presign expiry split (finding 5, D44)' },
 };
 
 const rows: string[] = [];

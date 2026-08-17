@@ -154,12 +154,16 @@ deploy: guard-account
 outputs:
 	@$(TF) output
 
-# Post-deploy check. 403 on the function URL means the anonymous
-# InvokeFunctionUrl permission went missing; 200 on both means the edge is live.
+# Post-deploy check. With the origin lock (D43) the HEALTHY state is:
+#   function-url 403 (app refuses requests without CloudFront's secret header)
+#   cloudfront   200
+# CloudFront is the disambiguator: 403 on BOTH means the anonymous
+# InvokeFunctionUrl permission went missing (or the origin secret is mismatched
+# between the lambda env and the distribution's custom_header).
 smoke:
 	@FU=$$($(TF) output -raw api_function_url); CF=$$($(TF) output -raw server_url); \
-	printf '  function-url /ping -> '; curl -sS -o /dev/null -w '%{http_code}\n' "$${FU}ping"; \
-	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}\n' "$$CF/ping"; \
+	printf '  function-url /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (403 = origin lock working)\n' "$${FU}ping"; \
+	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (must be 200)\n' "$$CF/ping"; \
 	echo "  point the app at: $$CF"
 
 # Tears down the STATELESS half only: both lambdas, the function URL, the cron,
