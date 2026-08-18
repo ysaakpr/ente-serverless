@@ -67,6 +67,18 @@ export const requireAuth = (deps: Deps) => async (c: Context, next: Next) => {
     }
   }
 
+  // SECURITY-REVIEW-2 F7: refuse tokens for a tombstoned account. deleteAccount
+  // revokes tokens then tombstones, but a token minted by a login racing that
+  // window would otherwise keep working on a "deleted" account until the reaper
+  // catches up. One extra point read on the hot path — acceptable at this
+  // single-owner scale. Only an explicit isDeleted===true blocks; a missing
+  // user row falls through so a transient inconsistency can't lock out a session.
+  const user = await deps.db.get(keys.user(row.userId).pk, 'META');
+  if (user?.isDeleted === true) {
+    deps.db.delete(row.pk, row.sk).catch(() => {});
+    return c.json({ error: 'invalid token' }, 401);
+  }
+
   c.set('auth', {
     userId: row.userId,
     token,

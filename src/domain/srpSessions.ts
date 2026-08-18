@@ -121,6 +121,7 @@ export const verifySrpSession = async (
   verifierB64: string,
   sessionID: string,
   srpM1: string,
+  expectedSrpUserID?: string,
 ): Promise<string> => {
   const m1Bytes = fromB64safe(srpM1);
   if (m1Bytes.length !== 32) throw badRequest(`srpM1 size is ${m1Bytes.length}, expected 32`);
@@ -128,15 +129,34 @@ export const verifySrpSession = async (
   const session = await deps.db.get<SrpSessionRow>(keys.srpSession(sessionID).pk, 'META');
   if (!session) throw errInvalidPassword(); // do not reveal whether the session exists
 
-  if (session.isFake) {
-    // Atomic ADD, not read-modify-write: concurrent wrong guesses must all
-    // land or SRP_ATTEMPT_CAP does not bind (finding 3 of the 2026-08-17
-    // review). `ttl` rides along so a row conjured after TTL deletion expires.
-    await deps.db.addToCountersReturning(session.pk, session.sk, { attemptCount: 1 }, { ttl: session.ttl });
+  // SECURITY-REVIEW-2 (defense-in-depth): bind the session to the srpUserID in
+  // the request, so a leaked/guessed sessionID cannot be exercised under a
+  // different identity to burn a victim's attempt counter. Same 401 as any
+  // other failure — reveals nothing. Rejected before the counter is touched.
+  if (expectedSrpUserID !== undefined && session.srpUserID !== expectedSrpUserID) {
     throw errInvalidPassword();
   }
+
   if (session.isVerified) throw sessionAlreadyVerified();
-  if (session.attemptCount >= SRP_ATTEMPT_CAP) throw tooManyWrongAttempts();
+
+  // SECURITY-REVIEW-2 F2: count the attempt with an atomic ADD and gate on the
+  // RETURNED post-increment value, BEFORE the compare — never on `session`,
+  // whose `attemptCount` came from the eventually-consistent `get` above. The
+  // previous gate read that stale value and discarded this ADD's result, so a
+  // concurrent burst slipped unbounded guesses past a cap of 5. This mirrors
+  // the OTT (ott.ts) and TOTP (twoFactor.ts) fixes: increment first, judge
+  // second. The fake branch caps identically, so an unknown srpUserID is
+  // indistinguishable from a wrong password even at the cap boundary. `ttl`
+  // rides along so a row conjured after TTL deletion still expires.
+  const { attemptCount } = await deps.db.addToCountersReturning(
+    session.pk,
+    session.sk,
+    { attemptCount: 1 },
+    { ttl: session.ttl },
+  );
+  if (attemptCount! > SRP_ATTEMPT_CAP) throw tooManyWrongAttempts();
+
+  if (session.isFake) throw errInvalidPassword();
 
   const server = new SrpServer(fromB64safe(verifierB64), fromB64safe(session.serverKey));
   let ok = false;
@@ -149,10 +169,7 @@ export const verifySrpSession = async (
     ok = false;
   }
 
-  if (!ok) {
-    await deps.db.addToCountersReturning(session.pk, session.sk, { attemptCount: 1 }, { ttl: session.ttl });
-    throw errInvalidPassword();
-  }
+  if (!ok) throw errInvalidPassword();
 
   await deps.db.update(session.pk, session.sk, { isVerified: true });
   await deps.db

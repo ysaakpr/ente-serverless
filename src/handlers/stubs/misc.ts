@@ -5,8 +5,10 @@
  */
 
 import type { Context } from 'hono';
+import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
+import { keys } from '../../domain/model.ts';
 
 export const storageBonusDetails = (_deps: Deps) => async (c: Context) =>
   c.json({
@@ -15,10 +17,22 @@ export const storageBonusDetails = (_deps: Deps) => async (c: Context) =>
     hasAppliedCode: false,
   });
 
+// SECURITY-REVIEW-2 F1: the body is whitelisted through a strict zod object
+// (unknown keys are stripped) and the key is built server-side, so a client
+// can no longer smuggle `pk`/`sk` (or any other attribute) into the write and
+// overwrite an arbitrary row. Museum's push registration carries only these
+// device-token fields, and the row is never read back, so stripping the rest
+// is behaviour-neutral. NEVER spread raw `c.req.json()` into a `db.put`.
+const pushSchema = z.object({
+  fcmToken: z.string().optional(),
+  apnsToken: z.string().optional(),
+  pushToken: z.string().optional(),
+});
+
 export const pushToken = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  await deps.db.put({ pk: `USER#${userId}`, sk: 'PUSHTOKEN', ...body });
+  const body = pushSchema.parse(await c.req.json().catch(() => ({})));
+  await deps.db.put({ ...keys.pushToken(userId), ...body });
   return c.json({});
 };
 

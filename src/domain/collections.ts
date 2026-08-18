@@ -7,6 +7,7 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { getUser } from './users.ts';
+import { ConditionFailedError } from '../ports/db.ts';
 import {
   errBadRequestSentinel,
   errBatchSizeTooLarge,
@@ -50,9 +51,23 @@ const restampCollection = (deps: Deps, row: CollectionRow): CollectionRow => {
 };
 
 export const putCollection = async (deps: Deps, row: CollectionRow): Promise<CollectionRow> => {
-  const stamped = restampCollection(deps, row);
-  await deps.db.put(stamped);
-  return stamped;
+  // SECURITY-REVIEW-2 F3: guard the create against an id collision. Server IDs
+  // are epoch-derived and only monotonic PER PROCESS, so two Lambda instances
+  // minting in the same millisecond can produce the same collectionId; an
+  // unconditioned put would let the second silently overwrite the first —
+  // possibly another user's collection. ifNotExists + re-mint makes the loser
+  // take a fresh id rather than clobber the winner.
+  for (let attempt = 0; ; attempt++) {
+    const stamped = restampCollection(deps, row);
+    try {
+      await deps.db.put(stamped, { ifNotExists: true });
+      return stamped;
+    } catch (err) {
+      if (!(err instanceof ConditionFailedError) || attempt >= 5) throw err;
+      const collectionId = deps.ids.next();
+      row = { ...row, collectionId, ...keys.collection(collectionId) };
+    }
+  }
 };
 
 export const getCollection = async (deps: Deps, collectionId: number): Promise<CollectionRow | null> =>

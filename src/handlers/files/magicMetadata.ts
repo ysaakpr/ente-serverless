@@ -11,6 +11,7 @@ import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { padTime } from '../../domain/model.ts';
 import { getFile, type MagicMetadata } from '../../domain/files.ts';
+import { assertBatchSize } from '../../domain/collections.ts';
 import { errBadRequestSentinel, errPermissionDenied, SentinelError } from '../../lib/errors.ts';
 
 const bodySchema = z.object({
@@ -30,6 +31,10 @@ const bodySchema = z.object({
 
 export const updateMagicMetadata = (deps: Deps, isPublic: boolean) => async (c: Context) => {
   const body = bodySchema.parse(await c.req.json());
+  // SECURITY-REVIEW-2 F4: bound the batch — each item drives a getFile, a
+  // FILE-LINKS query, and a write per live collection link, so an uncapped
+  // list is a write-amplification DoS.
+  assertBatchSize(body.metadataList.length);
   const { userId } = auth(c);
   const attr = isPublic ? 'pubMagicMetadata' : 'magicMetadata';
 

@@ -56,8 +56,16 @@ export const purgeAgedTrash = async (deps: Deps): Promise<number> => {
   });
   let purged = 0;
   for (const row of due) {
-    await permanentlyDelete(deps, row.userID, row);
-    purged += 1;
+    try {
+      await permanentlyDelete(deps, row.userID, row);
+      purged += 1;
+    } catch (err) {
+      // SECURITY-REVIEW-2 F6: isolate per-row failures so one poison row (or a
+      // transient throttle from the unbounded drain) cannot reject the whole
+      // batch — which, since purge runs before the object sweep, would starve
+      // both GCs. Leave the row; it retries next run. Mirrors sweepDeletedObjects.
+      console.error('trash purge: row failed, leaving for next run', row.pk, row.sk, err);
+    }
   }
   return purged;
 };

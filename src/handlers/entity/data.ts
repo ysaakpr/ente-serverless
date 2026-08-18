@@ -128,7 +128,13 @@ export const entityDiff = (deps: Deps) => async (c: Context) => {
   const sinceTimeRaw = c.req.query('sinceTime');
   const limit = Number.parseInt(c.req.query('limit') ?? '0', 10);
   if (!type || sinceTimeRaw === undefined) throw errBadRequest();
-  if (limit <= 0 || limit > 5000) throw badRequest('limit must be between 1 and 5000');
+  // SECURITY-REVIEW-2 F5: reject a non-finite limit. `?limit=abc` parses to
+  // NaN, and both `NaN <= 0` and `NaN > 5000` are false, so without this the
+  // guard is skipped and NaN flows into query(), disabling the page Limit and
+  // draining the whole USER#<id>#ENT#<type> partition.
+  if (!Number.isFinite(limit) || limit <= 0 || limit > 5000) {
+    throw badRequest('limit must be between 1 and 5000');
+  }
   const { userId } = auth(c);
   const sinceTime = Number.parseInt(sinceTimeRaw, 10) || 0;
 

@@ -27,7 +27,7 @@ export const verifySrpSessionHandler = (deps: Deps) => async (c: Context) => {
   const guard = await deps.db.get(keys.srpUserGuard(body.srpUserID).pk, 'META');
   if (!guard) {
     // Unknown srpUserID: run the fake handshake so timing/shape match, then fail.
-    await verifySrpSession(deps, FAKE_VERIFIER_B64, body.sessionID, body.srpM1);
+    await verifySrpSession(deps, FAKE_VERIFIER_B64, body.sessionID, body.srpM1, body.srpUserID);
     throw errInvalidPassword();
   }
 
@@ -35,7 +35,13 @@ export const verifySrpSessionHandler = (deps: Deps) => async (c: Context) => {
   const srp = await deps.db.get(keys.userSrp(userId).pk, 'SRP');
   if (!srp) throw errInvalidPassword();
 
-  const srpM2 = await verifySrpSession(deps, srp.verifier as string, body.sessionID, body.srpM1);
+  const srpM2 = await verifySrpSession(
+    deps,
+    srp.verifier as string,
+    body.sessionID,
+    body.srpM1,
+    body.srpUserID,
+  );
 
   const user = await getUser(deps, userId);
   if (!user) throw errInvalidPassword();

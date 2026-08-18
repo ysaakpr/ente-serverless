@@ -12,6 +12,7 @@ import { auth } from '../../middleware/auth.ts';
 import { keys } from '../../domain/model.ts';
 import { getKeyAttributes, getUser } from '../../domain/users.ts';
 import { listTokenRows } from '../../domain/sessions.ts';
+import { reapUserData } from '../../domain/accountReaper.ts';
 import { encryptToken, generateToken, tokenHash } from '../../domain/tokens.ts';
 import { MICROS_PER_HOUR } from '../../lib/time.ts';
 import { errNotFound, errPermissionDenied } from '../../lib/errors.ts';
@@ -61,12 +62,16 @@ export const deleteAccount = (deps: Deps) => async (c: Context) => {
   for (const row of await listTokenRows(deps, userId)) {
     await deps.db.delete(row.pk, row.sk);
   }
-  // Free the email and tombstone the account; bulk data cleanup is the sweep
-  // cron's concern (same deferred discipline as museum's queued deletion).
+  // Free the email and tombstone the account first, so auth refuses every token
+  // (the isDeleted check in requireAuth) before any data is touched.
   await deps.db.transactWrite([
     { kind: 'delete', key: keys.emailGuard(user.emailHash) },
     { kind: 'delete', key: { pk: `USER#${userId}`, sk: 'DELETE-CHALLENGE' } },
     { kind: 'put', item: { ...user, isDeleted: true, deletedAt: deps.clock.nowMicros() } },
   ]);
+  // SECURITY-REVIEW-2 F7: actually reap the user's data — enqueue their S3
+  // objects for the sweep and drop key material — rather than leaving it to a
+  // cron that never reaped users. Best-effort; the deletion above already stands.
+  await reapUserData(deps, userId);
   return c.json({ isSubscriptionCancelled: false, userID: userId });
 };

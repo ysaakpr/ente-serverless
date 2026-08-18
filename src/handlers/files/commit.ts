@@ -69,50 +69,67 @@ export const createFile = async (deps: Deps, userId: number, body: CommitBody) =
   const totalBytes = sizes.fileSize + sizes.thumbSize;
   await assertQuota(deps, userId, totalBytes);
 
-  const fileId = deps.ids.next();
   const now = deps.clock.nowMicros();
-  const fileRowItem: FileRow = {
-    ...keys.file(fileId),
-    fileId,
-    ownerID: userId,
-    encryptedKey: body.encryptedKey,
-    keyDecryptionNonce: body.keyDecryptionNonce,
-    file: { objectKey: body.file.objectKey!, decryptionHeader: body.file.decryptionHeader },
-    thumbnail: { objectKey: body.thumbnail.objectKey!, decryptionHeader: body.thumbnail.decryptionHeader },
-    metadata: {
-      encryptedData: body.metadata.encryptedData,
-      decryptionHeader: body.metadata.decryptionHeader,
-    },
-    ...(body.magicMetadata ? { magicMetadata: body.magicMetadata as MagicMetadata } : {}),
-    ...(body.pubMagicMetadata ? { pubMagicMetadata: body.pubMagicMetadata as MagicMetadata } : {}),
-    info: { fileSize: sizes.fileSize, thumbSize: sizes.thumbSize },
-    updationTime: 0,
-  };
-  const link = linkRow(deps, body.collectionID, fileId, body.encryptedKey, body.keyDecryptionNonce, now);
-  fileRowItem.updationTime = link.updationTime;
-
-  try {
-    await deps.db.transactWrite([
-      { kind: 'put', item: fileRowItem },
-      { kind: 'put', ifNotExists: true, item: { ...objectGuardKey(body.file.objectKey!), fileId, type: 'file' } },
-      { kind: 'put', ifNotExists: true, item: { ...objectGuardKey(body.thumbnail.objectKey!), fileId, type: 'thumbnail' } },
-      { kind: 'put', item: link },
-      {
-        kind: 'counter',
-        key: { pk: keys.userUsage(userId).pk, sk: 'USAGE' },
-        deltas: { bytes: totalBytes, fileCount: 1 },
+  // SECURITY-REVIEW-2 F3: mint-then-commit in a bounded retry. Server fileIDs
+  // are epoch-derived and only monotonic per process, so two instances minting
+  // in the same millisecond can collide; an unconditioned file-row put would
+  // let one commit overwrite another user's file. The file row is now written
+  // ifNotExists, and a collision (as opposed to a genuine duplicate object)
+  // re-mints and retries.
+  for (let attempt = 0; ; attempt++) {
+    const fileId = deps.ids.next();
+    const fileRowItem: FileRow = {
+      ...keys.file(fileId),
+      fileId,
+      ownerID: userId,
+      encryptedKey: body.encryptedKey,
+      keyDecryptionNonce: body.keyDecryptionNonce,
+      file: { objectKey: body.file.objectKey!, decryptionHeader: body.file.decryptionHeader },
+      thumbnail: { objectKey: body.thumbnail.objectKey!, decryptionHeader: body.thumbnail.decryptionHeader },
+      metadata: {
+        encryptedData: body.metadata.encryptedData,
+        decryptionHeader: body.metadata.decryptionHeader,
       },
-    ]);
-  } catch (err) {
-    if (!(err instanceof ConditionFailedError)) throw err;
-    // objectKey already committed — museum onDuplicateObjectDetected
-    const existing = await resolveDuplicateCommit(deps, userId, body as never, sizes);
-    return echoFile(deps, { ...fileRowItem, fileId: existing.fileId }, body, collection.ownerID, now);
+      ...(body.magicMetadata ? { magicMetadata: body.magicMetadata as MagicMetadata } : {}),
+      ...(body.pubMagicMetadata ? { pubMagicMetadata: body.pubMagicMetadata as MagicMetadata } : {}),
+      info: { fileSize: sizes.fileSize, thumbSize: sizes.thumbSize },
+      updationTime: 0,
+    };
+    const link = linkRow(deps, body.collectionID, fileId, body.encryptedKey, body.keyDecryptionNonce, now);
+    fileRowItem.updationTime = link.updationTime;
+
+    try {
+      await deps.db.transactWrite([
+        { kind: 'put', ifNotExists: true, item: fileRowItem },
+        { kind: 'put', ifNotExists: true, item: { ...objectGuardKey(body.file.objectKey!), fileId, type: 'file' } },
+        { kind: 'put', ifNotExists: true, item: { ...objectGuardKey(body.thumbnail.objectKey!), fileId, type: 'thumbnail' } },
+        { kind: 'put', item: link },
+        {
+          kind: 'counter',
+          key: { pk: keys.userUsage(userId).pk, sk: 'USAGE' },
+          deltas: { bytes: totalBytes, fileCount: 1 },
+        },
+      ]);
+    } catch (err) {
+      if (!(err instanceof ConditionFailedError)) throw err;
+      // A pre-existing OBJECT guard for our keys => genuine duplicate object
+      // (museum onDuplicateObjectDetected). None => the fileId itself collided
+      // (F3): re-mint and retry.
+      const dupe =
+        (await deps.db.get(objectGuardKey(body.file.objectKey!).pk, 'META')) ??
+        (await deps.db.get(objectGuardKey(body.thumbnail.objectKey!).pk, 'META'));
+      if (dupe) {
+        const existing = await resolveDuplicateCommit(deps, userId, body as never, sizes);
+        return echoFile(deps, { ...fileRowItem, fileId: existing.fileId }, body, collection.ownerID, now);
+      }
+      if (attempt >= 5) throw err;
+      continue;
+    }
+    // Tag the original so the GLACIER_IR lifecycle rule (tier=original) picks it
+    // up; a tagging failure only costs storage class, never the commit.
+    await deps.blobs.setTags(body.file.objectKey!, { tier: 'original' }).catch(() => {});
+    return echoFile(deps, fileRowItem, body, collection.ownerID, now);
   }
-  // Tag the original so the GLACIER_IR lifecycle rule (tier=original) picks it
-  // up; a tagging failure only costs storage class, never the commit.
-  await deps.blobs.setTags(body.file.objectKey!, { tier: 'original' }).catch(() => {});
-  return echoFile(deps, fileRowItem, body, collection.ownerID, now);
 };
 
 const echoFile = (

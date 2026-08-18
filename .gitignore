@@ -13,3 +13,9 @@ tfplan
 *.swo
 *~
 .DS_Store
+
+# Second-pass security findings (2026-08-18). Gitignored deliberately: it
+# details a CONFIRMED, UNFIXED account-takeover exploit (exact payloads). Do
+# not commit a working exploit recipe to history — move it into tracking (as
+# SECURITY-REVIEW.md is) only after the F1 critical is fixed and re-verified.
+SECURITY-REVIEW-2.md

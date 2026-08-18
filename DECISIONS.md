@@ -603,6 +603,74 @@ source says Y — source won).
   gate proves the gallery survives idling past the window. Guarded by
   `test/unit/presign-expiry.test.ts`.
 
+- **D45 [SECURITY 2026-08-18] Second review (SECURITY-REVIEW-2.md, gitignored):
+  nine findings fixed. None is an observable oracle divergence** — every change
+  is invisible hardening, an internal-consistency fix, or a rejection of clearly
+  malformed input. Tests in `test/unit/security-review-2.test.ts` (+ the
+  existing SRP concurrency test). Summary of what changed and why:
+  - **F1 (critical) — `POST /push/token` arbitrary write.** The handler spread
+    raw `c.req.json()` into `db.put` AFTER `pk`/`sk`, so a client `pk`/`sk`
+    overrode the server key → write to any table row → forge a `TOKEN#` row →
+    account takeover. Now a strict zod schema strips unknown keys and the key is
+    built server-side (`keys.pushToken`). Museum's push row is store-and-ignore,
+    so dropping non-device-token fields is behaviour-neutral.
+  - **F2 — SRP verify attempt cap bypassable under concurrency.** The gate read
+    a stale, eventually-consistent `attemptCount` and discarded the atomic ADD's
+    return, so a parallel burst slipped unbounded guesses past a cap of 5. Now it
+    increments first and gates on the returned value — the same shape as the
+    OTT/TOTP fixes (F0/D42). The fake-session branch caps identically, so an
+    unknown `srpUserID` is indistinguishable from a wrong password at the cap.
+  - **F3 — colliding server IDs.** Epoch-derived IDs are only monotonic per
+    process, so two instances minting in one millisecond could collide and the
+    unconditioned put let one file/collection overwrite another user's. File and
+    collection creates now write `ifNotExists` and re-mint on collision.
+  - **F4 — unbounded batch endpoints.** `/files/info`, `/files/magic-metadata`,
+    `/trash/delete` took uncapped arrays (a single-request fan-out DoS). Now
+    `assertBatchSize` (≤1000 → 413), matching the sibling batch routes.
+  - **F5 — `entityDiff` `limit=NaN`.** `?limit=abc` slipped past `limit<=0 ||
+    limit>5000` (both false for NaN) and drained the whole partition. Now
+    `Number.isFinite` gates it.
+  - **F6 — purge cron fragility.** `purgeAgedTrash` had no per-row try/catch and
+    ran before the object sweep, so one poison/throttle error wedged both GCs.
+    Now each row is isolated (skip-and-log, like the sweep already did) and the
+    worker runs both GCs independently, re-throwing at the end so the CloudWatch
+    `Errors` alarm still fires.
+  - **F7 — deletion left data + never checked `isDeleted`.** `deleteAccount`
+    tombstoned the user but nothing reaped their S3 objects or key material
+    (the "sweep cron's concern" comment was untrue). Now `reapUserData`
+    (`domain/accountReaper.ts`) enqueues the user's objects for the existing
+    sweep and drops KEYS/SRP/2FA rows, and `requireAuth` refuses a token whose
+    user row is `isDeleted` (closes the concurrent-login-during-delete TOCTOU at
+    the cost of one point read per request — acceptable at single-owner scale).
+  - **F9 — `HASHING_KEY` length unchecked.** `wire.ts` accepted any non-empty
+    value; a malformed one decoded to a short/empty buffer and silently degraded
+    `emailHash` to an UNKEYED hash. Now it must decode to exactly 32 bytes.
+  - **Defense-in-depth:** SRP verify now binds the session to the request's
+    `srpUserID`, so a leaked/guessed sessionID can't be exercised under another
+    identity to burn its counter.
+
+- **D46 [SECURITY 2026-08-18] Deliberately NOT changed, to preserve oracle
+  parity (ground rule #1).** These second-review items are museum-faithful and
+  changing them would invent a shape or break the stock client; recorded so they
+  are not re-opened as regressions:
+  - **`GET /users/sessions` returns plaintext tokens** (F8). Museum stores and
+    returns them, and the client terminates a session by passing that very token
+    to `DELETE /users/session?token=`, so hiding it would break termination.
+    Left as-is; revisit only with a museum-divergent session-id scheme.
+  - **OTT is not purpose-bound** (login vs change-email share the partition).
+    Not exploitable — every path still needs the code delivered to the target
+    inbox, and `sendOtt` refuses a `change` OTT for an already-registered
+    address. Museum separates purposes; matching it is a future capture, not a
+    guess.
+  - **TOTP codes are replayable within their ~90s skew window** and **2FA
+    enable/disable/change-email do not re-auth or rotate sessions** — both
+    museum/pquerna-faithful. The per-session TOTP cap of 5 (D42) is already a
+    port improvement over museum's uncapped behaviour.
+  - **`entityDiff`/`getEntityKey` skip `assertEntityType`.** Verified NOT
+    cross-tenant (the partition is always `USER#<caller>` / `ENTITY#<caller>`),
+    so it is a pure-consistency nit; adding the assert risks 400-ing a type
+    museum returns empty for, so it waits on a capture.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

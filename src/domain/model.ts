@@ -38,6 +38,8 @@ export const keys = {
     sk: id,
   }),
   remoteStore: (userId: number, key: string) => ({ pk: `USER#${userId}`, sk: `STORE#${key}` }),
+  /** Store-and-ignore push registration (one row per user). */
+  pushToken: (userId: number) => ({ pk: `USER#${userId}`, sk: 'PUSHTOKEN' }),
 };
 
 // GSI partitions
