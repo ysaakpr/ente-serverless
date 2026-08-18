@@ -53,6 +53,10 @@ project creation; the tofu never imports TS and vice versa.
 
 ## Running it
 
+Full step-by-step setup lives in **[INSTALL.md](INSTALL.md)** — local
+development on LocalStack, pointing the stock ente app at the server on your
+LAN, and the AWS deployment with OpenTofu. Quick reference:
+
 ```bash
 npm install
 make test          # unit suites — no docker needed
