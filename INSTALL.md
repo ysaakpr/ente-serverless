@@ -350,6 +350,33 @@ Replay the gate flows from Part B against the cloud `server_url`: signup,
 backup, browse, trash/restore, second-device login. Watch
 `/aws/lambda/ente-sl-<env>-api` logs in CloudWatch for surprises.
 
+### C12. Subscribe to the CloudFront FREE pricing plan
+
+```bash
+AWS_PROFILE=ente-sl make pricing-plan
+```
+
+One-time, idempotent, and the biggest single line off the bill: the flat-rate
+FREE plan covers the WAF web ACL, its rate rule, and all CloudFront/WAF
+request fees for this distribution — otherwise ≈ $6/mo of flat WAF fees (D47).
+The plan's allowances (1M requests / 100 GB per month) only ever see small
+JSON — photo bytes go straight to S3 via presigned URLs — and exceeding them
+never bills anything.
+
+It is a CLI step rather than a tofu resource because the AWS provider does not
+support pricing plans yet; consequently it does **not** survive `make destroy`
+— re-run it after any re-apply that mints a new distribution.
+`make pricing-plan-status` shows the current subscription. If the deployer
+user predates D47, re-paste `src/infra/deployer-policy.json` over its inline
+policy first (C3) — the `PricingPlanFreeTier` statement is new.
+
+The edge module is deliberately FREE-tier-shaped (D47): AWS-managed policies
+only, no byte-match statements in the WAF, and `PriceClass_All` — the FREE
+tier gates those features (the price-class gate is undocumented), and AWS
+refuses (or warns on) the subscription while the distribution uses them. If subscribing complains about incompatible
+configuration, a pre-D47 edge config is still deployed — run the C6/C7
+plan-deploy cycle first, then retry.
+
 ---
 
 ## Updating a deployment

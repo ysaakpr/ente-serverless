@@ -14,3 +14,12 @@ output "table_name" {
 output "objects_bucket" {
   value = module.data.objects_bucket
 }
+
+# Both consumed by `make pricing-plan` (D47).
+output "distribution_arn" {
+  value = module.edge.distribution_arn
+}
+
+output "web_acl_arn" {
+  value = module.edge.web_acl_arn
+}

@@ -53,7 +53,7 @@ on `POST /users/ott` will not fire an alarm. That one is a log concern.
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api` | `PriceClass_200` (see §2.1), IPv6 on, default `*.cloudfront.net` cert, no OAC (deliberate — same finding as immich-serverless). Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies. All 7 methods allowed. Its domain is the `server_url` output the app gets pointed at. |
+| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert, no OAC (deliberate — same finding as immich-serverless). Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies. All 7 methods allowed. Its domain is the `server_url` output the app gets pointed at. |
 
 Everything carries default tags `Project=ente-serverless`, `Env=dev`,
 `ManagedBy=opentofu`.
@@ -76,8 +76,11 @@ These are the actual gating work for the first apply.
    config, and the make targets pass only `-var-file`, so plan and apply cannot
    disagree about it. Note that **tofu ignores your AWS CLI's configured
    region** — `aws configure get region` says nothing about where this lands.
-   The price class is **settled, not open**: `edge/main.tf` now pins
-   `PriceClass_200`. `PriceClass_100` covers only US, Canada, Europe and
+   The price class is **settled, not open** — but by D47 now, not by cost:
+   the flat-rate FREE plan refuses a restricted price class, so `edge/main.tf`
+   pins `PriceClass_All` (guarded). The analysis below compared `_200` to
+   `_100` for pay-as-you-go and applies again only if the plan is ever
+   cancelled: `edge/main.tf` then pinned `PriceClass_200`. `PriceClass_100` covers only US, Canada, Europe and
    Israel, so Asian viewers hitched to a distant edge on every API round-trip.
    Checked against the AWS price-list API rather than assumed, the upgrade is
    free in all but name — every region `_200` adds (India, Asia Pacific,
@@ -195,7 +198,11 @@ Ordered by how likely each is to bite on the first apply.
   on the full query string for these routes. Our own gate logger prints the
   path only (verified), so `make lan` does not echo tokens.
 
-- **No abuse protection at the edge.** The Function URL is auth NONE, and there
+- ~~**No abuse protection at the edge.**~~ (fixed 2026-08-17, D43: WAF rate
+  rule + the origin lock below; reshaped 2026-08-19, D47, to an unscoped
+  2000/5min/IP rule so the WAF costs $0 under the FREE pricing plan.) The
+  original finding, for the
+  record: the Function URL is auth NONE, and there
   is no WAF, no rate limiting, and no geo restriction on the distribution. The
   app-level limits museum has are implemented (OTT: 10 active codes, 20 wrong
   attempts → 429; SRP: 5 attempts, 10 unverified sessions/hour) — but nothing
@@ -307,9 +314,20 @@ For a ~500 GB library with ~10 GB of thumbnails and personal-scale traffic:
 | DynamoDB on-demand + PITR | small table, low RPS | < $1 |
 | Lambda (arm64, both functions) | well inside free tier | ~$0 |
 | CloudFront | JSON only, free tier | ~$0 |
+| WAF (web ACL + D43 rate rule) | $5 + $1 flat + $0.60/1M req | $0 under D47, else ≈ $6 |
 | CloudWatch Logs | 30-day retention, $0.50/GB ingest | < $1 |
 | SES | $0.10 / 1,000 mails | ~$0 |
 | **Baseline** | | **≈ $3–5** |
+
+The WAF line is the one worth understanding: on pay-as-you-go its flat fees
+dwarf every other line, so the distribution subscribes to the CloudFront
+flat-rate **FREE** pricing plan (`make pricing-plan`, D47), which covers the
+web ACL, the rule, and all CloudFront/WAF request fees for this distribution.
+Its 1M-request / 100 GB monthly allowances see only the small-JSON API path —
+photo bytes ride presigned S3 URLs straight to the bucket and never touch the
+distribution — and exceeding them never bills; AWS emails, and only sustained
+excess degrades edge placement. If demand outgrows FREE, revert to
+pay-as-you-go rather than Pro ($15/mo only wins past ~15M requests/month).
 
 Variable, and the part that actually matters: **GIR retrieval at $0.03/GB** plus
 **S3 egress at $0.09/GB** on every full-resolution download past the first
@@ -321,8 +339,8 @@ restore is not — 500 GB out is roughly $15 retrieval + $36 egress.
 Steps 1–4 are the out-of-band work; from step 5 on it is all make targets.
 
 1. **Decide the account and region** (closes half of D4). The region binds SES,
-   so this must come first. The price class no longer factors in — §2.1 settles
-   it at `PriceClass_200` — but the region still fixes where the origin lives,
+   so this must come first. The price class no longer factors in — D47 settles
+   it at `PriceClass_All` — but the region still fixes where the origin lives,
    which is the round-trip the nearer edge cannot shorten.
 2. **Verify one SES identity in that region** — your own email address is
    enough; no domain, no support ticket, no waiting. Stay in the sandbox and

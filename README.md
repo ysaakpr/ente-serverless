@@ -137,6 +137,10 @@ pieces** — roughly the ~60-route core plus magic metadata and
 | Legacy / trusted contacts | ⚪ Pending | legacy-kits (14 routes), emergency-contacts beyond the info stub | Tier 2 |
 | Admin API, Stripe webhooks | Out of scope | operator tooling / self-host is free — deliberate exclusion | — |
 
+The holistic build plan for the Pending rows — phasing, schema decisions,
+caveats, and their mitigations — lives in
+**[PENDING-FEATURES-PLAN.md](PENDING-FEATURES-PLAN.md)**.
+
 Notes on the two headline Pending rows (2026-08-18 audit): every collection
 path today is hard-gated to the owner (`getOwnedCollection`,
 `getAccessibleFile`) and the collection JSON hardcodes

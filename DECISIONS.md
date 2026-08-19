@@ -671,6 +671,73 @@ source says Y — source won).
     so it is a pure-consistency nit; adding the assert risks 400-ing a type
     museum returns empty for, so it waits on a capture.
 
+- **D47 [COST 2026-08-19] The distribution subscribes to the CloudFront
+  flat-rate FREE pricing plan — the WAF becomes $0 instead of the bill's
+  largest fixed line.** On pay-as-you-go the D43 rate rule costs $5/mo (web
+  ACL) + $1/mo (rule) + $0.60/1M requests — trivially the dominant line item
+  when everything else sits in free tier. The config already embodies every
+  applicable WAF cost practice (scope-down on the rate rule, no managed rule
+  groups, no WAF logging, bytes bypass the distribution via presigned S3), so
+  the fixed fees were the irreducible remainder. AWS's flat-rate plans
+  (launched late 2025) cover, for one distribution + one web ACL: the ACL,
+  custom rules, and ALL CloudFront/WAF request fees. FREE tier = $0/mo.
+  - **Eligibility checked against the unsupported-features list**: standard
+    distribution, modern managed cache/origin-request policies, no real-time
+    logs, no rule groups, no OAI/dedicated-IP/field-level encryption, and the
+    web ACL is associated with only this distribution (plans require exclusive
+    association — and require an ACL stay attached, so D43's rule is
+    load-bearing here, not just tolerated).
+  - **Two D43 controls were FREE-tier-gated and got substitutes** (the console
+    flags them on the switch-plan page: "custom response headers policies,
+    byte match" — the docs' unsupported-features list does NOT mention these
+    per-tier gates; the features-by-tier matrix does). Accepted dilutions,
+    decided 2026-08-19:
+    - The rate rule's auth-path scope-down used `byte_match_statement`s
+      (Business-tier regex/byte matching); plain IP rate limiting is in every
+      tier. The rule is now unscoped at **2000/5min/IP** (was 300/5min on
+      auth paths only) — high enough to clear an initial backup's API burst,
+      still a hard flood ceiling. The brute-force bounds were never really
+      the edge's: the app's atomic per-account caps (D42/D45) are the tight
+      gate, and SES-burn is sandbox-bounded besides.
+    - The custom response-headers policy (`no-referrer`) is replaced by the
+      AWS managed SecurityHeadersPolicy (`67f7725c-…`): HSTS 1y + nosniff
+      survive unchanged; Referrer-Policy becomes
+      `strict-origin-when-cross-origin`, under which cross-origin Referers
+      carry scheme+host only — the `?token=` query (D32, the actual leak)
+      still never reaches a third party. Restore the D43 originals only if
+      the plan is ever cancelled back to pay-as-you-go.
+    - A third gate is UNDOCUMENTED and the console does not pre-warn about
+      it: `CreateSubscription` refused the PriceClass_200 distribution
+      ("resources are not eligible for this subscription tier"). Subscribing
+      from the console works — it flips the distribution to
+      **PriceClass_All** in the process. `price_class` is now pinned to All
+      in the config to match (a revert breaks the plan; guarded), and the
+      earlier PriceClass_200 cost analysis (AWS-RESOURCES §2.1) matters again
+      only on pay-as-you-go.
+  - **Subscribed 2026-08-19 from the console, status ACTIVE**, covering the
+    distribution + web ACL. `make pricing-plan` now no-ops against it and
+    exists for re-subscribing after a destroy/re-apply.
+  - **Allowances (1M requests / 100 GB per month) are soft** — no overage
+    charges ever; blocked requests don't count; one 3× spike per month is
+    accommodated; only sustained excess triggers an upgrade nudge or slower
+    edges. Photo bytes never cross this distribution (presigned S3 is the byte
+    path), so the allowance sees only small JSON.
+  - **If demand outgrows FREE**: revert to pay-as-you-go, do NOT take Pro —
+    $15/mo only beats $6 + $0.60/1M past ~15M requests/month.
+  - **CLI, not tofu**: the AWS provider has no pricingplanmanager resource yet
+    (hashicorp/terraform-provider-aws#49232 open as of 2026-08-19); the
+    subscription is `make pricing-plan` — idempotent, guarded by
+    guard-account, ARNs from the new `distribution_arn`/`web_acl_arn`
+    outputs. Fold into the edge module when the provider ships support. The
+    subscription dies with the distribution: re-run after any `make destroy` +
+    re-apply. Revert path: `aws pricing-plan-manager cancel-subscription`.
+  - Deployer policy grows a `PricingPlanFreeTier` statement
+    (pricingplanmanager Create/Get/List/Update/CancelSubscription) — re-paste
+    the inline policy on deployers created before this (INSTALL C3).
+  - *Guarded* by `test/infra/lifecycle.test.ts` (`pricing-plan subscribes THIS
+    distribution + web ACL to the FREE tier`), including that the target can
+    never create a paid tier.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

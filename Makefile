@@ -6,7 +6,8 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 	HASHING_KEY=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
 
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
-	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data
+	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
+	pricing-plan pricing-plan-status
 
 test:
 	npx vitest run test/unit
@@ -165,6 +166,42 @@ smoke:
 	printf '  function-url /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (403 = origin lock working)\n' "$${FU}ping"; \
 	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (must be 200)\n' "$$CF/ping"; \
 	echo "  point the app at: $$CF"
+
+# CloudFront flat-rate FREE plan (D47). One subscription covers exactly this
+# distribution and its web ACL, and zeroes what is otherwise the largest fixed
+# line on the bill: the WAF web ACL ($5/mo) + rate rule ($1/mo) + all
+# CloudFront/WAF request fees. The FREE-tier allowances (1M requests, 100 GB
+# transfer per month) see only the small-JSON API path — photo bytes ride
+# presigned S3 URLs and never cross the distribution — and are soft: AWS never
+# bills overage, it emails and may eventually slow delivery. FREE activates
+# immediately; no approval step.
+#
+# A one-time CLI step, NOT a tofu resource: the AWS provider has no
+# pricingplanmanager support yet (hashicorp/terraform-provider-aws#49232) —
+# fold it into the edge module when that ships. The subscription survives
+# `make deploy` but dies with the distribution, so re-run this after any
+# `make destroy` + re-apply. PricingPlanManager is a single us-east-1 endpoint
+# (same story as CLOUDFRONT-scope WAF), hence the pinned --region.
+PPM = aws pricing-plan-manager --region us-east-1
+
+pricing-plan: guard-account
+	@DIST=$$($(TF) output -raw distribution_arn); ACL=$$($(TF) output -raw web_acl_arn); \
+	if ! HAVE=$$($(PPM) list-subscriptions \
+		--query "subscriptionSummaries[?contains(resourceArns, '$$DIST')].status" --output text); then \
+		echo "cannot read subscriptions, refusing to create blind."; \
+		echo "  AccessDenied means the deployer's inline policy predates D47 — re-paste"; \
+		echo "  src/infra/deployer-policy.json over it (INSTALL C3); PricingPlanFreeTier is new."; \
+		exit 1; fi; \
+	if [ -n "$$HAVE" ]; then \
+		echo "already subscribed (status: $$HAVE) — 'make pricing-plan-status' for details"; exit 0; fi; \
+	$(PPM) create-subscription --plan-family CloudFront --plan-tier FREE \
+		--resource-arns "$$DIST" "$$ACL" \
+		--query 'subscription.{planTier:planTier,status:status,arn:arn}' --output table
+
+pricing-plan-status:
+	@$(PPM) list-subscriptions \
+		--query 'subscriptionSummaries[].{planTier:planTier,status:status,updatedAt:updatedAt,resources:resourceArns}' \
+		--output json
 
 # Tears down the STATELESS half only: both lambdas, the function URL, the cron,
 # the log groups and the distribution. module.data — the table and the objects

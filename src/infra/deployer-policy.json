@@ -199,6 +199,18 @@
       "Resource": "arn:aws:budgets::*:budget/ente-sl-*"
     },
     {
+      "Sid": "PricingPlanFreeTier",
+      "Effect": "Allow",
+      "Action": [
+        "pricingplanmanager:CreateSubscription",
+        "pricingplanmanager:GetSubscription",
+        "pricingplanmanager:ListSubscriptions",
+        "pricingplanmanager:UpdateSubscription",
+        "pricingplanmanager:CancelSubscription"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "WafRateRule",
       "Effect": "Allow",
       "Action": [

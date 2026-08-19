@@ -217,6 +217,23 @@ describe('deploy target guards', () => {
       expect(target(name), `${name} hardcodes -var region=`).not.toMatch(/-var\s+region=/);
     }
   });
+
+  it('pricing-plan subscribes THIS distribution + web ACL to the FREE tier (D47)', () => {
+    // The subscription is CLI-side (no provider support yet), so the only
+    // things holding it together are the two tofu outputs and this target.
+    const body = target('pricing-plan');
+    expect(body).toMatch(/^pricing-plan:.*guard-account/);
+    expect(body).toContain('--plan-tier FREE');
+    expect(body).toContain('output -raw distribution_arn');
+    expect(body).toContain('output -raw web_acl_arn');
+    // FREE means free: the target must never be able to create a paid tier.
+    expect(body).not.toMatch(/PRO|BUSINESS|PREMIUM/);
+    for (const rel of ['modules/edge/outputs.tf', 'dev/outputs.tf']) {
+      const outputs = readTf(rel);
+      expect(outputs, `${rel} lost distribution_arn`).toContain('output "distribution_arn"');
+      expect(outputs, `${rel} lost web_acl_arn`).toContain('output "web_acl_arn"');
+    }
+  });
 });
 
 /**
@@ -284,14 +301,18 @@ describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
     expect(devTf()).toMatch(/origin_secret\s*=\s*random_password\.origin_secret\.result/);
   });
 
-  it('a WAF rate rule guards the unauthenticated POST auth routes', () => {
+  it('a WAF rate rule bounds request floods, in FREE-tier shape (D43, reshaped D47)', () => {
     const edge = edgeTf();
     expect(edge).toContain('resource "aws_wafv2_web_acl"');
     expect(edge).toMatch(/web_acl_id\s*=\s*aws_wafv2_web_acl\.api\.arn/);
     expect(edge).toContain('rate_based_statement');
-    for (const path of ['/users/ott', '/users/srp/', '/users/two-factor/']) {
-      expect(edge, `WAF rate rule does not cover ${path}`).toContain(`"${path}"`);
-    }
+    // The FREE pricing plan has no byte-match statements: a scope-down here
+    // silently disqualifies the distribution from the $0 plan (D47). The
+    // brute-force bounds live in the app's atomic caps (D42/D45), so the
+    // edge rule is a plain per-IP flood ceiling.
+    expect(edge, 'byte match is not in the FREE tier — D47').not.toContain('byte_match_statement');
+    expect(edge).toMatch(/limit\s*=\s*2000/);
+    expect(edge).toMatch(/aggregate_key_type\s*=\s*"IP"/);
     // CLOUDFRONT scope only exists in us-east-1 — the aliased provider is
     // load-bearing, not decoration.
     expect(edge).toMatch(/scope\s*=\s*"CLOUDFRONT"/);
@@ -299,15 +320,26 @@ describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
     expect(devTf()).toMatch(/alias\s*=\s*"use1"/);
   });
 
-  it('the distribution attaches the security response-headers policy', () => {
+  it('the distribution keeps PriceClass_All — a restricted class disqualifies the FREE plan (D47)', () => {
+    // Undocumented gate, learned the hard way: CreateSubscription refuses a
+    // PriceClass_200 distribution, and the console flips the class to All
+    // when subscribing. Reverting it would break the $0 plan.
+    expect(edgeTf()).toMatch(/price_class\s*=\s*"PriceClass_All"/);
+  });
+
+  it('the distribution attaches the MANAGED security-headers policy (D43, reshaped D47)', () => {
     const edge = edgeTf();
-    expect(edge).toContain('resource "aws_cloudfront_response_headers_policy"');
-    expect(edge).toMatch(/response_headers_policy_id\s*=\s*aws_cloudfront_response_headers_policy\.api\.id/);
-    expect(edge).toContain('strict_transport_security');
-    expect(edge).toContain('content_type_options');
-    // no-referrer is the one that earns its place: it stops ?token= URLs (D32)
-    // riding out in a Referer header.
-    expect(edge).toMatch(/referrer_policy\s*=\s*"no-referrer"/);
+    // Custom response-headers policies are not in the FREE tier (D47); the
+    // AWS managed SecurityHeadersPolicy carries HSTS, nosniff, and
+    // strict-origin-when-cross-origin — the last still keeps ?token= URLs
+    // (D32) out of cross-origin Referer headers, query string and all.
+    expect(edge, 'custom headers policy disqualifies the FREE plan — D47').not.toContain(
+      'resource "aws_cloudfront_response_headers_policy"',
+    );
+    expect(edge).toMatch(
+      /response_headers_policy_id\s*=\s*local\.managed_security_headers_policy_id/,
+    );
+    expect(edge).toContain('"67f7725c-6f97-4210-82d7-5512b31e9d03"');
   });
 
   it('the deployer policy covers the new resources', () => {
@@ -320,7 +352,10 @@ describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
       'wafv2:CreateWebACL',
       'wafv2:ListWebACLs',
       'lambda:PutFunctionConcurrency',
+      // still needed: destroying the pre-D47 custom headers policy on apply
       'cloudfront:CreateResponseHeadersPolicy',
+      'pricingplanmanager:CreateSubscription',
+      'pricingplanmanager:CancelSubscription',
     ]) {
       expect(allowed, `deployer cannot ${action}`).toContain(action);
     }

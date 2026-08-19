@@ -5,26 +5,31 @@
  * Bytes never pass through here (presigned S3 does the byte path), so only
  * small JSON crosses this distribution.
  *
- * PriceClass_200 over _100 costs nothing worth counting: every region _200
- * adds (India, Asia, Japan, Middle East, South Africa) bills at $0.0120 per
- * 10k HTTPS requests — the same rate as Europe, which _100 already includes.
- * The only dearer regions (Australia $0.0125, South America $0.0220) are in
- * _All, not _200. Worst case is a US-served request at $0.0100 moving to a
- * Mumbai edge at $0.0120: +$0.002 per 10k. The perpetual 1 TB / 10M-request
- * free tier still applies to pay-as-you-go, so in practice this is $0 either
- * way. Buys a nearer edge for Asian viewers on every API round-trip.
+ * PriceClass_All is a FREE-plan requirement, not a choice (D47): the
+ * subscription was refused for a PriceClass_200 distribution ("resources are
+ * not eligible for this subscription tier" — an undocumented gate; the
+ * console flipped the class to All when subscribing). Under the flat plan,
+ * per-region request pricing is moot anyway, and All buys the nearest edge
+ * everywhere. The old PriceClass_200-vs-100 cost analysis lives in
+ * AWS-RESOURCES.md §2.1 and matters again only on pay-as-you-go.
  *
  * Security review 2026-08-17 additions (findings 4 and 6):
  *   - the origin injects x-origin-secret, which the app now requires — the
  *     directly-reachable Function URL stops bypassing everything below;
- *   - a WAFv2 rate rule on the unauthenticated POST auth routes, which is
- *     what actually bounds finding 2's write amplification (TTL bounds the
- *     stored bytes; this bounds the request rate);
- *   - a response-headers policy (HSTS, nosniff, Referrer-Policy). Set at the
- *     edge, NOT in the app: the app is byte-faithful to museum's header set
- *     (D29), and HSTS on a *.cloudfront.net domain is a property of the
- *     distribution. no-referrer is the one that earns its place — it stops
- *     the ?token= URLs (D32) riding out in a Referer header.
+ *   - a WAFv2 rate rule, which is what actually bounds finding 2's write
+ *     amplification (TTL bounds the stored bytes; this bounds the request
+ *     rate);
+ *   - security response headers set at the edge, NOT in the app: the app is
+ *     byte-faithful to museum's header set (D29), and HSTS on a
+ *     *.cloudfront.net domain is a property of the distribution.
+ *
+ * Reshaped 2026-08-19 (D47) to fit the CloudFront flat-rate FREE pricing
+ * plan, which zeroes the WAF + CloudFront request bill but gates two
+ * features this module used: byte-match statements (the rate rule's
+ * auth-path scope-down) and custom response-headers policies (no-referrer).
+ * Both got FREE-tier substitutes — see the comments at each site. Restore
+ * the D43 originals only if the plan is ever cancelled back to
+ * pay-as-you-go.
  */
 
 terraform {
@@ -52,12 +57,18 @@ resource "aws_wafv2_web_acl" "api" {
     allow {}
   }
 
-  # 300 requests per 5 minutes per IP, only on the unauthenticated POST auth
-  # routes (/users/ott, /users/srp/*, /users/two-factor/*) — one request a
-  # second sustained, far above any real client's login behaviour and far
-  # below a brute-force or table-stuffing rate.
+  # 2000 requests per 5 minutes per IP across ALL routes. D43 scoped this to
+  # the unauthenticated POST auth routes at 300/5min via byte-match
+  # scope-down statements, but byte match is not in the FREE pricing-plan
+  # tier (D47) — plain IP rate limiting is. Unscoped, the limit must clear a
+  # real client's initial-backup burst (one API call per registered file;
+  # bytes ride presigned S3 and never cross this distribution), so ~6.7
+  # req/s sustained. This is a flood ceiling, not a brute-force bound: the
+  # per-account auth caps live in the app and are atomic (D42/D45 — OTT 20
+  # wrong, SRP 5 attempts, TOTP 5). Blocked requests never reach Lambda and
+  # never count against the plan allowance.
   rule {
-    name     = "rate-limit-unauth-auth-posts"
+    name     = "rate-limit-per-ip"
     priority = 1
 
     action {
@@ -66,58 +77,14 @@ resource "aws_wafv2_web_acl" "api" {
 
     statement {
       rate_based_statement {
-        limit              = 300
+        limit              = 2000
         aggregate_key_type = "IP"
-
-        scope_down_statement {
-          or_statement {
-            statement {
-              byte_match_statement {
-                search_string         = "/users/ott"
-                positional_constraint = "STARTS_WITH"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
-            }
-            statement {
-              byte_match_statement {
-                search_string         = "/users/srp/"
-                positional_constraint = "STARTS_WITH"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
-            }
-            statement {
-              byte_match_statement {
-                search_string         = "/users/two-factor/"
-                positional_constraint = "STARTS_WITH"
-                field_to_match {
-                  uri_path {}
-                }
-                text_transformation {
-                  priority = 0
-                  type     = "NONE"
-                }
-              }
-            }
-          }
-        }
       }
     }
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "ente-sl-${var.env_name}-auth-rate-limit"
+      metric_name                = "ente-sl-${var.env_name}-rate-limit"
       sampled_requests_enabled   = true
     }
   }
@@ -129,28 +96,22 @@ resource "aws_wafv2_web_acl" "api" {
   }
 }
 
-resource "aws_cloudfront_response_headers_policy" "api" {
-  name = "ente-sl-${var.env_name}-security-headers"
-
-  security_headers_config {
-    strict_transport_security {
-      access_control_max_age_sec = 31536000
-      override                   = true
-    }
-    content_type_options {
-      override = true
-    }
-    referrer_policy {
-      referrer_policy = "no-referrer"
-      override        = true
-    }
-  }
+# Security headers via the AWS managed SecurityHeadersPolicy — custom
+# response-headers policies are not in the FREE pricing-plan tier (D47).
+# It keeps D43's HSTS (1y) and nosniff, and carries Referrer-Policy
+# strict-origin-when-cross-origin instead of no-referrer: cross-origin
+# Referers then carry scheme+host only, so the ?token= URLs (D32) still
+# never leak their query string to third parties — what leaks is only that
+# the request came from this domain. The extra X-Frame-Options /
+# X-XSS-Protection it adds are harmless on a JSON API.
+locals {
+  managed_security_headers_policy_id = "67f7725c-6f97-4210-82d7-5512b31e9d03"
 }
 
 resource "aws_cloudfront_distribution" "api" {
   enabled         = true
   comment         = "ente-sl-${var.env_name} api"
-  price_class     = "PriceClass_200"
+  price_class     = "PriceClass_All"
   is_ipv6_enabled = true
   web_acl_id      = aws_wafv2_web_acl.api.arn
 
@@ -179,10 +140,11 @@ resource "aws_cloudfront_distribution" "api" {
     allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods         = ["GET", "HEAD"]
 
-    # Managed-CachingDisabled + Managed-AllViewerExceptHostHeader
+    # Managed-CachingDisabled + Managed-AllViewerExceptHostHeader +
+    # Managed-SecurityHeadersPolicy — all AWS managed, all FREE-tier-safe.
     cache_policy_id            = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
     origin_request_policy_id   = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.api.id
+    response_headers_policy_id = local.managed_security_headers_policy_id
   }
 
   restrictions {
