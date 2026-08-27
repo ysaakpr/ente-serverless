@@ -9,7 +9,7 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
 	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage \
 	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue \
-	profile require-profile confirm-profile
+	profile require-profile
 
 # `make profile dev` / `make profile test` (D57): the env word arrives as a
 # SECOND GOAL, which would otherwise also run the real `dev` (LocalStack
@@ -251,7 +251,7 @@ build-web: require-profile
 # target. --delete keeps the bucket an exact mirror; a viewer holding a
 # stale index.html mid-deploy re-fetches it uncached (the edge module pins
 # index.html to CachingDisabled) and heals.
-deploy-web: confirm-profile guard-account
+deploy-web: require-profile guard-account
 	@test -d dist/web-albums || { echo "no dist/web-albums — run 'make build-web' first"; exit 1; }
 	@test -f dist/web-albums/index.html || { echo "dist/web-albums has no index.html — the albums build did not finish"; exit 1; }
 	@BUCKET=$$($(TF) output -raw web_bucket); DIST=$$($(TF) output -raw distribution_id); \
@@ -278,9 +278,11 @@ deploy-web: confirm-profile guard-account
 # The label deliberately names what the env IS, not what the folder is called:
 # "dev" was named before it went live, and it IS production now. There is NO
 # default — with no profile chosen, every tofu-touching target refuses.
-# Mutating targets (deploy, destroy, deploy-web, pricing-plan) additionally
-# require the profile name typed back; CONFIRM=<profile> skips the prompt for
-# scripting/CI (e.g. CONFIRM=test make destroy).
+# Mutating targets carry no extra typed confirmation (D57 addendum,
+# 2026-08-27): the banner names the env, profiles are fully disjoint (state,
+# tfvars, guard-account are all per-profile), `deploy` applies a plan you
+# just reviewed, and `destroy` still hits tofu's own interactive approval —
+# nothing here passes -auto-approve.
 # ---------------------------------------------------------------------------
 PROFILE_FILE = .tf-profile
 PROFILE      = $(strip $(shell cat $(PROFILE_FILE) 2>/dev/null))
@@ -325,21 +327,6 @@ require-profile:
 	@test -n "$(PROFILE)" || { echo "$(NO_PROFILE_MSG)"; exit 1; }
 	@test -n "$(PROFILE_LABEL)" || { echo "unknown profile '$(PROFILE)' in $(PROFILE_FILE) — choose: make profile dev | make profile test"; exit 1; }
 	@echo ">>> profile: $(PROFILE) (ENV: $(PROFILE_LABEL))"
-
-# The gate on anything that CHANGES AWS: the exact profile name must be typed
-# back — stronger than y/n, because reflexively hitting y while pointed at the
-# wrong env is precisely the accident. CONFIRM=<profile> skips the prompt for
-# scripting/CI; a CONFIRM naming the WRONG profile refuses rather than falling
-# back to the prompt.
-confirm-profile: require-profile
-	@if [ -n "$(CONFIRM)" ]; then \
-		test "$(CONFIRM)" = "$(PROFILE)" || { echo "CONFIRM='$(CONFIRM)' does not match profile '$(PROFILE)' — refusing."; exit 1; }; \
-		echo "    confirmed via CONFIRM=$(CONFIRM)"; \
-	else \
-		printf "Type the profile name to confirm: "; \
-		read ANS || ANS=""; \
-		test "$$ANS" = "$(PROFILE)" || { echo "confirmation failed — expected '$(PROFILE)', got '$$ANS'."; exit 1; }; \
-	fi
 
 infra-init: require-profile
 	$(TF) init
@@ -396,7 +383,7 @@ plan: require-profile build-lambda guard-account
 # Applies the SAVED plan, so what ships is exactly what you reviewed.
 # The CloudFront distribution takes 5-15 min to reach Deployed; the rest
 # of the resources are quick.
-deploy: confirm-profile guard-account
+deploy: require-profile guard-account
 	@test -f $(TFDIR)/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
 	$(TF) apply $(TFPLAN)
 	@rm -f $(TFDIR)/$(TFPLAN)
@@ -441,7 +428,7 @@ smoke: require-profile
 # --region.
 PPM = aws pricing-plan-manager --region us-east-1
 
-pricing-plan: confirm-profile guard-account
+pricing-plan: require-profile guard-account
 	@DIST=$$($(TF) output -raw distribution_arn); ACL=$$($(TF) output -raw web_acl_arn); \
 	if ! HAVE=$$($(PPM) list-subscriptions \
 		--query "subscriptionSummaries[?contains(resourceArns, '$$DIST')].status" --output text); then \
@@ -470,7 +457,7 @@ pricing-plan-status:
 # minted before the destroy points at the DEAD domain (tokens stay valid —
 # re-copy the link from the app after rebuilding, D52), and ALBUMS_URL needs
 # the routine second plan/deploy to pick the new domain up (D58 hint).
-destroy: confirm-profile guard-account
+destroy: require-profile guard-account
 	@echo "==> destroying module.compute + module.edge — table and objects bucket are preserved"
 	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge
 

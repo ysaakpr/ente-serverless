@@ -277,8 +277,10 @@ Ordered by how likely each is to bite on the first apply.
   `module.compute` + `module.edge` only — it removes the lambdas, the cron,
   the logs, the distribution and the web bucket, and cannot reach a photo —
   and since D57 it is also profile-aware: it banners
-  `>>> profile: <name> (ENV: PRODUCTION|TEST)` and requires the profile name
-  typed back (or `CONFIRM=<profile>`). On the **test** profile with
+  `>>> profile: <name> (ENV: PRODUCTION|TEST)`, and tofu's own interactive
+  approval prompt is the final confirmation (the extra typed-profile gate was
+  dropped 2026-08-27 — D57 addendum; nothing passes `-auto-approve`). On the
+  **test** profile with
   `delete_protection = false` in its tfvars, full teardown is
   `make profile test && make destroy` followed by the `destroy-data` steps —
   which now amount to flipping the variable and destroying, no console

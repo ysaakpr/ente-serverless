@@ -293,11 +293,12 @@ the env dir named in `.tf-profile` (gitignored, written by `make profile`):
 There is **no default**: with no profile chosen every such target refuses
 with `no profile chosen — choose: make profile dev | make profile test`.
 Every profile-aware target banners which env it is about to touch, e.g.
-`>>> profile: dev (ENV: PRODUCTION)`, and the mutating ones (`deploy`,
-`destroy`, `deploy-web`, `pricing-plan`) additionally ask you to **type the
-profile name back** before acting — `CONFIRM=<profile>` skips the prompt for
-scripting (e.g. `CONFIRM=test make destroy`), and refuses if it names the
-wrong profile. Bare `make profile` prints the current choice.
+`>>> profile: dev (ENV: PRODUCTION)`, before acting. There is no extra typed
+confirmation beyond that (dropped 2026-08-27, see D57 addendum): profiles are
+fully disjoint (state, tfvars, and the account guard are all per-profile),
+`deploy` only ever applies a plan you just reviewed, and `destroy` ends at
+tofu's own interactive approval prompt. Bare `make profile` prints the
+current choice.
 
 ### C5. Initialize OpenTofu
 
@@ -317,8 +318,7 @@ AWS_PROFILE=ente-sl make plan
 This target:
 
 1. banners the profile (`>>> profile: dev (ENV: PRODUCTION)`) and refuses if
-   none is chosen — plan is read-only, so it does **not** ask for typed
-   confirmation,
+   none is chosen,
 2. runs `make build-lambda` first (esbuild zips into `dist/`, so the bundles
    can never be stale at plan time),
 3. runs the account guard,
@@ -342,12 +342,10 @@ real domain. C13 reminds you.
 AWS_PROFILE=ente-sl make deploy
 ```
 
-After the profile banner, deploy asks you to type the profile name back
-(`Type the profile name to confirm: dev`) — a y/n is too easy to hit
-reflexively when pointed at the wrong env. Then it applies the **saved** plan
-(so what ships is exactly what you reviewed) and prints the outputs. Most
-resources are quick; **CloudFront takes 5–15 minutes** to reach Deployed
-status.
+After the profile banner, deploy applies the **saved** plan (so what ships is
+exactly what you reviewed — that review is the safeguard here) and prints the
+outputs. Most resources are quick; **CloudFront takes 5–15 minutes** to reach
+Deployed status.
 
 Outputs to note:
 
@@ -744,7 +742,7 @@ one ordinary cycle, no tfvars edits, in this order:
    - **Any `replace` line on the main distribution or the buckets = ABORT.**
      Replacement mints a new domain and breaks every configured client;
      nothing in this change forces one.
-3. `AWS_PROFILE=ente-sl make deploy` (type the profile name). The
+3. `AWS_PROFILE=ente-sl make deploy`. The
    distribution update takes 5–15 minutes; the API keeps serving throughout
    (the albums page may blip while the bucket policy re-pins).
 4. Verify: `make smoke` (still 403/200), then open `https://<server_url>/` in
@@ -772,7 +770,7 @@ cp src/infra/test/ente-sl.tfvars.example src/infra/test/ente-sl.tfvars
 # hashing_key (openssl rand -base64 32) — NEVER paste production's key
 make infra-init
 AWS_PROFILE=ente-sl make plan     # banner: >>> profile: test (ENV: TEST)
-AWS_PROFILE=ente-sl make deploy   # type "test" at the confirmation prompt
+AWS_PROFILE=ente-sl make deploy   # applies the saved plan you just reviewed
 ```
 
 Notes:
@@ -796,7 +794,7 @@ Notes:
 
 ```bash
 make profile test
-AWS_PROFILE=ente-sl make destroy            # stateless half (type "test", or CONFIRM=test)
+AWS_PROFILE=ente-sl make destroy            # stateless half — tofu asks for a "yes"
 # then the data (test only — delete_protection is already false):
 AWS_PROFILE=ente-sl tofu -chdir=src/infra/test destroy -var-file=ente-sl.tfvars
 ```
@@ -809,8 +807,8 @@ switches implicitly.
 ## Teardown
 
 ```bash
-make profile dev   # or test — the banner and typed confirmation name the env
-AWS_PROFILE=ente-sl make destroy
+make profile dev   # or test — the banner names the env
+AWS_PROFILE=ente-sl make destroy   # tofu's own interactive prompt is the final confirmation
 ```
 
 This removes the **stateless half only**: both Lambdas, the Function URL, the
@@ -844,7 +842,6 @@ Two things to know:
 |---|---|
 | `no profile chosen — choose: make profile dev \| make profile test` | Do step C4a — the make targets refuse to guess which env they address. |
 | `make plan` fails: `missing src/infra/<profile>/ente-sl.tfvars` | Do step C4 (or the test-env copy step) for the selected profile. |
-| `CONFIRM='…' does not match profile` / `confirmation failed` | The typed (or `CONFIRM=`) value must be the exact profile name from the banner — that friction is the feature. |
 | `ACCOUNT MISMATCH — refusing to continue` | Your credentials point at a different AWS account than the one in the selected profile's state. Use `AWS_PROFILE=ente-sl`. |
 | Plan wants to destroy/replace the bucket or table | Wrong account (see above) or `env_name` changed. Stop; do not apply. |
 | `archive_file` error at plan time | `dist/` missing or stale — `make plan` runs `build-lambda` for you, but a bare `tofu plan` does not. |

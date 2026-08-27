@@ -1470,6 +1470,19 @@ source says Y — source won).
     profile-driven TF dir with no hardcoded `-chdir=src/infra/dev` left,
     confirm gates on the four mutating targets, plan explicitly
     unconfirmed.
+  - **Addendum [2026-08-27]: the typed profile confirmation is REMOVED**
+    (`confirm-profile` target and the `CONFIRM=<profile>` variable, gone
+    entirely). Rationale: it was redundant friction on top of safeguards
+    that already cover each mutation — `tofu destroy` prompts interactively
+    at the actual point of destruction (nothing passes `-auto-approve`, and
+    a guard test now asserts that), `deploy` applies only a saved plan the
+    operator just reviewed, and profile state/tfvars/guard-account are fully
+    disjoint so a mutation cannot cross environments. What remains, and is
+    still guard-tested: the `>>> profile: <name> (ENV: ...)` banner on every
+    profile-aware target, the no-default no-profile refusal, and
+    `guard-account` on the mutating path. The previously gated targets
+    (`deploy`, `destroy`, `deploy-web`, `pricing-plan`) now depend on
+    `require-profile guard-account` directly.
 
 - **D58 [COST/EDGE 2026-08-27] One CloudFront distribution per environment —
   the API and the albums web app consolidated onto the (former) API

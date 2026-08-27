@@ -250,20 +250,29 @@ describe('deploy target guards', () => {
     expect(text).toMatch(/PROFILE_LABEL_test\s*=\s*TEST/);
   });
 
-  it('mutating targets are profile-confirmed; plan only banners (D57)', () => {
-    for (const name of ['deploy', 'destroy', 'deploy-web', 'pricing-plan']) {
-      expect(target(name), `${name} lacks confirm-profile`).toMatch(
-        new RegExp(`^${name}:.*confirm-profile`),
+  it('profile-aware targets banner + fail fast; no typed gate, no -auto-approve (D57 addendum)', () => {
+    // D57 addendum 2026-08-27: the typed profile confirmation is gone. What
+    // stands in for it: the banner (require-profile) on every profile-aware
+    // target, the no-profile refusal, guard-account on the mutating path,
+    // tofu's own interactive approval on destroy, and deploy applying only a
+    // just-reviewed saved plan.
+    for (const name of ['plan', 'deploy', 'destroy', 'deploy-web', 'pricing-plan', 'build-web', 'infra-init', 'outputs', 'smoke']) {
+      expect(target(name), `${name} lacks require-profile (directly or via guard-account)`).toMatch(
+        new RegExp(`^${name}:.*(require-profile|guard-account)`),
       );
     }
-    // plan stays read-only: banner + fail-fast, but no typed confirmation.
-    expect(target('plan')).toMatch(/^plan:.*require-profile/);
-    expect(target('plan'), 'plan is read-only — no confirm gate').not.toContain('confirm-profile');
-    const confirm = target('confirm-profile');
-    // The exact profile NAME must be typed back (not y/n), with a CONFIRM=<profile>
-    // bypass for scripting that refuses on mismatch instead of re-prompting.
-    expect(confirm).toContain('Type the profile name to confirm');
-    expect(confirm).toContain('does not match profile');
+    // The banner is the profile visibility mechanism — it must survive.
+    expect(target('require-profile')).toContain('>>> profile:');
+    // The confirm-profile mechanism must stay gone, not half-removed.
+    // Assert over recipe/prerequisite lines only (comments may narrate both).
+    const code = makefile()
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(code).not.toContain('confirm-profile');
+    // tofu destroy's native interactive prompt IS the final confirmation:
+    // nothing may auto-approve it (and nothing else should auto-approve either).
+    expect(code, 'no target may pass -auto-approve').not.toContain('-auto-approve');
   });
 });
 
