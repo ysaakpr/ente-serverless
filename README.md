@@ -31,6 +31,10 @@ CloudFront (albums) ─► S3 web bucket (OAC, private) — the pinned albums vi
                        public share links are <albums_url>/?t=<token> (D52)
 ```
 
+With BYO storage pools (D55) a presigned URL may point at a per-pool household
+bucket instead of the central objects bucket — each file row pins the pool its
+bytes landed in.
+
 Storage classes (GIR-only decision, 2026-08-16): originals → GLACIER_IR at
 day 0 via the `tier=original` object tag (applied at commit — museum's key
 layout makes a prefix rule impossible); thumbnails and file-data stay
@@ -45,10 +49,11 @@ src/                the server: one endpoint = one handler file
   ports/ adapters/  db/blobs/mail/clock ports; memory (unit) + AWS (LocalStack/prod)
   workers/          trashPurge (EventBridge cron)
   infra/            OpenTofu — data/compute/edge/web modules, dev env, deployer-policy.json
-test/unit           318 scenarios incl. the M1–M4 gate scripts
+test/unit           356 scenarios incl. the M1–M4 gate scripts
 test/integration    LocalStack end-to-end (real presigned HTTP, SES, SRP)
 test/infra          plan-time lifecycle/storage-class guards
-tools/              ledger generator, capture-diff harness (skeleton)
+tools/              ledger generator, capture-diff harness (skeleton), operator
+                    CLIs (invite.ts D54, storagePool.ts D55)
 ```
 
 The infra living under `src/infra` (not a top-level `infra/`) was requested at
@@ -72,6 +77,9 @@ make ledger        # regenerate TEST-LEDGER.md from vitest output
 make build-lambda  # esbuild zips for the tofu compute module
 make build-web     # clone + static-export the pinned albums viewer (ALBUMS_WEB_TAG)
 make deploy-web    # sync the albums build to the web bucket + CF invalidation
+make invites       # operator CLI, D54 — also: invite / revoke-invite / set-storage
+make pools         # operator CLI, D55 — also: pool-create / pool-attach /
+                   #   pool-detach / pool-set-quota / pool-disable / pool-enable
 ```
 
 Deploy (dev, NOT yet performed — session scope excluded it):
@@ -89,7 +97,9 @@ tofu init && tofu apply \
 
 Milestones M1–M6 implemented and green on unit + LocalStack integration +
 infra guards; P3 sharing (album collaborators + public links, plan Phases
-A–D and F, D48–D52) implemented on `feature/sharing-public-links`. Pending,
+A–D and F, D48–D52) implemented on `feature/sharing-public-links`, plus the
+Option-1 deployment controls (invite-gated signup, per-user quotas, BYO
+storage pools — H1/H2, D54/D55, plan §7). Pending,
 in order: capture runs → capture-diff parity (D2, now also covering the
 sharing/public surfaces), the stock-app LAN gate (M5, needs a device; re-run
 with a shared album), first cloud deploy (M7, excluded from the build
@@ -128,7 +138,7 @@ and sharing pieces** — roughly the ~60-route core plus magic metadata,
 | User entities | 🟢 Done | key create/ensure/get, entity CRUD + diff | Tier 0 |
 | File-data | 🟢 Done | `files/data` (ML embeddings), `files/video-data` (HLS), preview upload/fetch, status-diff | Tier 1 |
 | Hardening | 🟢 Done | origin lock, attempt caps/TTLs, spend ceilings, quota checks, GIR-at-day-0 storage tiering | — |
-| Invite-gated signup / per-user quotas | 🟢 Done | ops-only, deliberately off-parity (D54): `SIGNUP_MODE=invite`, `make invite`/`invites`/`revoke-invite`/`set-storage`, viewer accounts; zero client-visible shape changes, capture-diff runs with the mode off | — |
+| Deployment controls (off-parity, ops-only) | 🟢 Done | deliberate operator-side features, zero client-visible shape changes (D54/D55): `SIGNUP_MODE=invite` gating, viewer accounts, per-user quotas (`make invite`/`invites`/`revoke-invite`/`set-storage`); BYO storage pools — one household bucket, many users (`make pool-create`/`pool-attach`/`pool-detach`/`pools`/`pool-set-quota`/`pool-disable`); capture-diff runs with both off | — |
 | Billing | 🟠 Stubbed | free plan, huge quota (`/billing/*`, D34) | Tier 0 |
 | Remote store / feature flags | 🟠 Stubbed | fixed flags; `castUrl`/`embedUrl` empty | Tier 0 |
 | Storage bonus / referrals | 🟠 Stubbed | zeros | Tier 1 |

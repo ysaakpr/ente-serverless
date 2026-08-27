@@ -8,7 +8,9 @@ forward and implemented.)
 (2026-08-27: P3 sharing implemented — collaborators + public album links,
 plan Phases A–D and F on `feature/sharing-public-links`, D48–D52. Items 2, 4
 and 6 below are its release gates; the README feature-table rows stay
-gate-annotated until they pass.)
+gate-annotated until they pass. Same day, Phase H deployment controls —
+invite-gated signup + per-user quotas + BYO storage pools, D54/D55, plan §7;
+its device checks ride item 4 and its cloud check is item 9.)
 
 1. **Write the capture script + run it (D2, deferred by decision).** Bring up
    the pinned oracle (`make oracle-up`), drive the synthetic client
@@ -36,7 +38,13 @@ gate-annotated until they pass.)
    unexpected request. Re-run with a shared album (release gate for D50):
    share to a second `…@example.org` account, sync as the sharee,
    collaborator-add a file, unshare, confirm the album drops from the
-   sharee's app.
+   sharee's app. D54 on-device checks (run `make lan` with
+   `SIGNUP_MODE=invite`): a non-invited signup's 403 on `/users/ott` must
+   surface as the stock app's generic failure dialog, not a crash or a
+   misleading steer (the error-shape choice in D54 is capture-gated on
+   exactly this); and a viewer account (`make invite … VIEWER=1`) must boot,
+   sync, browse a share, and favorite a shared photo without tripping on the
+   426/403 refusals.
 5. **M7 deploy (D4):** `make build-lambda`, fill `src/infra/dev/ente-sl.tfvars`
    from the example (BACK UP hashing_key), `tofu apply`, replay gates against
    the real URL, then the app over the internet. Still open: account/region +
@@ -56,3 +64,13 @@ gate-annotated until they pass.)
    the D27 empty-feed stubs), passkeys, family plans, legacy/trusted
    contacts. The token spine, public middleware and JWT primitive they reuse
    exist as of D48/D51.
+9. **Pool-bucket end-to-end on a real AWS account (D55; needs item 5).** The
+   AssumeRole path cannot be fully proven on LocalStack (no real assumable
+   identities — it is unit-stubbed only, and the LocalStack integration test
+   runs mode 'keys'). On real AWS: create a pool bucket + role per INSTALL
+   "Inviting users & storage pools" (trust policy with ExternalId, bucket
+   checklist), `make pool-create` in role mode (checklist must pass),
+   `make pool-attach`, upload from the stock app, confirm the bytes land in
+   the pool bucket under the user's prefix, download/thumbnail round-trip
+   (presigns ≤ ~1h), then trash → purge and confirm the sweep deletes from
+   the pool bucket.

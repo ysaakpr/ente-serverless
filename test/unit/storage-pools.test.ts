@@ -8,6 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -445,5 +446,40 @@ describe('credentials at rest + role mode', () => {
     expect(calls).toHaveLength(1); // second presign rode the cached session
     expect(calls[0]!.ExternalId).toBe('the-external-id');
     expect(calls[0]!.RoleArn).toBe('arn:aws:iam::123456789012:role/ente-pool');
+  });
+});
+
+describe('pool-create CLI secret passing (H3): POOL_ACCESS_KEY/POOL_SECRET_KEY env form', () => {
+  // Spawn the real CLI with a minimal environment; both cases exit before any
+  // AWS call (the LocalStack-backed happy path lives in pools.int.test.ts).
+  const runCli = (cliArgs: string[], env: Record<string, string>) => {
+    try {
+      const stdout = execFileSync(
+        'node',
+        ['--experimental-transform-types', 'tools/storagePool.ts', ...cliArgs],
+        { encoding: 'utf8', env: { PATH: process.env.PATH!, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      return { status: 0, stdout, stderr: '' };
+    } catch (err) {
+      const e = err as { status?: number | null; stdout?: unknown; stderr?: unknown };
+      return { status: e.status ?? -1, stdout: String(e.stdout ?? ''), stderr: String(e.stderr ?? '') };
+    }
+  };
+  const createArgs = ['create', 'envpool', '--bucket', 'env-bucket', '--region', 'us-east-1', '--skip-validation'];
+
+  it('env vars alone select keys mode — no --access-key/--secret-key flags needed', () => {
+    // Without HASHING_KEY the CLI must stop at the keys-mode encryption gate,
+    // which proves the env credentials were picked up (no creds = usage exit).
+    const res = runCli(createArgs, { POOL_ACCESS_KEY: 'AKIAENVFORM', POOL_SECRET_KEY: 'env-secret-value' });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('create (keys mode) needs HASHING_KEY');
+    // and the secret never echoes, whatever the exit path
+    expect(res.stdout + res.stderr).not.toContain('env-secret-value');
+  });
+
+  it('no flags and no env vars is still a usage error, not an accidental mode', () => {
+    const res = runCli(createArgs, {});
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('usage:');
   });
 });

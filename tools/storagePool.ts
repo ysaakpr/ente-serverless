@@ -21,6 +21,12 @@
  * key derived from it) and by attach/detach (user lookup goes through the
  * hashed EMAIL# guard). Secrets are never printed and never stored plaintext.
  *
+ * Keys-mode secrets: the RECOMMENDED form is the POOL_ACCESS_KEY /
+ * POOL_SECRET_KEY environment variables — the --access-key/--secret-key flags
+ * (and the ACCESS_KEY/SECRET_KEY make vars that feed them) land in `ps` output
+ * and shell history; environment variables do not. Flags win when both are
+ * present.
+ *
  * `create` runs the VALIDATION CHECKLIST against the pool bucket first and
  * REFUSES to write the row on any hard failure:
  *   hard: credentials resolve (AssumeRole w/ ExternalId, or static keys),
@@ -74,7 +80,8 @@ const usage = (): never => {
   console.error(
     [
       'usage:',
-      '  create <poolId> --bucket B --region R (--role-arn ARN --external-id ID | --access-key K --secret-key S) [--endpoint URL] [--storage-gb N] [--skip-validation]',
+      '  create <poolId> --bucket B --region R (--role-arn ARN --external-id ID | --access-key K --secret-key S | POOL_ACCESS_KEY/POOL_SECRET_KEY env) [--endpoint URL] [--storage-gb N] [--skip-validation]',
+      '         (keys mode: prefer the POOL_ACCESS_KEY/POOL_SECRET_KEY env vars — flags leak into ps/shell history)',
       '  attach <email> <poolId>   (works on user rows AND unconsumed invite rows)',
       '  detach <email>',
       '  list',
@@ -389,8 +396,10 @@ switch (command) {
     if (!bucket || !region) usage();
     const roleArn = flags.get('role-arn');
     const externalId = flags.get('external-id');
-    const accessKey = flags.get('access-key');
-    const secretKey = flags.get('secret-key');
+    // Keys-mode secrets: flags win, but the env form is the recommended one —
+    // flag values land in `ps` output and shell history, env vars do not.
+    const accessKey = flags.get('access-key') ?? process.env.POOL_ACCESS_KEY;
+    const secretKey = flags.get('secret-key') ?? process.env.POOL_SECRET_KEY;
     const mode: 'role' | 'keys' = roleArn ? 'role' : accessKey ? 'keys' : usage();
     if (mode === 'role' && !externalId) {
       console.error('role mode REQUIRES --external-id — it is the confused-deputy guard (D55), not an option');

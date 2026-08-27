@@ -10,6 +10,10 @@ three paths, in increasing order of commitment:
 - **[Part C — AWS deployment](#part-c--deploy-to-aws)**: the real thing — Lambda, DynamoDB, S3,
   CloudFront — deployed with OpenTofu.
 
+Once deployed, **[Inviting users & storage
+pools](#inviting-users--storage-pools)** covers the optional operator
+features: invite-gated signup, per-user quotas, and BYO pool buckets.
+
 Companion documents: [AWS-RESOURCES.md](AWS-RESOURCES.md) (every resource the
 deploy creates, risks, cost model), [RUNBOOK-M5.md](RUNBOOK-M5.md) (the LAN
 gate in detail), [DECISIONS.md](DECISIONS.md) (why things are the way they are).
@@ -57,7 +61,7 @@ npm install
 make test
 ```
 
-Expected: all suites green (117+ scenarios, including the M1–M4 gate scripts).
+Expected: all suites green (356 scenarios, including the M1–M4 gate scripts).
 
 ```bash
 make typecheck
@@ -421,6 +425,217 @@ Three things worth knowing:
 
 ---
 
+## Inviting users & storage pools
+
+Optional operator features, deliberately off-parity (museum has neither;
+DECISIONS.md D54/D55). Both are server/CLI-side only: the stock apps see
+byte-identical wire shapes, and with `SIGNUP_MODE` unset and no pool rows the
+server behaves exactly as it did before Phase H.
+
+The CLIs (`tools/invite.ts`, `tools/storagePool.ts`) are env-driven exactly
+like the Lambda. Against LocalStack, prefix the targets with the same
+variables `make dev` injects. Against a real deployment, point them at it
+explicitly:
+
+```bash
+TABLE_NAME=ente-sl-<env> AWS_REGION=<region> AWS_PROFILE=ente-sl \
+HASHING_KEY=<the tfvars value> make invites
+```
+
+`HASHING_KEY` is needed only where noted below; everything else works
+without it.
+
+### Inviting users (invite-gated signup, D54)
+
+Signup is **open by default** (`SIGNUP_MODE` unset). To admit only invited
+users:
+
+1. **Set `SIGNUP_MODE=invite` in the API Lambda's environment.** Locally
+   that is `SIGNUP_MODE=invite make dev` (or `make lan`). On AWS there is no
+   tfvars knob yet — add `SIGNUP_MODE = "invite"` to the `environment` block
+   in `src/infra/modules/compute/main.tf` and run the plan/deploy cycle.
+   Only account *creation* is gated: login and change-email always work, and
+   existing accounts are untouched. A non-invited signup gets a bare 403 the
+   stock app renders as its generic failure dialog; the OTT is neither
+   stored nor mailed.
+2. **Invite each user by email**, optionally capping their storage:
+
+```bash
+make invite EMAIL=alice@example.com            # default storage (config free plan)
+make invite EMAIL=bob@example.com STORAGE_GB=50
+make invite EMAIL=carol@example.com VIEWER=1   # viewer account — consumes shares only
+make invites                                   # list, with consumed/open state
+make revoke-invite EMAIL=bob@example.com       # refuses consumed rows (audit trail)
+make set-storage EMAIL=alice@example.com STORAGE_GB=100   # post-signup lever; needs HASHING_KEY
+```
+
+Worth knowing:
+
+- **`STORAGE_GB=0` means ZERO bytes** — no uploads at all, deliberately
+  unlike the 0-disables-it config knobs. `STORAGE_GB=default` clears an
+  override. Viewer accounts additionally cannot create albums; they can
+  still browse shares, download, and favorite.
+- Invites are single-use for signup but the consumed row is **kept** as an
+  audit trail; re-running `make invite` re-arms it (the re-admission path,
+  e.g. after an account deletion). Storage/viewer overrides apply whenever a
+  usable invite exists, even in open mode — you can pre-provision limits
+  before flipping the mode.
+- The SES sandbox rule from C2 still applies: verify each invited address as
+  an SES recipient too, or their OTT mail never arrives.
+
+### BYO storage pools (D55)
+
+A pool is **one S3 bucket — typically owned and paid for by a household —
+shared by many users**: "me and my partner one bucket, my brother and his
+partner another". Members' new uploads land in the pool bucket (object keys
+stay `<userID>/<uuid>`, so each member keeps their own prefix) and the
+bucket owner pays for them. Pool membership grants **no data access** — two
+members of a pool are strangers until someone shares an album, exactly as
+before.
+
+#### 1. Prepare the pool bucket
+
+The onboarding CLI validates all of this and refuses to onboard on the hard
+failures:
+
+- **Block Public Access: all four blocks ON** (hard failure — every photo
+  byte would otherwise be one guessed key away from public).
+- **CORS mirroring the central bucket's browser-PUT rule** (warn): methods
+  `GET/PUT/POST/HEAD`, origins `*`, `ExposeHeaders: ETag` — without it
+  web/browser uploads fail (D33).
+- **An abort-incomplete-multipart lifecycle rule** (warn) — abandoned
+  multipart uploads otherwise bill forever; the central bucket uses 7 days.
+- **Optional but recommended — the GLACIER_IR tier rule**: the server tags
+  originals `tier=original` in every bucket, central or pool, so a lifecycle
+  rule filtered on that tag (transition to `GLACIER_IR`, day 0) gives the
+  pool the same cost profile as the central bucket. Without it the pool
+  bills Standard rates.
+
+#### 2. Grant access — mode `role` (preferred on real AWS)
+
+Create an IAM role **in the bucket owner's account** whose trust policy
+admits the server's Lambda execution role — and the operator identity you
+run the CLI as, since `pool-create` validates with *your* credentials — both
+locked to a shared ExternalId (generate one: `openssl rand -hex 16`):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": [
+          "arn:aws:iam::<server-account>:role/ente-sl-<env>-api",
+          "arn:aws:iam::<server-account>:user/<your-operator-user>"
+        ]
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": { "StringEquals": { "sts:ExternalId": "<external-id>" } }
+    }
+  ]
+}
+```
+
+The ExternalId is mandatory (`pool-create` refuses without it) — it is the
+confused-deputy guard: the trust policy + ExternalId is what stops anyone
+who merely learns the role ARN from pointing their own deployment at the
+bucket.
+
+The role's permissions policy needs the object round-trip plus the read-only
+checks the validator runs:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+        "s3:PutObjectTagging", "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": "arn:aws:s3:::<pool-bucket>/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket", "s3:GetBucketCORS",
+        "s3:GetLifecycleConfiguration", "s3:GetBucketPublicAccessBlock"
+      ],
+      "Resource": "arn:aws:s3:::<pool-bucket>"
+    }
+  ]
+}
+```
+
+Mode `keys` (static access key + secret) exists for S3-compatibles and
+LocalStack; the secret is secretbox-encrypted at rest with a key derived
+from `HASHING_KEY`, never stored or logged in plaintext.
+
+#### 3. Onboard the pool
+
+```bash
+# role mode (preferred):
+make pool-create POOL=smith BUCKET=smith-photos REGION=eu-west-1 \
+     ROLE_ARN=arn:aws:iam::<bucket-account>:role/ente-pool EXTERNAL_ID=<external-id>
+
+# keys mode (S3-compatibles) — pass the secrets as ENVIRONMENT variables:
+POOL_ACCESS_KEY=... POOL_SECRET_KEY=... \
+     make pool-create POOL=smith BUCKET=smith-photos REGION=eu-west-1 [ENDPOINT=https://...]
+```
+
+The env form is the **recommended** way to pass keys-mode secrets: make
+variables (`ACCESS_KEY=...`/`SECRET_KEY=...` still work) appear in `ps`
+output and your shell history file; environment variables prefixed to the
+command do not (they still land in history — use your shell's
+leading-space/`HISTIGNORE` convention or read them from a credential store
+for the invocation).
+
+`pool-create` runs the §1 checklist first (credentials, HeadBucket,
+PUT+GET+DELETE probe, tagging, multipart create+abort, public-access block,
+CORS, abort-MPU rule) and refuses to write the pool row on any hard failure.
+
+#### 4. Attach members and manage the pool
+
+```bash
+make pool-attach EMAIL=alice@example.com POOL=smith   # user row, or unconsumed invite pre-signup
+make pool-detach EMAIL=alice@example.com
+make pools                                            # members, usage, quota, disabled state
+make pool-set-quota POOL=smith STORAGE_GB=500         # shared cap (or STORAGE_GB=unlimited)
+make pool-disable POOL=smith                          # new uploads 426; reads/purges still work
+make pool-enable POOL=smith
+```
+
+Attach/detach affect **new uploads only**: every file is pinned at commit
+time to the pool its bytes landed in, and downloads, purges and cleanup
+resolve the bucket from that pin — nothing is migrated, nothing strands.
+Quota precedence on upload, all surfaced as the same museum-shaped 426:
+viewer / per-user-0 blocks first, then the user's own limit (D54), then the
+pool's shared cap.
+
+#### Caveats to know (and to tell the household)
+
+- **Role-mode presigns live ≤ ~1 hour.** A presigned URL signed with
+  temporary AssumeRole credentials dies with the STS session regardless of
+  its nominal expiry, so role-pool PUT/GET URLs are clamped to the remaining
+  session lifetime instead of the configured 24 h/7 d. Clients re-request
+  URLs as a matter of course; keys-mode pools keep the full expiries.
+- **The bucket-credential holder can touch ciphertext.** Whoever owns the
+  pool bucket's AWS account can list and delete the objects out-of-band.
+  That is an **availability** lever, not a confidentiality one: bytes are
+  end-to-end encrypted, and prefixes reveal only per-member object counts
+  and sizes. Members without bucket credentials have no path at all. Same
+  trust shape as any BYO-storage arrangement — say so to the household.
+- **Rollback caveat: detach pool users before rolling the Lambda back past
+  H2.** Pre-H2 code ignores `storagePoolId` and would mint new uploads
+  against the central bucket while old files stay pinned to pools it cannot
+  resolve. (Pool *rows* in the table are harmless to old code — the D48
+  no-gsi-attributes rule — it is attached *users* that must not be.)
+
+---
+
 ## Updating a deployment
 
 Code change → redeploy is the same plan/deploy cycle; `make plan` rebuilds the
@@ -485,3 +700,9 @@ The variable line that matters: full-resolution downloads are S3 egress at
 $0.09/GB plus $0.03/GB Glacier IR retrieval — browsing is cheap, a full
 500 GB library restore is roughly $50. Details and caveats in
 [AWS-RESOURCES.md](AWS-RESOURCES.md) §4.
+
+With BYO storage pools (D55) the storage and egress lines move to the pool
+owners' own bills: the central account keeps the control plane — DynamoDB,
+Lambda, CloudFront, SES — at roughly $1–3/month, plus storage for any users
+still on the central bucket. Per-user marginal cost on the control plane is
+cents.

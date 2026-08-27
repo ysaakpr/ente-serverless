@@ -15,6 +15,11 @@ the work so the schema and sequencing decisions were made once, deliberately.
 > each phase carries an **Outcome** note recording where reality diverged —
 > the full judgment calls live in DECISIONS.md D48–D52. Sections §5 and §6
 > were added post-build.
+>
+> **Phase H (deployment controls, 2026-08-27, same branch): H1 `09e54a9`
+> (invite-gated signup + per-user quotas, D54), H2 `6f24912` (BYO storage
+> pools, D55).** Off-plan and off-parity by design — museum has neither.
+> §7 below records the design discussion and why Option 1 was chosen.
 
 Companion documents: [DECISIONS.md](DECISIONS.md) (divergences and their
 reasons), [NEXT-TASKS.md](NEXT-TASKS.md) (the near-term queue — P3 items
@@ -398,3 +403,63 @@ in INSTALL.md C13; resource detail in AWS-RESOURCES.md rows 23–27.
   env to roll: `ALBUMS_URL` + the D51 knobs) → `make deploy` →
   `make build-web` → `make deploy-web` → mint a share link in the app and
   open it in a browser (the D52 release gate).
+
+---
+
+## 7. Deployment controls & cost delegation — Option 1 (Phase H, D54/D55)
+
+Recorded post-build, 2026-08-27. The ask, off-plan and off-museum-parity:
+one operator invites a wider circle (friends, siblings' households) without
+paying for their storage or letting signup run open — with **zero
+client-visible changes**, so the stock apps keep working untouched.
+
+### The three options considered
+
+1. **Central account + BYO storage pools — CHOSEN.** One control plane
+   (DynamoDB, Lambda, CloudFront, SES) in the operator's account; storage
+   delegated per household to a bucket that household owns and pays for.
+   Everything stays a single deployment — one table, one set of transactions,
+   one museum-shaped surface — and the delegation is pure blob routing behind
+   presigned URLs, which clients never introspect.
+2. **Per-user data plane (per-user DynamoDB in the user's own account) —
+   REJECTED on the cross-account-transaction impossibility.** The
+   correctness spine of this codebase is `TransactWriteItems` over one
+   table: a file commit atomically writes file rows + the owner's usage
+   counter + collection links; sharing dual-writes reverse-lookup pairs
+   (D48). DynamoDB transactions cannot span accounts (nor could any
+   cross-account two-phase substitute be built without inventing a
+   distributed-commit protocol this project has no business owning), so
+   splitting the table per user forfeits atomicity exactly where it
+   matters. Dead on arrival, not merely deferred.
+3. **Full federation (each household runs its own deployment) — DEFERRED.**
+   Cleanest cost story, but cross-instance sharing needs a shared user
+   directory, and that directory becomes the **trust anchor**: whoever runs
+   it can substitute public keys during lookup, which is a stronger trust
+   grant than "they can see my ciphertext bytes". Deferred, not rejected —
+   and the seam is already prepared: the `home` field on invite/user rows
+   (D54) is the one-line hook a future multi-home deployment routes by,
+   with no migration.
+
+### The pool model (D55, the shape Option 1 landed as)
+
+- **Many users : one bucket.** A pool is one household-owned bucket shared
+  by multiple users; object keys stay `<userID>/<uuid>`, so members keep
+  their own prefixes. Pool membership grants nothing through authorization
+  — access still flows only through shares.
+- **File-level pinning.** Commits stamp `storagePoolId` on the file row;
+  every read/purge path resolves the bucket from the pin, so re-assigning a
+  user affects only new uploads — nothing migrates, nothing strands.
+- **Quota precedence**, all one museum-shaped 426: viewer / per-user-0
+  blocks first, then the per-user override (D54), then the pool's shared
+  cap against the pool usage counter.
+
+### The cost outcome for the central account
+
+The point of the exercise: with storage delegated, the central account keeps
+only the control plane — roughly **$1–3/month** (DynamoDB on-demand + PITR,
+Lambda/CloudFront/SES inside free tiers or pennies, CloudWatch) — and the
+**marginal cost per additional user is cents**: a user's control-plane
+footprint is small-JSON API calls and table rows; their bytes, egress and
+Glacier retrievals bill to their household's bucket. Invite-gating (D54)
+bounds who can create that footprint; per-user quotas and viewer accounts
+bound it for anyone still on the central bucket.

@@ -93,11 +93,15 @@ set-storage:
 # pool-create runs a validation checklist (creds, HeadBucket, PUT/GET/DELETE
 # probe, tagging, multipart, public-access-block, CORS, abort-MPU lifecycle)
 # and REFUSES to onboard on hard failures. HASHING_KEY is needed by
-# pool-create with ACCESS_KEY (credential encryption) and by
+# pool-create in keys mode (credential encryption) and by
 # pool-attach/pool-detach (hashed user lookup).
 #   make pool-create POOL=smith BUCKET=smith-photos REGION=eu-west-1 \
 #        ROLE_ARN=arn:aws:iam::123:role/ente-pool EXTERNAL_ID=$(openssl rand -hex 16)
-#   make pool-create POOL=smith BUCKET=... REGION=... ACCESS_KEY=... SECRET_KEY=... [ENDPOINT=...]
+#   POOL_ACCESS_KEY=... POOL_SECRET_KEY=... \
+#        make pool-create POOL=smith BUCKET=... REGION=... [ENDPOINT=...]
+#        (RECOMMENDED keys form: env vars stay out of `ps` and shell history;
+#        the ACCESS_KEY=.../SECRET_KEY=... make-var form still works but both
+#        values are visible in the process list and your history file)
 #   make pool-attach EMAIL=alice@example.com POOL=smith   (user row, or invite row pre-signup)
 #   make pool-detach EMAIL=alice@example.com
 #   make pools
@@ -108,7 +112,8 @@ POOL_TOOL = node --experimental-transform-types tools/storagePool.ts
 
 pool-create:
 	@test -n "$(POOL)" -a -n "$(BUCKET)" -a -n "$(REGION)" || { \
-		echo "usage: make pool-create POOL=... BUCKET=... REGION=... (ROLE_ARN=... EXTERNAL_ID=... | ACCESS_KEY=... SECRET_KEY=... [ENDPOINT=...]) [STORAGE_GB=...]"; exit 1; }
+		echo "usage: make pool-create POOL=... BUCKET=... REGION=... (ROLE_ARN=... EXTERNAL_ID=... | POOL_ACCESS_KEY/POOL_SECRET_KEY env | ACCESS_KEY=... SECRET_KEY=... [ENDPOINT=...]) [STORAGE_GB=...]"; \
+		echo "  keys mode: prefer the POOL_ACCESS_KEY/POOL_SECRET_KEY env vars — make vars land in ps/shell history"; exit 1; }
 	@$(POOL_TOOL) create "$(POOL)" --bucket "$(BUCKET)" --region "$(REGION)" \
 		$(if $(ROLE_ARN),--role-arn "$(ROLE_ARN)") $(if $(EXTERNAL_ID),--external-id "$(EXTERNAL_ID)") \
 		$(if $(ACCESS_KEY),--access-key "$(ACCESS_KEY)") $(if $(SECRET_KEY),--secret-key "$(SECRET_KEY)") \

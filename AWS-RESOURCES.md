@@ -2,7 +2,8 @@
 
 Pre-deploy report for M7 (DECISIONS.md D4). Read alongside NEXT-TASKS.md §4.
 Derived from `src/infra` as of 2026-08-17 (albums web hosting added
-2026-08-27, Phase F/D52); **no cloud deploy has happened yet**,
+2026-08-27, Phase F/D52; the execution role's pool `sts:AssumeRole` statement
+added the same day, Phase H2/D55); **no cloud deploy has happened yet**,
 so nothing below has been observed running — it is what `tofu apply` will
 attempt.
 
@@ -20,7 +21,7 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
 | 1 | `aws_dynamodb_table` | `ente-sl-dev` | PAY_PER_REQUEST, `pk`/`sk`, **3 GSIs** (`gsi1` collection diff + purge due-index, `gsi2` collection feed, `gsi3` tokens/trash/entity/file-data), all `projection_type = ALL`. TTL on `ttl` (OTT expiry). PITR on. SSE on (AWS-owned key). `deletion_protection_enabled = true`. |
-| 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload. Account-ID suffix for global uniqueness. |
+| 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload — except users attached to a BYO storage pool (D55), whose new uploads land in their pool's own bucket (not a managed resource; the file row pins which bucket holds it). Account-ID suffix for global uniqueness. |
 | 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**, `prevent_destroy`. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
 | 4 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
 | 5 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
@@ -31,7 +32,7 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
 | 7 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
-| 8 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*`. |
+| 8 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*` — plus `sts:AssumeRole` on `*` for BYO pool buckets (D55): deliberate, because assuming a pool role also requires that role's trust policy to name this principal with the mandatory ExternalId, so enumerating pool ARNs would add churn, not security. Guard-tested. |
 | 9 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
 | 10 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
 | 11 | `aws_lambda_permission` | `FunctionURLAllowPublicAccess` | Grants anonymous `lambda:InvokeFunctionUrl`. **Required** — auth NONE alone 403s every caller, CloudFront included. Guard-tested. |
@@ -227,7 +228,9 @@ Ordered by how likely each is to bite on the first apply.
   anyone with `lambda:GetFunctionConfiguration`, and stored unencrypted in the
   local tfstate. D4a covers *losing* it; it does not cover *at-rest exposure*.
   Acceptable for a single-owner account; Secrets Manager or an SSM SecureString
-  is the upgrade if this ever grows a second operator.
+  is the upgrade if this ever grows a second operator. Since D55 it also keys
+  the secretbox encryption of keys-mode pool credentials, so leaking it leaks
+  those too — one more reason it stays the deployment's single root secret.
 
 - **Auth tokens can travel in the query string.** Museum accepts `?token=` on
   every private route and the web/desktop client relies on it for thumbnails
@@ -338,11 +341,14 @@ Ordered by how likely each is to bite on the first apply.
 The execution role covers exactly what the code calls, no more. Adapters issue
 `Get/Put/Update/Delete/Query/TransactWrite` on DynamoDB (no `Scan`), and
 `GetObject / PutObject / DeleteObject / HeadObject / PutObjectTagging /
-CreateMultipartUpload` plus presigned multipart on S3, and `ses:SendEmail`.
-Every one has a matching statement; `HeadObject` rides on `s3:GetObject` and
-the client's presigned multipart calls ride on the role's `PutObject` +
-`AbortMultipartUpload` + `ListMultipartUploadParts`. No unused grant except the
-broad `ses:SendEmail` resource `*`, which could be narrowed to the identity ARN.
+CreateMultipartUpload` plus presigned multipart on S3, and `ses:SendEmail`,
+and (D55) `sts:AssumeRole` against pool roles. Every one has a matching
+statement; `HeadObject` rides on `s3:GetObject` and the client's presigned
+multipart calls ride on the role's `PutObject` + `AbortMultipartUpload` +
+`ListMultipartUploadParts`. The two broad resources are deliberate:
+`ses:SendEmail` on `*` (could be narrowed to the identity ARN) and
+`sts:AssumeRole` on `*` (the pool role's own trust policy + ExternalId is the
+real gate — see row 8).
 
 ## 4. Rough cost model
 
@@ -379,6 +385,12 @@ Variable, and the part that actually matters: **GIR retrieval at $0.03/GB** plus
 **S3 egress at $0.09/GB** on every full-resolution download past the first
 100 GB/month. Browsing is cheap (thumbnails stay Standard); a full library
 restore is not — 500 GB out is roughly $15 retrieval + $36 egress.
+
+BYO storage pools (D55) change whose bill the storage lines land on, not the
+totals: a pooled user's S3 storage, retrieval and egress bill to the
+household's own bucket account, leaving this account the control plane —
+roughly $1–3/month — plus storage for any users still on the central bucket
+(plan §7 records the cost outcome).
 
 ## 5. Prep checklist, in order
 
