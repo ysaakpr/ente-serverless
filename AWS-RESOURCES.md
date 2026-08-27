@@ -264,13 +264,19 @@ Ordered by how likely each is to bite on the first apply.
 
 - **Teardown is deliberately hard, and the targets reflect that.**
   `prevent_destroy` on the table and bucket, `deletion_protection_enabled` on
-  the table, no `force_destroy` on the bucket. So `make destroy` is scoped to
-  `module.compute` + `module.edge` only — it removes the lambdas, the cron, the
-  logs and the distribution, and cannot reach a photo. A bare `tofu destroy`
+  the table, no `force_destroy` on the bucket (the **objects** bucket — the
+  web-albums bucket in row 23 is build artifacts and deliberately does carry
+  `force_destroy`). So `make destroy` is scoped to `module.compute` +
+  `module.edge` + `module.web` only — it removes the lambdas, the cron, the
+  logs, both distributions and the web bucket, and cannot reach a photo. A
+  bare `tofu destroy`
   would fail on the rails anyway; `make destroy-data` refuses outright and
   prints the four manual steps instead. Guard-tested so the scoping can't be
-  widened by an edit. **Re-applying after a destroy mints a new CloudFront
-  domain and a new function URL**, so every client needs re-pointing — that,
+  widened by an edit. **Re-applying after a destroy mints new CloudFront
+  domains and a new function URL**, so every client needs re-pointing, the
+  albums app needs rebuilding against the new `server_url` (INSTALL C13),
+  and share links minted before the destroy point at the dead albums domain
+  (tokens stay valid — re-copy each link from the app) — that,
   not data loss, is the real cost of tearing the stateless half down.
 
 - **The deployer policy is a privilege-escalation path if leaked.** It grants
@@ -403,13 +409,15 @@ Steps 1–4 are the out-of-band work; from step 5 on it is all make targets.
    deploy (an existing pre-Phase-F deployment instead adds the 5 `module.web`
    resources and updates the API Lambda's env). Read it.
 7. **`make deploy`** — applies the *saved* plan, so what ships is what you
-   reviewed, then prints the outputs. CloudFront takes 5–15 minutes to reach
-   Deployed; the other 21 resources are quick. Then confirm the SNS
+   reviewed, then prints the outputs. The two CloudFront distributions take
+   5–15 minutes to reach Deployed; the other 25 resources are quick. Then
+   confirm the SNS
    subscription email, or the alarms in rows 20-21 never reach you.
-8. **`make smoke`** — pings the function URL and the distribution. Two 200s
-   means the edge is live. A 403 on the function URL would mean row 10 went
-   missing; a guard makes that unlikely now, but the config is not the
-   deployment.
+8. **`make smoke`** — pings the function URL and the distribution. Healthy is
+   **403 on the function URL** (the D43 origin lock refusing a direct call)
+   and **200 via CloudFront**. Both returning 403 would mean row 11's
+   public-invoke permission went missing or the origin secret is mismatched;
+   a guard makes that unlikely now, but the config is not the deployment.
 9. **Replay the M1–M6 gate scripts against `server_url`**, then the stock app
    over the internet (build plan M7).
 

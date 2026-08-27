@@ -3,9 +3,18 @@
 Design document for everything the README feature report lists as **Pending**
 (album collaborators, public album links, single-file links, memories,
 contacts, comments/reactions, cast, passkeys, family, legacy contacts).
-Written from the 2026-08-18 audit of the current code. **Nothing here is
-built yet** — this is the map, recorded before the work so the schema and
-sequencing decisions are made once, deliberately.
+Written from the 2026-08-18 audit of the then-current code. **Nothing here
+was built yet at the time of writing** — this is the map, recorded before
+the work so the schema and sequencing decisions were made once, deliberately.
+
+> **Implementation status (2026-08-27, branch `feature/sharing-public-links`):
+> Phases A–D and F are built.** A `43eebc5` (schema foundation, D48), B
+> `44733f8` (authz seam, D49), C `8604287` (collaborator sharing, D50), D
+> `4dd62b2` (public links, D51), F=§4.5/§4.1a `807c864` (albums web hosting,
+> D52). Phase E remains pending. The plan text below is kept as written;
+> each phase carries an **Outcome** note recording where reality diverged —
+> the full judgment calls live in DECISIONS.md D48–D52. Sections §5 and §6
+> were added post-build.
 
 Companion documents: [DECISIONS.md](DECISIONS.md) (divergences and their
 reasons), [NEXT-TASKS.md](NEXT-TASKS.md) (the near-term queue — P3 items
@@ -80,6 +89,17 @@ Two viable paths for the new lookups ("collections shared with me",
 Store link tokens **hashed at rest**, same discipline as session tokens
 (`tokenHash` in `src/domain/tokens.ts`).
 
+> **Outcome (D48, `43eebc5`).** Option 2 taken as recommended — reverse
+> partitions, `PUBTOKEN#` GetItem, no `gsi4` — plus a rollback rule the plan
+> didn't have: new row types set NO gsi attributes, so pre-sharing code
+> ignores them by construction (guard-tested). Two divergences from the text
+> above: the DB port **already had** a transaction primitive (`transactWrite`)
+> — only the 100-op ceiling guard was added, so the "port + both-adapters
+> change" was far cheaper than budgeted; and "hashed at rest" was **partially
+> reversed** in Phase D (D51) — museum re-emits the full token-bearing URL in
+> `publicURLs`, so the plaintext is stored as an attribute on the hash-keyed
+> row, the exact session-token discipline.
+
 ### Phase B — authz seam rework
 
 - `getOwnedCollection` → `resolveCollectionAccess(userId, colID) →
@@ -91,6 +111,17 @@ Store link tokens **hashed at rest**, same discipline as session tokens
   branch (+ its test, rewritten in the same commit), `/files/info`
   filter-to-accessible semantics, upload commit allowing collaborators to
   target shared collections.
+
+> **Outcome (D49, `44733f8`).** `resolveCollectionAccess` ports museum's
+> access controller check-for-check. But two of the three "landmines" turned
+> out to be the plan's audit being wrong about museum, not baked-in bugs:
+> **`/files/info` stayed strict-ownership** (museum's GetFileInfo gates on
+> VerifyFileOwner — there is no filter-to-accessible; capture-gated), and
+> **file commit stays owner-only** (museum: "Creating a file requires
+> collection ownership" — collaborators commit into their own collection and
+> `/collections/add-files`). `removeFilesV3` got museum's real permission
+> matrix, test rewritten in the same commit as planned. Deliberate,
+> capture-gated divergence: non-members read 403 here where museum 404s.
 
 ### Phase C — album collaborators (share with Ente users)
 
@@ -104,6 +135,16 @@ a shared collection must appear in the sharee's `/collections/v2` by either:
   merge by `updationTime`; simpler, no write amplification;
 - fan-out feed rows per participant — only if captured pagination semantics
   force it; cheap only with a participant cap (museum caps anyway).
+
+> **Outcome (D50, `8604287`).** Query-time merge, as recommended — fan-out
+> never became necessary. share/unshare/leave/sharees are live with the
+> sharee feed field-for-field off museum's scan (wrapped key without nonce,
+> real owner email, withheld private magicMetadata); unshare is a per-user
+> `SHAREDTOMB#` row (§4.4's design, verbatim); leave removes the leaver's own
+> files; delete/account cascades are centralized per §4.6. Role menu is
+> VIEWER|COLLABORATOR (ADMIN 400s — nothing here can mint an ADMIN row).
+> The tombstone wire shape, `sharedAt`, and several edge behaviours are
+> capture-gated — the list is in D50.
 
 ### Phase D — public album links
 
@@ -129,6 +170,21 @@ fragment, so the public surface serves only ciphertext + the per-file keys
 already wrapped with the collection key (the wire shape `fileToDiffJson`
 already emits).
 
+> **Outcome (D51, `4dd62b2`).** All three halves built: share-url CRUD +
+> join-link, 10 `/public-collection/*` routes behind the access-token
+> middleware (museum's error bodies verbatim), collect with attribution
+> flipped to the link owner, plus the §4.1 abuse controls (verify-password
+> attempt caps, per-link daily download/upload ceilings, short public
+> presigns) and the JWT primitive (`src/lib/jwt.ts`, signing key derived from
+> HASHING_KEY — no second secret). Divergences: **`enableDownload: false` is
+> enforced server-side here (403 on originals) where museum does not enforce
+> the flag at all** — a deliberate hardening divergence, and still
+> access-control-not-DRM exactly as §3.2 warned; **report-abuse was NOT
+> implemented** because the route no longer exists upstream (the plan's
+> "23-route" count included it); public HLS `video-data` fetch is deferred
+> (404, the albums app degrades to original download). Not stubbed-empty
+> anywhere: unimplemented public routes 404 (§4.5's rule).
+
 ### Phase E — the rest, riding the same spine
 
 | Feature | What it reuses / what's new |
@@ -140,6 +196,11 @@ already emits).
 | Passkeys (`accountsJwtAuthAPI`) | independent; the only item bringing a new hard dependency (WebAuthn verification) |
 | Family plans | mostly stub-extension over billing; independent |
 | Legacy / trusted contacts | time-delayed access; needs a cron; independent |
+
+> **Outcome.** Phase E is the part that remains pending — nothing in this
+> table is built. The token spine, public middleware, and JWT primitive it
+> rides on now exist (D48/D51), so the "what it reuses" column is real.
+> Queued as future items in NEXT-TASKS.md.
 
 **Effort shape**: Phases A+B are the risky, cross-cutting ~30%. C and D are
 each roughly the size of the existing trash+entity work combined. Everything
@@ -202,6 +263,13 @@ after D is incremental.
    extending the `f620970` spend-ceiling work.
    (e) Lambda reserved-concurrency cap as the final bill fuse; existing
    budget alarms cover the rest.
+   > **Outcome (D51/D52).** (b)–(e) landed as written. (a) landed weaker
+   > than planned: **the D47 FREE pricing plan cannot path-scope a rate
+   > rule** (that needs a byte-match scope-down, exactly the feature the
+   > FREE tier gates), so `/public-collection/*` rides the API
+   > distribution's unscoped 2000/5min/IP rule and the tighter bounds stay
+   > app-level and per-link. Restore a 300/5min scoped rule only if the plan
+   > is ever cancelled back to pay-as-you-go.
 2. **Enforce the enforceable, document the rest.** `enableDownload: false`
    → 403 on original-download, previews only; `enableCollect: false` → no
    upload-URL issuance. Short public-path presign expiry (minutes — add a
@@ -227,6 +295,12 @@ after D is incremental.
    albums build" checklist item (RUNBOOK-M5 style). If shipping partially:
    404 the whole `/public-collection/*` surface (clients show "link
    broken"), never hollow 200s (clients show "empty album", which lies).
+   > **Outcome (D52, `807c864` — this became Phase F).** Pinned:
+   > `photos-v1.3.61` in ORACLE-VERSION + the Makefile's `ALBUMS_WEB_TAG`
+   > (guard asserts they agree); hosting + build/deploy pipeline in §6
+   > below. The manual open-a-real-link checklist is the outstanding
+   > release gate (NEXT-TASKS.md). Unimplemented public routes 404, as
+   > prescribed.
 6. **Centralize cascades; TTL as backstop only.** One `onCollectionDelete`
    and one `onAccountDelete` domain function that every handler calls, each
    owning the full cascade (participants, links, per-user feed tombstones,
@@ -260,3 +334,67 @@ port); 4, 5, 8 with the project's existing capture/test discipline applied
 early; 2 and 3 cannot be engineered away — their mitigation is short-lived
 credentials plus honest documentation, which is exactly how upstream Ente
 lives with the same constraints.
+
+---
+
+## 5. Backward compatibility & migration safety (post-build, 2026-08-27)
+
+What Phases A–D and F did to a table and clients that predate them — the
+answer is "nothing", by construction:
+
+- **Additive-only rows, no migration.** Every new row type (sharee pairs,
+  `SHAREDTOMB#` tombstones, `PUBTOKEN#` links and their `DEVICE#`/counter
+  children, `COL#…/LINK` pointers) is a new PK/SK shape in the existing
+  table. No existing row was rewritten, no backfill ran, no index was added
+  — a pre-sharing deployment upgrades by shipping new Lambda code and
+  nothing else.
+- **Rollback-safe via the no-gsi-attributes rule (D48).** New row types set
+  NO gsi1/gsi2/gsi3 attributes, and the GSIs are sparse — so code deployed
+  from `main` against a table that already contains sharing rows behaves
+  exactly as before the branch: every pre-sharing query path is blind to the
+  new rows. Enforced by the rollback-rule test in
+  `test/unit/sharing.test.ts` and re-asserted for each row type D51 added.
+- **The three deletion-adjacent risk zones are now guard-tested** (§3
+  caveat 6's fear, discharged): `deleteCollectionV3` trashes only
+  owner-owned files and merely unlinks sharee-owned ones (the pre-D50 code
+  would have trashed a collaborator's file into the owner's trash), account
+  deletion (`reapUserData`) revokes shares in both directions and disables
+  links on every owned collection, and links are disabled BEFORE the
+  collection tombstones so no window serves a dead album. TTL on link rows
+  is backstop only — middleware stays the enforcement, and disabled rows
+  have their `ttl` stripped so dead tokens answer 410 forever, never a
+  reaped 401.
+- **One operational caveat — the ALBUMS_URL Lambda roll.** Links are minted
+  as `<ALBUMS_URL>/?t=<token>`. Any link minted before the web
+  distribution's URL reaches the Lambda env (first Phase-F deploy, or any
+  later `albums_url` change) embeds the config default and points at the
+  wrong host. The tokens stay valid — re-copy each affected link from the
+  app; nothing needs re-minting server-side.
+
+---
+
+## 6. Web deployment (Phase F, D52)
+
+The albums viewer hosting that Phase D's links point at. Full operator steps
+in INSTALL.md C13; resource detail in AWS-RESOURCES.md rows 23–27.
+
+- **A second CloudFront distribution + OAC bucket**
+  (`src/infra/modules/web`): the albums base URL must not be the API's
+  (museum's `apps.public-albums` contract), and the API distribution + its
+  web ACL are the exact pair the D47 FREE plan subscribes — so albums rides
+  its own distribution, pay-as-you-go, no WAF, fronting a fully private
+  bucket (OAC, public-access-block ×4, SPA fallback 403/404 → index).
+  The bucket holds build artifacts only: `force_destroy`, no versioning,
+  inside `make destroy` scope.
+- **Pinned albums build**: ente-io/ente tag `photos-v1.3.61`, recorded in
+  ORACLE-VERSION and the Makefile's `ALBUMS_WEB_TAG` (guard asserts both
+  agree). `make build-web` sparse-clones the tag and static-exports the app
+  with the API URL **baked in at build time** — an API-URL change is a
+  rebuild, not a re-sync; `make deploy-web` (guard-account-gated) syncs +
+  invalidates.
+- **Operator order for an existing pre-Phase-F deployment**: re-paste
+  `src/infra/deployer-policy.json` over the deployer's inline policy →
+  `make plan` (expect **+5 `module.web` resources** and the API Lambda's
+  env to roll: `ALBUMS_URL` + the D51 knobs) → `make deploy` →
+  `make build-web` → `make deploy-web` → mint a share link in the app and
+  open it in a browser (the D52 release gate).
