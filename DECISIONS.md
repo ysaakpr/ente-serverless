@@ -1584,6 +1584,33 @@ source says Y — source won).
     brief albums-web blip during the migration apply while the bucket policy
     re-pins (the API path is untouched throughout).
 
+- **D59 [COST 2026-08-27] Originals move to GLACIER_IR after 7 days
+  (configurable), not day 0 — revises the 2026-08-16 GIR-only decision's
+  transition timing; the GIR-only class choice itself stands.** The day-0
+  transition charged $0.03/GB GIR retrieval on views of exactly the objects
+  people view most — fresh uploads. The fix: `gir_transition_days` (data
+  module, number, default 7, validated >= 0), driving the
+  `originals-to-glacier-ir` rule's `transition.days`; threaded through both
+  env roots (dev + test declare + pass it, tfvars.example entries state the
+  tradeoff). The math: a day in Standard costs ≈ $0.023/GB-month prorated
+  (~$0.0008/GB/day — the whole week ~$0.006/GB, once), so keeping the first
+  week hot is cheaper than a single early full-res view. Tag filter
+  (`tier=original`) and GLACIER_IR target unchanged; still no Deep Archive.
+  Guards updated: the day-0 assertion is now var-driven-days (a literal 0
+  would silently reinstate the charge), plus default-7 + validation in the
+  module and default-7 + passthrough in BOTH env layers. INSTALL's per-pool
+  GIR recommendation now recommends the same >= 7-day transition for pool
+  buckets (pool owners manage their own lifecycle rules; the server never
+  touches them).
+  **Migration facts — this is an in-place lifecycle-configuration update**
+  (one `~ update` on `aws_s3_bucket_lifecycle_configuration.objects` per
+  env, `days 0 → 7`; any destroy/replace line means stop). Objects ALREADY
+  in GLACIER_IR stay there: lifecycle rules never move objects back to
+  Standard, so only new — and not-yet-transitioned — objects get the 7-day
+  grace. No data movement, no restore, no cost spike; the only billing
+  change is ~$0.006/GB of prorated Standard per new object's first week,
+  traded against $0.03/GB retrieval on its early views.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

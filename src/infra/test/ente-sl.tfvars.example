@@ -31,3 +31,6 @@ delete_protection = false
 # alarm_email = "ops@example.com"
 # albums_url  = "https://albums-test.example.com"
 # signup_mode = "invite"
+# Days originals stay in Standard before GLACIER_IR (D59, default 7): day N
+# in Standard ≈ $0.023/GB-mo prorated vs GIR retrieval $0.03/GB on early views.
+# gir_transition_days = 7

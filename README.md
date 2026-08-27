@@ -36,10 +36,13 @@ With BYO storage pools (D55) a presigned URL may point at a per-pool household
 bucket instead of the central objects bucket — each file row pins the pool its
 bytes landed in.
 
-Storage classes (GIR-only decision, 2026-08-16): originals → GLACIER_IR at
-day 0 via the `tier=original` object tag (applied at commit — museum's key
-layout makes a prefix rule impossible); thumbnails and file-data stay
-Standard; **no Deep Archive, no restore workflow** (guard-tested).
+Storage classes (GIR-only decision, 2026-08-16; transition days D59):
+originals → GLACIER_IR after `gir_transition_days` (configurable, default 7 —
+fresh uploads are the most-viewed, and a day-0 transition billed $0.03/GB GIR
+retrieval on exactly those views) via the `tier=original` object tag (applied
+at commit — museum's key layout makes a prefix rule impossible); thumbnails
+and file-data stay Standard; **no Deep Archive, no restore workflow**
+(guard-tested).
 
 ## Layout
 
@@ -138,7 +141,7 @@ and sharing pieces** — roughly the ~60-route core plus magic metadata,
 | Trash | 🟢 Done | trash, diff v2, delete, empty; 30-day purge cron | Tier 0 |
 | User entities | 🟢 Done | key create/ensure/get, entity CRUD + diff | Tier 0 |
 | File-data | 🟢 Done | `files/data` (ML embeddings), `files/video-data` (HLS), preview upload/fetch, status-diff | Tier 1 |
-| Hardening | 🟢 Done | origin lock, attempt caps/TTLs, spend ceilings, quota checks, GIR-at-day-0 storage tiering | — |
+| Hardening | 🟢 Done | origin lock, attempt caps/TTLs, spend ceilings, quota checks, GIR storage tiering (day 7, D59) | — |
 | Deployment controls (off-parity, ops-only) | 🟢 Done | deliberate operator-side features, zero client-visible shape changes (D54/D55): `SIGNUP_MODE=invite` gating, viewer accounts, per-user quotas (`make invite`/`invites`/`revoke-invite`/`set-storage`); BYO storage pools — one household bucket, many users (`make pool-create`/`pool-attach`/`pool-detach`/`pools`/`pool-set-quota`/`pool-disable`); capture-diff runs with both off | — |
 | Billing | 🟠 Stubbed | free plan, huge quota (`/billing/*`, D34) | Tier 0 |
 | Remote store / feature flags | 🟠 Stubbed | fixed flags; `castUrl`/`embedUrl` empty | Tier 0 |

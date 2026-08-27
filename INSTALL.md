@@ -558,9 +558,13 @@ failures:
   multipart uploads otherwise bill forever; the central bucket uses 7 days.
 - **Optional but recommended — the GLACIER_IR tier rule**: the server tags
   originals `tier=original` in every bucket, central or pool, so a lifecycle
-  rule filtered on that tag (transition to `GLACIER_IR`, day 0) gives the
-  pool the same cost profile as the central bucket. Without it the pool
-  bills Standard rates.
+  rule filtered on that tag (transition to `GLACIER_IR` after **7 or more
+  days**, matching the central bucket's `gir_transition_days` default — D59)
+  gives the pool the same cost profile as the central bucket. Keep the
+  transition off day 0: fresh uploads are the most-viewed, and GIR bills
+  $0.03/GB retrieval on those views while a week of Standard costs about
+  $0.006/GB once. Pool owners manage their own lifecycle rules — the server
+  never touches them. Without the rule the pool bills Standard rates.
 
 #### 2. Grant access — mode `role` (preferred on real AWS)
 
@@ -854,12 +858,13 @@ Two things to know:
 
 ## Cost expectations
 
-Baseline ≈ **$3–5/month** for a ~500 GB library (Glacier IR originals,
-Standard thumbnails, on-demand DynamoDB, everything else inside free tiers).
-The variable line that matters: full-resolution downloads are S3 egress at
-$0.09/GB plus $0.03/GB Glacier IR retrieval — browsing is cheap, a full
-500 GB library restore is roughly $50. Details and caveats in
-[AWS-RESOURCES.md](AWS-RESOURCES.md) §4.
+Baseline ≈ **$3–5/month** for a ~500 GB library (Glacier IR originals after a
+week in Standard — `gir_transition_days`, D59 — Standard thumbnails, on-demand
+DynamoDB, everything else inside free tiers). The variable line that matters:
+full-resolution downloads are S3 egress at $0.09/GB plus $0.03/GB Glacier IR
+retrieval — browsing is cheap (and the first week's views skip the retrieval
+fee entirely), a full 500 GB library restore is roughly $50. Details and
+caveats in [AWS-RESOURCES.md](AWS-RESOURCES.md) §4.
 
 With BYO storage pools (D55) the storage and egress lines move to the pool
 owners' own bills: the central account keeps the control plane — DynamoDB,

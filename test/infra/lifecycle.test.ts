@@ -43,7 +43,7 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
     }
   });
 
-  it('originals transition to GLACIER_IR at day 0, selected by tag tier=original', () => {
+  it('originals transition to GLACIER_IR after gir_transition_days, selected by tag tier=original (D59)', () => {
     const text = dataTf();
     expect(text).toContain('GLACIER_IR');
     const rule = text.slice(text.indexOf('originals-to-glacier-ir'));
@@ -51,8 +51,36 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
     expect(filterBlock).toMatch(/tag\s*{/);
     expect(filterBlock).toContain('"tier"');
     expect(filterBlock).toContain('"original"');
+    // D59: the days are var-driven, never a literal — a hardcoded 0 would
+    // silently reinstate day-0 GIR retrieval charges on fresh uploads.
     const transitionBlock = rule.slice(rule.indexOf('transition'), rule.indexOf('}', rule.indexOf('storage_class')));
-    expect(transitionBlock).toMatch(/days\s*=\s*0/);
+    expect(transitionBlock).toMatch(/days\s*=\s*var\.gir_transition_days/);
+  });
+
+  it('gir_transition_days defaults to 7 with a >= 0 validation (D59)', () => {
+    const vars = readTf('modules/data/variables.tf');
+    const at = vars.indexOf('variable "gir_transition_days"');
+    expect(at, 'no gir_transition_days variable').toBeGreaterThan(-1);
+    const block = vars.slice(at);
+    expect(block).toMatch(/type\s*=\s*number/);
+    // Default 7: fresh uploads are the most-viewed, and day-0 GIR billed
+    // $0.03/GB retrieval on exactly those views. Standard's ~$0.023/GB-mo
+    // prorated over a week is cheaper than one early full-res view.
+    expect(block).toMatch(/default\s*=\s*7/);
+    expect(block).toMatch(/condition\s*=\s*var\.gir_transition_days\s*>=\s*0/);
+  });
+
+  it('both env layers thread gir_transition_days through, defaulting 7 (D59)', () => {
+    for (const env of ['dev', 'test']) {
+      const main = readTf(`${env}/main.tf`);
+      expect(main, `${env} does not pass gir_transition_days`).toMatch(
+        /gir_transition_days\s*=\s*var\.gir_transition_days/,
+      );
+      const vars = readTf(`${env}/variables.tf`);
+      const at = vars.indexOf('variable "gir_transition_days"');
+      expect(at, `${env} lacks the variable`).toBeGreaterThan(-1);
+      expect(vars.slice(at)).toMatch(/default\s*=\s*7/);
+    }
   });
 
   it('exactly one transition rule — untagged thumbs/file-data stay Standard', () => {

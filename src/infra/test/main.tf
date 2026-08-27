@@ -38,9 +38,10 @@ resource "random_password" "origin_secret" {
 # (D57): deletion_protection_enabled on the table, force_destroy inverted on
 # the objects bucket. Default true; only a test env should ever set it false.
 module "data" {
-  source            = "../modules/data"
-  env_name          = var.env_name
-  delete_protection = var.delete_protection
+  source              = "../modules/data"
+  env_name            = var.env_name
+  delete_protection   = var.delete_protection
+  gir_transition_days = var.gir_transition_days
 }
 
 # Where minted share links point (D51/D52/D58): `<albums_url>/?t=<token>`.

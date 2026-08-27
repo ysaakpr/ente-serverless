@@ -105,6 +105,15 @@ variable "signup_mode" {
   default = "open"
 }
 
+# D59: days originals spend in Standard before the lifecycle rule moves them
+# to GLACIER_IR. Same pass-through rule as above — the module validates >= 0.
+# Tradeoff: day N in Standard ≈ $0.023/GB-mo prorated, vs GIR retrieval at
+# $0.03/GB on early views — and fresh uploads are the most-viewed.
+variable "gir_transition_days" {
+  type    = number
+  default = 7
+}
+
 # D57: API-level delete protection for the stateful half. true (the default,
 # right for prod): the table refuses DeleteTable at the AWS API level —
 # console included — and the objects bucket refuses destroy while non-empty.

@@ -25,7 +25,7 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 | 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
 | 4 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
 | 5 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
-| 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (day 0, filtered on object tag `tier=original` — D7), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
+| 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (after `gir_transition_days`, default 7 — D7/D59; filtered on object tag `tier=original`), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
 
 ### Stateless (`modules/compute`)
 
@@ -208,11 +208,12 @@ Ordered by how likely each is to bite on the first apply.
     cannot follow you.
 
 - **GLACIER_IR's 90-day minimum collides with the 30-day trash purge.** Objects
-  transition to GIR on day 0, and GIR bills a 90-day minimum duration (plus a
-  128 KB minimum billable size per object). A photo uploaded and then
-  trash-purged after 30 days is still charged for the remaining ~60 days. Not a
-  bug, but it means churn costs more than the storage line suggests, and it is
-  worth recording once real numbers exist.
+  transition to GIR after `gir_transition_days` (default 7 — D59), and GIR
+  bills a 90-day minimum duration (plus a 128 KB minimum billable size per
+  object). A photo uploaded and then trash-purged after 30 days is still
+  charged for most of the remaining minimum. Not a bug, but it means churn
+  costs more than the storage line suggests, and it is worth recording once
+  real numbers exist.
 
 - **Byte egress bypasses CloudFront.** Clients GET originals straight from S3
   via presigned URLs, so downloads are billed as **S3 internet egress**
@@ -399,6 +400,14 @@ Variable, and the part that actually matters: **GIR retrieval at $0.03/GB** plus
 **S3 egress at $0.09/GB** on every full-resolution download past the first
 100 GB/month. Browsing is cheap (thumbnails stay Standard); a full library
 restore is not — 500 GB out is roughly $15 retrieval + $36 egress.
+
+The `gir_transition_days` knob (default 7 — D59) trims the retrieval line
+where it bites hardest: fresh uploads are the most-viewed, so originals sit in
+Standard for their first week before moving to GIR. The math: a day in
+Standard costs ≈ $0.023/GB-month prorated (~$0.0008/GB/day, so the whole week
+adds ~$0.006/GB once, per object), while a single early full-res view under a
+day-0 transition billed $0.03/GB retrieval every time. Raise the knob if new
+photos get re-watched for weeks; 0 restores transition-at-once.
 
 BYO storage pools (D55) change whose bill the storage lines land on, not the
 totals: a pooled user's S3 storage, retrieval and egress bill to the

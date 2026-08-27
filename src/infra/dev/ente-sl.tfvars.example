@@ -38,6 +38,14 @@ region = "ap-southeast-1"
 # trailing slash: the server appends /?t=<token> itself.
 # albums_url = "https://albums.example.com"
 
+# Optional. Days originals stay in S3 Standard before moving to GLACIER_IR
+# (D59, default 7). The tradeoff: day N in Standard costs ≈ $0.023/GB-month
+# prorated (~$0.0008/GB per day), while GIR charges $0.03/GB retrieval — and
+# fresh uploads are exactly the ones people view. 0 = transition at once
+# (cheapest storage, pays retrieval on every early view); raise it if your
+# household re-watches new photos for weeks.
+# gir_transition_days = 7
+
 # Optional. Invite-gated signup (D54/D56): "invite" admits only emails invited
 # via `make invite`; omit for open signup (the default). Only account CREATION
 # is gated — login and existing accounts are untouched either way.
