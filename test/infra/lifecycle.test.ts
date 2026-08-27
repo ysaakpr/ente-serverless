@@ -71,13 +71,12 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
  * classes. Its paired expiry rule is what stops it costing forever.
  */
 describe('bucket versioning guards', () => {
-  it('the objects bucket is versioned, and the resource cannot be destroyed', () => {
+  it('the objects bucket is versioned', () => {
     const text = dataTf();
     const at = text.indexOf('resource "aws_s3_bucket_versioning"');
     expect(at, 'objects bucket is NOT versioned').toBeGreaterThan(-1);
     const block = text.slice(at, text.indexOf('\n}\n', at));
     expect(block).toMatch(/status\s*=\s*"Enabled"/);
-    expect(block).toContain('prevent_destroy = true');
   });
 
   it('noncurrent versions expire, so the safety net cannot bill forever', () => {
@@ -233,6 +232,38 @@ describe('deploy target guards', () => {
       expect(outputs, `${rel} lost distribution_arn`).toContain('output "distribution_arn"');
       expect(outputs, `${rel} lost web_acl_arn`).toContain('output "web_acl_arn"');
     }
+  });
+
+  it('the tofu dir is profile-driven — no target can silently address dev (D57)', () => {
+    const text = makefile();
+    expect(text).toMatch(/TFDIR\s*=\s*src\/infra\/\$\(PROFILE\)/);
+    expect(text).toMatch(/TF\s*=\s*tofu -chdir=\$\(TFDIR\)/);
+    expect(text).toMatch(/STATE\s*=\s*\$\(TFDIR\)\/terraform\.tfstate/);
+    // dev is PRODUCTION: nothing may hardcode its dir back in.
+    expect(text).not.toMatch(/-chdir=src\/infra\/dev/);
+    expect(text).not.toMatch(/STATE\s*=\s*src\/infra\/dev/);
+    // No profile chosen must refuse, never default.
+    expect(text).toMatch(/NO_PROFILE_MSG\s*=\s*no profile chosen/);
+    expect(target('require-profile')).toContain('NO_PROFILE_MSG');
+    // The labels name what each env IS, not what its folder is called.
+    expect(text).toMatch(/PROFILE_LABEL_dev\s*=\s*PRODUCTION/);
+    expect(text).toMatch(/PROFILE_LABEL_test\s*=\s*TEST/);
+  });
+
+  it('mutating targets are profile-confirmed; plan only banners (D57)', () => {
+    for (const name of ['deploy', 'destroy', 'deploy-web', 'pricing-plan']) {
+      expect(target(name), `${name} lacks confirm-profile`).toMatch(
+        new RegExp(`^${name}:.*confirm-profile`),
+      );
+    }
+    // plan stays read-only: banner + fail-fast, but no typed confirmation.
+    expect(target('plan')).toMatch(/^plan:.*require-profile/);
+    expect(target('plan'), 'plan is read-only — no confirm gate').not.toContain('confirm-profile');
+    const confirm = target('confirm-profile');
+    // The exact profile NAME must be typed back (not y/n), with a CONFIRM=<profile>
+    // bypass for scripting that refuses on mismatch instead of re-prompting.
+    expect(confirm).toContain('Type the profile name to confirm');
+    expect(confirm).toContain('does not match profile');
   });
 });
 
@@ -474,16 +505,43 @@ describe('table + compute guards', () => {
     expect(block).toMatch(/function_url_auth_type\s*=\s*"NONE"/);
   });
 
-  it('the table carries deletion protection', () => {
-    // The second, independent rail on the table: prevent_destroy stops tofu,
-    // deletion_protection_enabled stops everyone else including the console.
-    expect(dataTf()).toMatch(/deletion_protection_enabled\s*=\s*true/);
+  it('delete protection is var-driven and defaults ON (D57)', () => {
+    // The rails moved from lifecycle prevent_destroy (a literal tofu cannot
+    // parameterize, and one that only ever stopped tofu itself) to API-level
+    // equivalents: deletion_protection_enabled blocks DeleteTable for
+    // EVERYONE including the console, and !force_destroy makes the bucket
+    // destroy refuse while non-empty. Both must follow the one variable.
+    const text = dataTf();
+    expect(text).toMatch(/deletion_protection_enabled\s*=\s*var\.delete_protection/);
+    expect(text).toMatch(/force_destroy\s*=\s*!var\.delete_protection/);
+
+    const vars = readTf('modules/data/variables.tf');
+    const block = vars.slice(vars.indexOf('variable "delete_protection"'));
+    expect(block, 'no delete_protection variable').not.toBe('');
+    expect(block).toMatch(/type\s*=\s*bool/);
+    // Default true: an env that forgets to set it gets PROD-grade protection.
+    expect(block).toMatch(/default\s*=\s*true/);
   });
 
-  it('stateful resources carry prevent_destroy', () => {
-    const text = dataTf();
-    const count = (text.match(/prevent_destroy = true/g) ?? []).length;
-    expect(count).toBeGreaterThanOrEqual(2); // table + objects bucket
+  it('no lifecycle prevent_destroy remains in the data module (D57 replaced it)', () => {
+    // A leftover block would hard-refuse test-env teardown regardless of the
+    // variable — the whole point of the swap is that ONLY delete_protection
+    // decides. (stripComments means a commented-out block cannot satisfy or
+    // trip this either way.)
+    expect(dataTf()).not.toContain('prevent_destroy');
+  });
+
+  it('both env layers thread delete_protection through, defaulting ON (D57)', () => {
+    for (const env of ['dev', 'test']) {
+      const main = readTf(`${env}/main.tf`);
+      expect(main, `${env} does not pass delete_protection`).toMatch(
+        /delete_protection\s*=\s*var\.delete_protection/,
+      );
+      const vars = readTf(`${env}/variables.tf`);
+      const block = vars.slice(vars.indexOf('variable "delete_protection"'));
+      expect(block, `${env} lacks the variable`).not.toBe('');
+      expect(block).toMatch(/default\s*=\s*true/);
+    }
   });
 
   it('every deployer-policy statement uses only IAM-recognised keys', () => {

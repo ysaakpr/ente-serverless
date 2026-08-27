@@ -1,0 +1,33 @@
+# TEST environment example (D57). Copy to ente-sl.tfvars (gitignored) and
+# fill in. Select it with `make profile test` — every make target then reads
+# THIS directory's tfvars and state, never dev's (dev is PRODUCTION).
+
+# MUST be a FRESH key: openssl rand -base64 32
+# NEVER paste production's hashing_key here. The key derives the email->user
+# mapping, so sharing it across environments links every test account to its
+# production identity — and a leaked/committed test key would then compromise
+# prod. A throwaway env gets a throwaway key.
+hashing_key = "REPLACE-ME-fresh-base64-32-bytes"
+
+# Any SES-verified identity in `region` below (sandbox is fine — verify your
+# own inbox in the SES console for that region).
+mail_from = "you@example.com"
+
+# Where this test env deploys. Independent of prod's region — a different one
+# is fine and keeps the two stacks visually unmistakable in the console.
+region = "ap-southeast-1"
+
+# Names everything: table ente-sl-test, bucket ente-sl-test-objects-<account>,
+# both lambdas, the IAM role, the log groups, the Env tag.
+env_name = "test"
+
+# D57: OFF for a test env — `make profile test && make destroy` (and the
+# destroy-data steps) can then tear everything down, data included, with no
+# console surgery. Leave true only if this env starts holding photos you care
+# about. Production (src/infra/dev) defaults to true and must stay true.
+delete_protection = false
+
+# Optional knobs — same meaning as in src/infra/dev/ente-sl.tfvars.example:
+# alarm_email = "ops@example.com"
+# albums_url  = "https://albums-test.example.com"
+# signup_mode = "invite"

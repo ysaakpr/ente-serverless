@@ -1,11 +1,16 @@
 node_modules/
 dist/
+# Bare-name patterns, deliberately: they match in EVERY env dir under
+# src/infra (dev, test, and any future one) — never re-scope them to one dir.
 *.tfstate
 *.tfstate.backup
 .terraform/
 .terraform.lock.hcl
 tfplan
 *.tfvars
+# Which env the make targets address (make profile dev|test, D57) — operator-
+# local by nature, and committing it would silently pick an env for everyone.
+.tf-profile
 # An editor swap file of ente-sl.tfvars holds hashing_key in cleartext, and
 # `*.tfvars` above does NOT match `.ente-sl.tfvars.swp`. D4a says that key must
 # never reach git; this is the hole it would slip through.

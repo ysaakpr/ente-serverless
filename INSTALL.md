@@ -198,7 +198,7 @@ The region binds Lambda, DynamoDB, S3 **and SES** together — the mail adapter
 uses the Lambda's own region, so the verified SES identity must live in the
 same region you deploy to. Pick once; moving later is a fresh deployment, not
 a migration (the bucket name embeds the account ID and the table carries
-`prevent_destroy`).
+API-level deletion protection, D57).
 
 Note: OpenTofu reads the region from `ente-sl.tfvars` (step C4), **not** from
 your AWS CLI config. `aws configure get region` tells you nothing about where
@@ -265,13 +265,38 @@ Fill in all four values (the file is gitignored):
 | `hashing_key` | `openssl rand -base64 32` — generate once, see warning below |
 | `mail_from` | the SES-verified address from C2 |
 | `region` | the region from C1, e.g. `ap-southeast-1` |
-| `env_name` | e.g. `prod` — names every resource; **set before the first apply and never change it** (changing it renames the table and bucket, which forces a replacement that `prevent_destroy` will refuse) |
+| `env_name` | e.g. `prod` — names every resource; **set before the first apply and never change it** (changing it renames the table and bucket, which plans a replacement of the photo store — the delete-protection rails refuse it, but stop and fix the value rather than fighting them) |
 | `alarm_email` | optional; defaults to `mail_from` |
+| `delete_protection` | optional, default `true` (D57) — API-level deletion protection on the table + no `force_destroy` on the objects bucket. **Leave it true here**; only a test env's tfvars sets `false` |
 
 > **BACK UP `hashing_key` off-machine before applying.** It keys the
 > email→user mapping; losing it orphans every account (decision D4a). The
 > local `terraform.tfstate` also contains it in cleartext and is the only
 > deployment record — back that up too after the first apply.
+
+### C4a. Choose the deployment profile
+
+```bash
+make profile dev
+```
+
+Every tofu-touching make target (`infra-init`, `plan`, `deploy`, `outputs`,
+`smoke`, `destroy`, `build-web`, `deploy-web`, `pricing-plan`, …) addresses
+the env dir named in `.tf-profile` (gitignored, written by `make profile`):
+
+- `make profile dev` → `src/infra/dev` — labelled **PRODUCTION** (the dir was
+  named before it went live; it *is* the production deployment)
+- `make profile test` → `src/infra/test` — labelled **TEST** (see
+  [A second environment](#a-second-environment-test))
+
+There is **no default**: with no profile chosen every such target refuses
+with `no profile chosen — choose: make profile dev | make profile test`.
+Every profile-aware target banners which env it is about to touch, e.g.
+`>>> profile: dev (ENV: PRODUCTION)`, and the mutating ones (`deploy`,
+`destroy`, `deploy-web`, `pricing-plan`) additionally ask you to **type the
+profile name back** before acting — `CONFIRM=<profile>` skips the prompt for
+scripting (e.g. `CONFIRM=test make destroy`), and refuses if it names the
+wrong profile. Bare `make profile` prints the current choice.
 
 ### C5. Initialize OpenTofu
 
@@ -279,7 +304,8 @@ Fill in all four values (the file is gitignored):
 make infra-init
 ```
 
-Regenerates `.terraform/` and the provider lock file.
+Regenerates `.terraform/` and the provider lock file (of the selected
+profile's dir).
 
 ### C6. Plan
 
@@ -289,11 +315,14 @@ AWS_PROFILE=ente-sl make plan
 
 This target:
 
-1. runs `make build-lambda` first (esbuild zips into `dist/`, so the bundles
+1. banners the profile (`>>> profile: dev (ENV: PRODUCTION)`) and refuses if
+   none is chosen — plan is read-only, so it does **not** ask for typed
+   confirmation,
+2. runs `make build-lambda` first (esbuild zips into `dist/`, so the bundles
    can never be stale at plan time),
-2. runs the account guard,
-3. refuses with instructions if `ente-sl.tfvars` is missing,
-4. saves the plan to `tfplan`.
+3. runs the account guard,
+4. refuses with instructions if the profile dir's `ente-sl.tfvars` is missing,
+5. saves the plan to `tfplan`.
 
 On a first deploy expect **27 to add, 0 to change, 0 to destroy**. **Read the
 plan.** Any `destroy` or `replace` line on a first deploy means wrong
@@ -305,9 +334,12 @@ credentials or a wrong `env_name` — stop and fix it.
 AWS_PROFILE=ente-sl make deploy
 ```
 
-Applies the **saved** plan (so what ships is exactly what you reviewed), then
-prints the outputs. Most resources are quick; **CloudFront takes 5–15 minutes**
-to reach Deployed status.
+After the profile banner, deploy asks you to type the profile name back
+(`Type the profile name to confirm: dev`) — a y/n is too easy to hit
+reflexively when pointed at the wrong env. Then it applies the **saved** plan
+(so what ships is exactly what you reviewed) and prints the outputs. Most
+resources are quick; **CloudFront takes 5–15 minutes** to reach Deployed
+status.
 
 Outputs to note:
 
@@ -671,9 +703,52 @@ AWS_PROFILE=ente-sl make smoke
 
 ---
 
+## A second environment (test)
+
+`src/infra/test` is a complete second env dir — same modules, its own tfvars
+and state — so you can rehearse a change (or this whole install) against a
+disposable stack without ever pointing a command at production. The whole
+workflow is the profile switcher (C4a):
+
+```bash
+make profile test                 # every target now addresses src/infra/test
+cp src/infra/test/ente-sl.tfvars.example src/infra/test/ente-sl.tfvars
+# fill it in: env_name = "test", delete_protection = false, and a FRESH
+# hashing_key (openssl rand -base64 32) — NEVER paste production's key
+make infra-init
+AWS_PROFILE=ente-sl make plan     # banner: >>> profile: test (ENV: TEST)
+AWS_PROFILE=ente-sl make deploy   # type "test" at the confirmation prompt
+```
+
+Notes:
+
+- **`delete_protection = false`** (D57) is what makes the env disposable: the
+  table skips API-level deletion protection and the objects bucket gets
+  `force_destroy`, so teardown deletes everything cleanly. Production's
+  tfvars leaves it at the default `true`.
+- **`hashing_key` must be fresh.** It derives the email→user mapping; reusing
+  prod's key links every test account to a production identity and makes the
+  test key as sensitive as the real one.
+- The account guard is per-profile and skips a first deploy (no state yet),
+  so a fresh test env is never blocked by it.
+- Full teardown when you are done:
+
+```bash
+make profile test
+AWS_PROFILE=ente-sl make destroy            # stateless half (type "test", or CONFIRM=test)
+# then the data (test only — delete_protection is already false):
+AWS_PROFILE=ente-sl tofu -chdir=src/infra/test destroy -var-file=ente-sl.tfvars
+```
+
+Switch back with `make profile dev` when you return to production — nothing
+switches implicitly.
+
+---
+
 ## Teardown
 
 ```bash
+make profile dev   # or test — the banner and typed confirmation name the env
 AWS_PROFILE=ente-sl make destroy
 ```
 
@@ -681,7 +756,8 @@ This removes the **stateless half only**: both Lambdas, the Function URL, the
 cron, the log groups, the alarms, both CloudFront distributions and the
 albums web bucket (build artifacts only — rebuildable via `make build-web`).
 The table and the objects bucket — every photo — are deliberately out of
-scope and protected by `prevent_destroy`.
+scope and protected by the `delete_protection` rails (D57): API-level
+deletion protection on the table, no `force_destroy` on the bucket.
 
 Two things to know:
 
@@ -691,9 +767,11 @@ Two things to know:
   the destroy points at the dead albums domain — the tokens stay valid, so
   re-copying each link from the app recovers it.
 - There is intentionally no target that deletes the data. `make destroy-data`
-  refuses and prints the four manual steps (empty the bucket, lift both
-  `prevent_destroy` blocks, disable the table's deletion protection, then
-  destroy). Back up `hashing_key` and the tfstate first.
+  refuses and prints the manual steps, which since D57 are: set
+  `delete_protection = false` in the profile's tfvars and plan/deploy **that
+  change alone** (it lifts the table's API-level protection and arms
+  `force_destroy` on the objects bucket), then run the printed
+  `tofu destroy`. Back up `hashing_key` and the tfstate first.
 
 ---
 
@@ -701,8 +779,10 @@ Two things to know:
 
 | Symptom | Cause / fix |
 |---|---|
-| `make plan` fails: `missing src/infra/dev/ente-sl.tfvars` | Do step C4. |
-| `ACCOUNT MISMATCH — refusing to continue` | Your credentials point at a different AWS account than the one in state. Use `AWS_PROFILE=ente-sl`. |
+| `no profile chosen — choose: make profile dev \| make profile test` | Do step C4a — the make targets refuse to guess which env they address. |
+| `make plan` fails: `missing src/infra/<profile>/ente-sl.tfvars` | Do step C4 (or the test-env copy step) for the selected profile. |
+| `CONFIRM='…' does not match profile` / `confirmation failed` | The typed (or `CONFIRM=`) value must be the exact profile name from the banner — that friction is the feature. |
+| `ACCOUNT MISMATCH — refusing to continue` | Your credentials point at a different AWS account than the one in the selected profile's state. Use `AWS_PROFILE=ente-sl`. |
 | Plan wants to destroy/replace the bucket or table | Wrong account (see above) or `env_name` changed. Stop; do not apply. |
 | `archive_file` error at plan time | `dist/` missing or stale — `make plan` runs `build-lambda` for you, but a bare `tofu plan` does not. |
 | Both smoke URLs return 403 | Anonymous `InvokeFunctionUrl` permission missing, or origin secret mismatch between the Lambda env and CloudFront's custom header. |

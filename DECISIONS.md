@@ -1410,6 +1410,67 @@ source says Y — source won).
     compute module + dev passthrough, guard-tested against the config.ts
     default) replacing INSTALL's edit-main.tf instruction.
 
+- **D57 [OPS 2026-08-27] Operator safety: variable-driven delete protection +
+  Makefile profile switcher with typed confirmation.** Two features, one
+  motive: `src/infra/dev` IS the live production deployment (named before it
+  went live), and a second env has to be easy to stand up and tear down
+  without any command being able to silently address prod.
+  - **`delete_protection` replaces `prevent_destroy` (data module, bool,
+    default true).** `lifecycle { prevent_destroy }` only accepts a literal —
+    tofu evaluates lifecycle at parse time, so it cannot reference a var —
+    which made per-env protection impossible and would have hard-blocked test
+    teardown forever. The replacement rails are API-level and strictly
+    stronger where it matters: `deletion_protection_enabled =
+    var.delete_protection` on the table blocks DeleteTable for EVERYONE
+    (console and CLI included; prevent_destroy only ever stopped tofu), and
+    `force_destroy = !var.delete_protection` on the objects bucket preserves
+    today's effective behavior (protection on = destroy refuses while the
+    bucket is non-empty). Both lifecycle blocks are REMOVED — deliberately,
+    since a leftover literal would override the variable — and the guard
+    tests now assert the var wiring, the true default in the module and BOTH
+    env layers, and that no `prevent_destroy` remains in the data module.
+    **Expected diff on the next prod `make plan`** (could not be run here —
+    prod state is live): an in-place `~ update` on `aws_s3_bucket.objects`
+    setting `force_destroy = false` (provider-side attribute, never sent to
+    AWS — possibly no diff at all since false is the provider default), and
+    NO change on the table (`deletion_protection_enabled` was already
+    literally true; it becomes var-driven with the same value). Removing
+    lifecycle blocks produces no plan lines. **Any destroy/replace line means
+    stop.** `make destroy-data`'s steps collapse to: flip the tfvars value,
+    apply that alone, then destroy.
+  - **`src/infra/test`**: a full second env dir — main/variables/outputs/
+    versions copied VERBATIM from dev (they are env-agnostic; everything
+    env-specific rides the tfvars) plus its own `ente-sl.tfvars.example`
+    (`env_name = "test"`, `delete_protection = false`, and a loud FRESH-key
+    warning: reusing prod's `hashing_key` would link every test account to a
+    production identity). Gitignore already covers every env dir — the
+    `*.tfstate`/`*.tfvars`/`tfplan` patterns are bare names, now commented so
+    nobody re-scopes them to one dir.
+  - **Profile switcher**: `.tf-profile` (gitignored, repo root) names the env
+    every tofu-touching target addresses — `TF = tofu -chdir=src/infra/$(PROFILE)`,
+    with `TFVARS`/`STATE`/`guard-account` all derived from it. `make profile
+    dev|test` sets it (parse-time conditional neutralizes the second goal
+    word, so it cannot trigger the real `dev`/`test` targets); bare `make
+    profile` prints it. **No default, ever**: without a profile every such
+    target fails with `no profile chosen — choose: make profile dev | make
+    profile test`. **Labels name what the env IS, not the folder**:
+    dev → `ENV: PRODUCTION`, test → `ENV: TEST`, bannered
+    (`>>> profile: dev (ENV: PRODUCTION)`) before any action, plan included.
+  - **Typed confirmation on mutation**: `deploy`, `destroy`, `deploy-web` and
+    `pricing-plan` require the exact profile name typed back — stronger than
+    y/n because reflexively confirming while pointed at the wrong env is
+    precisely the accident; typing "dev" is hard to do while believing you
+    are on test. `CONFIRM=<profile>` skips the prompt for scripting/CI and
+    REFUSES on mismatch rather than falling back to the prompt. `plan` stays
+    unconfirmed (read-only) but banners. `guard-account` is per-profile (the
+    selected profile's state is the source of truth) and still no-ops on a
+    fresh env with no state, so the first test apply is not blocked.
+    Non-AWS targets (test/test-int/infra-test/build-lambda/ledger/dev/lan,
+    the invite + pool tooling) stay profile-free. All of it guard-tested:
+    profile-driven TF dir with no hardcoded `-chdir=src/infra/dev` left,
+    confirm gates on the four mutating targets, plan explicitly
+    unconfirmed.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

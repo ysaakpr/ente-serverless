@@ -8,10 +8,25 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
 	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage \
-	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue
+	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue \
+	profile require-profile confirm-profile
 
+# `make profile dev` / `make profile test` (D57): the env word arrives as a
+# SECOND GOAL, which would otherwise also run the real `dev` (LocalStack
+# server) or `test` (unit suite) target. When — and only when — the first
+# goal is `profile`, both words become no-ops; otherwise the real targets are
+# defined exactly as before. Parse-time conditional, so neither definition
+# ever collides with the other.
+ifeq ($(firstword $(MAKECMDGOALS)),profile)
+dev test:
+	@:
+else
 test:
 	npx vitest run test/unit
+
+dev: bootstrap
+	$(LOCALSTACK_ENV) npm run dev
+endif
 
 test-int:
 	$(LOCALSTACK_ENV) npx vitest run test/integration
@@ -28,8 +43,8 @@ down:
 bootstrap:
 	$(LOCALSTACK_ENV) node --experimental-transform-types scripts/bootstrap-local.ts
 
-dev: bootstrap
-	$(LOCALSTACK_ENV) npm run dev
+# (`dev` — the LocalStack dev server — is defined next to `test` above, inside
+# the profile-goal conditional.)
 
 # M5 device gate: serve on the Mac's LAN IP so a phone on the same wifi can
 # reach it. AWS_ENDPOINT_URL uses the LAN IP too, so presigned S3 URLs are
@@ -206,7 +221,7 @@ ALBUMS_WEB_REPO = https://github.com/ente-io/ente
 # Builds LOCALLY into dist/web-albums (gitignored). Deploys nothing.
 # The API origin the build bakes in: pass ALBUMS_API_ORIGIN=https://... or,
 # when the stack is already deployed, let it default to the server_url output.
-build-web:
+build-web: require-profile
 	@command -v git >/dev/null || { echo "git is required"; exit 1; }
 	@command -v npm >/dev/null || { echo "npm is required (the ente web workspace pins npm 11.x — a very old npm may refuse)"; exit 1; }
 	@ORIGIN="$${ALBUMS_API_ORIGIN:-$$($(TF) output -raw server_url 2>/dev/null)}"; \
@@ -233,7 +248,7 @@ build-web:
 # Guarded like every other state-mutating target. --delete keeps the bucket
 # an exact mirror; a viewer holding a stale index.html mid-deploy re-fetches
 # it uncached (the module pins index.html to CachingDisabled) and heals.
-deploy-web: guard-account
+deploy-web: confirm-profile guard-account
 	@test -d dist/web-albums || { echo "no dist/web-albums — run 'make build-web' first"; exit 1; }
 	@test -f dist/web-albums/index.html || { echo "dist/web-albums has no index.html — the albums build did not finish"; exit 1; }
 	@BUCKET=$$($(TF) output -raw web_bucket); DIST=$$($(TF) output -raw web_distribution_id); \
@@ -243,36 +258,99 @@ deploy-web: guard-account
 	@echo "==> albums app live at $$($(TF) output -raw albums_url)"
 
 # ---------------------------------------------------------------------------
-# AWS deploy (M7, decision D4). Everything environment-specific — region,
-# hashing_key, mail_from — lives in src/infra/dev/ente-sl.tfvars (gitignored).
-# These targets pass ONLY -var-file, so plan and apply can never disagree about
-# which region they are addressing. Note that tofu reads the region from that
-# file, NOT from your AWS CLI config: the two being different is normal and
-# harmless, but it means `aws configure get region` tells you nothing about
-# where this deploys.
+# AWS deploy (M7, decision D4; profiles D57). Everything environment-specific
+# — region, hashing_key, mail_from — lives in src/infra/<profile>/ente-sl.tfvars
+# (gitignored). These targets pass ONLY -var-file, so plan and apply can never
+# disagree about which region they are addressing. Note that tofu reads the
+# region from that file, NOT from your AWS CLI config: the two being different
+# is normal and harmless, but it means `aws configure get region` tells you
+# nothing about where this deploys.
 #
 # Credentials come from the environment. Use a dedicated profile so the deployer
 # is always explicit:   AWS_PROFILE=ente-sl make plan
+#
+# WHICH env dir the targets address comes from .tf-profile (gitignored):
+#     make profile dev    # src/infra/dev  — the LIVE PRODUCTION deployment
+#     make profile test   # src/infra/test — the disposable test env
+# The label deliberately names what the env IS, not what the folder is called:
+# "dev" was named before it went live, and it IS production now. There is NO
+# default — with no profile chosen, every tofu-touching target refuses.
+# Mutating targets (deploy, destroy, deploy-web, pricing-plan) additionally
+# require the profile name typed back; CONFIRM=<profile> skips the prompt for
+# scripting/CI (e.g. CONFIRM=test make destroy).
 # ---------------------------------------------------------------------------
-TF     = tofu -chdir=src/infra/dev
-# Path is relative to src/infra/dev, because of tofu -chdir above.
+PROFILE_FILE = .tf-profile
+PROFILE      = $(strip $(shell cat $(PROFILE_FILE) 2>/dev/null))
+
+PROFILE_LABEL_dev  = PRODUCTION
+PROFILE_LABEL_test = TEST
+PROFILE_LABEL      = $(PROFILE_LABEL_$(PROFILE))
+
+NO_PROFILE_MSG = no profile chosen — choose: make profile dev | make profile test
+
+TFDIR  = src/infra/$(PROFILE)
+TF     = tofu -chdir=$(TFDIR)
+# Path is relative to $(TFDIR), because of tofu -chdir above.
 TFVARS = ente-sl.tfvars
 TFPLAN = tfplan
+STATE  = $(TFDIR)/terraform.tfstate
 
-infra-init:
+# `make profile <name>` records the choice; bare `make profile` prints it.
+profile:
+	@ARG="$(word 2,$(MAKECMDGOALS))"; \
+	label() { case "$$1" in dev) echo "$(PROFILE_LABEL_dev)";; test) echo "$(PROFILE_LABEL_test)";; esac; }; \
+	case "$$ARG" in \
+	dev|test) \
+		echo "$$ARG" > $(PROFILE_FILE); \
+		echo ">>> profile: $$ARG (ENV: $$(label $$ARG))";; \
+	"") \
+		if [ -s $(PROFILE_FILE) ]; then \
+			P=$$(cat $(PROFILE_FILE)); L=$$(label $$P); \
+			if [ -n "$$L" ]; then echo "profile: $$P (ENV: $$L)"; \
+			else echo "unknown profile '$$P' in $(PROFILE_FILE) — choose: make profile dev | make profile test"; exit 1; fi; \
+		else \
+			echo "$(NO_PROFILE_MSG)"; exit 1; \
+		fi;; \
+	*) \
+		echo "unknown profile '$$ARG' — choose: make profile dev | make profile test"; exit 1;; \
+	esac
+
+# Fails fast when no profile is chosen and banners which env is addressed.
+# NEVER defaults to dev: dev is production, and a silent default is exactly
+# the accident this exists to prevent.
+require-profile:
+	@test -n "$(PROFILE)" || { echo "$(NO_PROFILE_MSG)"; exit 1; }
+	@test -n "$(PROFILE_LABEL)" || { echo "unknown profile '$(PROFILE)' in $(PROFILE_FILE) — choose: make profile dev | make profile test"; exit 1; }
+	@echo ">>> profile: $(PROFILE) (ENV: $(PROFILE_LABEL))"
+
+# The gate on anything that CHANGES AWS: the exact profile name must be typed
+# back — stronger than y/n, because reflexively hitting y while pointed at the
+# wrong env is precisely the accident. CONFIRM=<profile> skips the prompt for
+# scripting/CI; a CONFIRM naming the WRONG profile refuses rather than falling
+# back to the prompt.
+confirm-profile: require-profile
+	@if [ -n "$(CONFIRM)" ]; then \
+		test "$(CONFIRM)" = "$(PROFILE)" || { echo "CONFIRM='$(CONFIRM)' does not match profile '$(PROFILE)' — refusing."; exit 1; }; \
+		echo "    confirmed via CONFIRM=$(CONFIRM)"; \
+	else \
+		printf "Type the profile name to confirm: "; \
+		read ANS || ANS=""; \
+		test "$$ANS" = "$(PROFILE)" || { echo "confirmation failed — expected '$(PROFILE)', got '$$ANS'."; exit 1; }; \
+	fi
+
+infra-init: require-profile
 	$(TF) init
 
 # The objects bucket embeds the account id in its NAME, so running plan/apply
 # with credentials for a different account renames it — and tofu reads a rename
-# as destroy-and-recreate of the photo store. prevent_destroy does stop that,
-# but only after a plan that reads like a config bug rather than a wrong
-# profile. Worse, the lambdas/role/topic carry no such rail and WOULD be
-# replaced. So: compare the caller against the account already recorded in
-# state. No extra config — the state file is the source of truth, and a first
-# deploy (no state yet) skips the check.
-STATE = src/infra/dev/terraform.tfstate
-
-guard-account:
+# as destroy-and-recreate of the photo store. The table's API-level deletion
+# protection does stop the table half (D57), but only after a plan that reads
+# like a config bug rather than a wrong profile. Worse, the lambdas/role/topic
+# carry no such rail and WOULD be replaced. So: compare the caller against the
+# account already recorded in the SELECTED PROFILE's state. No extra config —
+# that state file is the source of truth, and a first deploy of an env (no
+# state yet, e.g. a fresh src/infra/test) skips the check.
+guard-account: require-profile
 	@test -s $(STATE) || exit 0; \
 	WANT=$$(grep -o 'arn:aws:dynamodb:[^"]*' $(STATE) | head -1 | cut -d: -f5); \
 	test -n "$$WANT" || exit 0; \
@@ -290,10 +368,10 @@ guard-account:
 
 # archive_file zips dist/ AT PLAN TIME, so the bundles are rebuilt first —
 # an absent or stale dist/ otherwise fails the plan, not the apply.
-plan: build-lambda guard-account
-	@test -f src/infra/dev/$(TFVARS) || { \
-		echo "missing src/infra/dev/$(TFVARS)"; \
-		echo "  cp src/infra/dev/ente-sl.tfvars.example src/infra/dev/$(TFVARS)"; \
+plan: require-profile build-lambda guard-account
+	@test -f $(TFDIR)/$(TFVARS) || { \
+		echo "missing $(TFDIR)/$(TFVARS)"; \
+		echo "  cp $(TFDIR)/ente-sl.tfvars.example $(TFDIR)/$(TFVARS)"; \
 		echo "  then fill in region, mail_from, and hashing_key (openssl rand -base64 32)"; \
 		echo "  BACK UP hashing_key first — losing it orphans every email->user mapping (D4a)"; \
 		exit 1; }
@@ -302,13 +380,13 @@ plan: build-lambda guard-account
 # Applies the SAVED plan, so what ships is exactly what you reviewed.
 # The two CloudFront distributions take 5-15 min to reach Deployed; the rest
 # of the resources are quick.
-deploy: guard-account
-	@test -f src/infra/dev/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
+deploy: confirm-profile guard-account
+	@test -f $(TFDIR)/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
 	$(TF) apply $(TFPLAN)
-	@rm -f src/infra/dev/$(TFPLAN)
+	@rm -f $(TFDIR)/$(TFPLAN)
 	@$(MAKE) --no-print-directory outputs
 
-outputs:
+outputs: require-profile
 	@$(TF) output
 
 # Post-deploy check. With the origin lock (D43) the HEALTHY state is:
@@ -317,7 +395,7 @@ outputs:
 # CloudFront is the disambiguator: 403 on BOTH means the anonymous
 # InvokeFunctionUrl permission went missing (or the origin secret is mismatched
 # between the lambda env and the distribution's custom_header).
-smoke:
+smoke: require-profile
 	@FU=$$($(TF) output -raw api_function_url); CF=$$($(TF) output -raw server_url); \
 	printf '  function-url /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (403 = origin lock working)\n' "$${FU}ping"; \
 	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (must be 200)\n' "$$CF/ping"; \
@@ -340,7 +418,7 @@ smoke:
 # (same story as CLOUDFRONT-scope WAF), hence the pinned --region.
 PPM = aws pricing-plan-manager --region us-east-1
 
-pricing-plan: guard-account
+pricing-plan: confirm-profile guard-account
 	@DIST=$$($(TF) output -raw distribution_arn); ACL=$$($(TF) output -raw web_acl_arn); \
 	if ! HAVE=$$($(PPM) list-subscriptions \
 		--query "subscriptionSummaries[?contains(resourceArns, '$$DIST')].status" --output text); then \
@@ -368,20 +446,23 @@ pricing-plan-status:
 # every client has to be re-pointed at the new server_url, and every share link
 # minted before the destroy points at the DEAD albums domain (tokens stay
 # valid — re-copy the link from the app after rebuilding, D52).
-destroy: guard-account
+destroy: confirm-profile guard-account
 	@echo "==> destroying module.compute + module.edge + module.web — table and objects bucket are preserved"
 	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge -target=module.web
 
 # There is deliberately no target that destroys module.data.
-destroy-data:
+destroy-data: require-profile
 	@echo "REFUSING: module.data is the table and the objects bucket — every photo in the deployment."
 	@echo ""
-	@echo "Three safety rails guard it. If you genuinely mean this, lift them by hand"
-	@echo "so that each one is a separate conscious step:"
-	@echo "  1. empty the bucket — tofu cannot delete a non-empty one (no force_destroy, on purpose)"
-	@echo "  2. remove both prevent_destroy blocks in src/infra/modules/data/main.tf"
-	@echo "  3. set deletion_protection_enabled = false on the table and apply THAT alone"
-	@echo "  4. then, finally: $(TF) destroy -var-file=$(TFVARS)"
+	@echo "The rails are variable-driven since D57. If you genuinely mean this (a TEST"
+	@echo "env, or a deliberate final teardown), lift them by hand so that each one is"
+	@echo "a separate conscious step:"
+	@echo "  1. set delete_protection = false in $(TFDIR)/$(TFVARS), then run"
+	@echo "     'make plan' + 'make deploy' with THAT change alone — it disables the"
+	@echo "     table's API-level deletion protection and arms force_destroy on the"
+	@echo "     objects bucket (protection on, the destroy refuses: the table blocks"
+	@echo "     DeleteTable at the AWS API and tofu will not empty the bucket)"
+	@echo "  2. then, finally: $(TF) destroy -var-file=$(TFVARS)"
 	@echo ""
 	@echo "Back up hashing_key and the tfstate before step 1 (D4a)."
 	@exit 1

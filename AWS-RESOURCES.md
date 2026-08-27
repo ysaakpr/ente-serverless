@@ -16,13 +16,13 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 
 ## 1. The inventory — 27 managed resources
 
-### Stateful (`modules/data`) — carries `prevent_destroy`
+### Stateful (`modules/data`) — delete protection is variable-driven (D57)
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 1 | `aws_dynamodb_table` | `ente-sl-dev` | PAY_PER_REQUEST, `pk`/`sk`, **3 GSIs** (`gsi1` collection diff + purge due-index, `gsi2` collection feed, `gsi3` tokens/trash/entity/file-data), all `projection_type = ALL`. TTL on `ttl` (OTT expiry). PITR on. SSE on (AWS-owned key). `deletion_protection_enabled = true`. |
-| 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload — except users attached to a BYO storage pool (D55), whose new uploads land in their pool's own bucket (not a managed resource; the file row pins which bucket holds it). Account-ID suffix for global uniqueness. |
-| 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**, `prevent_destroy`. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
+| 1 | `aws_dynamodb_table` | `ente-sl-dev` | PAY_PER_REQUEST, `pk`/`sk`, **3 GSIs** (`gsi1` collection diff + purge due-index, `gsi2` collection feed, `gsi3` tokens/trash/entity/file-data), all `projection_type = ALL`. TTL on `ttl` (OTT expiry). PITR on. SSE on (AWS-owned key). `deletion_protection_enabled` follows the `delete_protection` variable (default **true** — blocks `DeleteTable` at the AWS API for everyone, console included; D57). |
+| 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload — except users attached to a BYO storage pool (D55), whose new uploads land in their pool's own bucket (not a managed resource; the file row pins which bucket holds it). Account-ID suffix for global uniqueness. `force_destroy = !delete_protection` (default: protection on — a destroy refuses while the bucket is non-empty; D57). |
+| 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
 | 4 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
 | 5 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
 | 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (day 0, filtered on object tag `tier=original` — D7), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
@@ -68,7 +68,7 @@ resource pair the D47 FREE-plan subscription covers.
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 23 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — `force_destroy = true`, **no** versioning, **no** `prevent_destroy`: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
+| 23 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — unconditionally `force_destroy = true` (not tied to `delete_protection`), **no** versioning: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
 | 24 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. The bucket is never public. |
 | 25 | `aws_s3_bucket_policy` | ↑ | `s3:GetObject` to the `cloudfront.amazonaws.com` service principal only, condition-pinned (`AWS:SourceArn`) to distribution 27. |
 | 26 | `aws_cloudfront_origin_access_control` | `ente-sl-dev-web-albums` | sigv4, `signing_behavior = always`. The repo's "no OAC" decision applies to the **Lambda** origin (IAM auth breaks the POST body hash); an S3 origin takes OAC cleanly and must have it. |
@@ -265,22 +265,34 @@ Ordered by how likely each is to bite on the first apply.
   must vary on `Origin`, since `Access-Control-Allow-Origin` echoes the
   caller. The S3 bucket keeps its own separate CORS config (row 4).
 
-- **Teardown is deliberately hard, and the targets reflect that.**
-  `prevent_destroy` on the table and bucket, `deletion_protection_enabled` on
-  the table, no `force_destroy` on the bucket (the **objects** bucket — the
-  web-albums bucket in row 23 is build artifacts and deliberately does carry
-  `force_destroy`). So `make destroy` is scoped to `module.compute` +
-  `module.edge` + `module.web` only — it removes the lambdas, the cron, the
-  logs, both distributions and the web bucket, and cannot reach a photo. A
-  bare `tofu destroy`
-  would fail on the rails anyway; `make destroy-data` refuses outright and
-  prints the four manual steps instead. Guard-tested so the scoping can't be
-  widened by an edit. **Re-applying after a destroy mints new CloudFront
-  domains and a new function URL**, so every client needs re-pointing, the
-  albums app needs rebuilding against the new `server_url` (INSTALL C13),
-  and share links minted before the destroy point at the dead albums domain
-  (tokens stay valid — re-copy each link from the app) — that,
-  not data loss, is the real cost of tearing the stateless half down.
+- **Teardown is deliberately hard, and the rails are variable-driven (D57).**
+  The old lifecycle `prevent_destroy` blocks are gone — tofu only accepts
+  them as literals, so they could never vary per environment, and they only
+  ever stopped tofu itself. In their place one module variable,
+  `delete_protection` (default **true**), drives two API-level rails:
+  `deletion_protection_enabled` on the table (blocks `DeleteTable` for
+  everyone, console included — strictly stronger than `prevent_destroy`) and
+  `force_destroy = !delete_protection` on the objects bucket (protection on:
+  the destroy refuses while the bucket is non-empty — today's effective
+  behavior; the web-albums bucket in row 23 is build artifacts and stays
+  unconditionally `force_destroy`). `make destroy` is scoped to
+  `module.compute` + `module.edge` + `module.web` only — it removes the
+  lambdas, the cron, the logs, both distributions and the web bucket, and
+  cannot reach a photo — and since D57 it is also profile-aware: it banners
+  `>>> profile: <name> (ENV: PRODUCTION|TEST)` and requires the profile name
+  typed back (or `CONFIRM=<profile>`). On the **test** profile with
+  `delete_protection = false` in its tfvars, full teardown is
+  `make profile test && make destroy` followed by the `destroy-data` steps —
+  which now amount to flipping the variable and destroying, no console
+  surgery. On **dev (= production)** `make destroy-data` still refuses
+  outright and prints the manual steps. Guard-tested so neither the scoping
+  nor the protection default can be widened by an edit. **Re-applying after a
+  destroy mints new CloudFront domains and a new function URL**, so every
+  client needs re-pointing, the albums app needs rebuilding against the new
+  `server_url` (INSTALL C13), and share links minted before the destroy point
+  at the dead albums domain (tokens stay valid — re-copy each link from the
+  app) — that, not data loss, is the real cost of tearing the stateless half
+  down.
 
 - **The deployer policy is a privilege-escalation path if leaked.** It grants
   `iam:CreateRole` + `iam:PutRolePolicy` + `iam:PassRole` on `ente-sl-*` with no
