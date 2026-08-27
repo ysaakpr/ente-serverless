@@ -27,7 +27,7 @@ import {
   type MagicMetadata,
 } from '../../domain/files.ts';
 import { blobsForPool, blobsForPoolId } from '../../domain/storagePools.ts';
-import { getOwnedCollection } from '../../domain/collections.ts';
+import { bumpCollectionForward, getOwnedCollection } from '../../domain/collections.ts';
 import { enqueueObjectDeletion } from '../../domain/objectSweep.ts';
 import { ConditionFailedError } from '../../ports/db.ts';
 import { errBadRequestSentinel, errPermissionDenied } from '../../lib/errors.ts';
@@ -150,6 +150,10 @@ export const createFile = async (deps: Deps, userId: number, body: CommitBody) =
       if (attempt >= 5) throw err;
       continue;
     }
+    // Museum's Create transaction ends with the collection restamp (file.go);
+    // stamped to the link's updationTime, so the owner's next /collections/v2
+    // re-emits the collection and the client re-diffs it (D62).
+    await bumpCollectionForward(deps, body.collectionID, link.updationTime);
     // Tag the original so the GLACIER_IR lifecycle rule (tier=original) picks it
     // up; a tagging failure only costs storage class, never the commit.
     await blobs.setTags(body.file.objectKey!, { tier: 'original' }).catch(() => {});
@@ -278,7 +282,9 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
   await deps.db.transactWrite(ops);
   await enqueueObjectDeletion(deps, replacedKeys);
 
-  // Re-emit in every live collection diff.
+  // Re-emit in every live collection diff — and restamp each collection so
+  // the feed re-emits it too (museum Update bumps every containing
+  // collection, file.go).
   const links = await deps.db.query(`FILE-LINKS#${body.id}`, { index: 'gsi3' });
   for (const link of links) {
     if (link.isDeleted) continue;
@@ -288,6 +294,7 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
       updationTime: stamped,
       gsi1sk: `${padTime(stamped)}#${body.id}`,
     });
+    await bumpCollectionForward(deps, link.collectionID as number, stamped);
   }
   return { id: body.id, updationTime };
 };

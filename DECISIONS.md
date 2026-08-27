@@ -1792,6 +1792,51 @@ source says Y — source won).
     secretbox material through delete → feed/getById → the exact
     crypto_secretbox_open_easy call that crashed the client.
 
+- **D62 [SHARING/SYNC 2026-08-27] Collection restamp on every file mutation
+  and public-link write — the invisible-collect-upload bug.** Field report
+  from the live test env: anonymous collect uploads committed fine (the guest
+  saw them in /public-collection/diff, the rows and pubMagicMetadata uploader
+  name were all there) but the owner's app never showed them; link-config
+  changes (enableDownload etc.) likewise never reached the owner's synced
+  view. Root cause: stock clients sync via `GET /collections/v2?sinceTime=`
+  and only re-diff collections whose updationTime advanced — and nothing in
+  our file-commit or link paths restamped the collection row. Museum bumps
+  collections.updation_time on EVERY collection_files mutation (repo/file.go
+  Create/Update/UpdateMagicAttributes/UpdateThumbnail; repo/collection.go
+  AddFiles/MoveFiles/RestoreFiles/RemoveFilesV3; repo/trash.go TrashFiles) —
+  and, invisible in the Go source, a Postgres trigger
+  (`fn_update_collections_updation_time_using_update_at`) bumps it on every
+  public_collection_tokens INSERT/UPDATE, i.e. share-url create, update and
+  disable. Oracle differential 2026-08-27 (scenario driven from inside the
+  compose network — uploads can't cross it, see the ORACLE-VERSION note):
+  museum re-emits the collection after a guest commit with updationTime ==
+  the new link's stamp EXACTLY, and re-emits after link create/update/
+  disable; our server emitted nothing in any of these cases (reproduced
+  against the live test deployment with a simulated stock-client sync).
+  - Fix: domain/collections.ts `bumpCollectionForward(collectionId, stamp)` —
+    forward-only like the trigger's `updation_time < NEW.updated_at` guard,
+    fresh row read, stamp = the mutation's own link updationTime (museum sets
+    equality; capture-visible). Call sites: files/commit.ts createFile (also
+    covers the public collect commit) and updateFileAttributes,
+    files/magicMetadata.ts, files/updateThumbnail.ts,
+    collections/fileActions.ts add/move/restore/removeV3 (upsertLink now
+    returns the written stamp; the idempotent re-add returns null and, like
+    museum's conflict-no-op INSERT, bumps nothing), domain/trash.ts trashFile,
+    collections/shareUrl.ts (create only — the return-existing path inserts
+    nothing, so no bump), updateShareUrl.ts, and unshareUrl.ts (only when a
+    link was actually disabled).
+  - Museum's Update also restamps TOMBSTONED links (`UPDATE collection_files
+    ... WHERE file_id` has no is_deleted filter) — ours keeps skipping
+    deleted links there; noted, not matched.
+  - NOT changed: enableDownload=false still 403s public original downloads.
+    The oracle run showed museum serves 200 there (the flag is client-honoured
+    UI, surfaced through /public-collection/info) — D51's deliberate
+    divergence stands, with the documented consequence that such links render
+    previews only in the viewer.
+  - Tests: collection-restamp.test.ts — 9 scenarios including the collect
+    flow, all link ops, stamp equality with the link, and the forward-only
+    guard.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

@@ -26,7 +26,7 @@ import type { Context } from 'hono';
 import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { resolveCollectionAccess } from '../../domain/collections.ts';
+import { bumpCollectionForward, resolveCollectionAccess } from '../../domain/collections.ts';
 import { getLinkForCollection, updatePublicLink, type PublicLinkRow } from '../../domain/sharing.ts';
 import { publicUrlJson } from '../../domain/publicLinks.ts';
 import { assertDeviceLimit } from './shareUrl.ts';
@@ -122,6 +122,10 @@ export const updateShareUrl = (deps: Deps) => async (c: Context) => {
   if (present(body.minRole)) next.minRole = body.minRole;
 
   await updatePublicLink(deps, next);
+  // Museum restamps the collection on every public_collection_tokens UPDATE
+  // (the fn_update_collections_updation_time trigger) — without it the owner's
+  // synced devices keep rendering the OLD link config forever (D62).
+  await bumpCollectionForward(deps, body.collectionID, deps.ids.nextUpdationTime());
   // museum's update response computes passwordEnabled from PassHash (the map
   // and feeds key on the nonce); the pair only ever moves together here, so
   // the emitted shape is identical.

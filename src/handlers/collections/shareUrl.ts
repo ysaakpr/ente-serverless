@@ -18,7 +18,7 @@ import type { Context } from 'hono';
 import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { getCollection } from '../../domain/collections.ts';
+import { bumpCollectionForward, getCollection } from '../../domain/collections.ts';
 import { createPublicLink, getLinkForCollection } from '../../domain/sharing.ts';
 import { generateAccessToken, publicUrlJson } from '../../domain/publicLinks.ts';
 import { ConditionFailedError } from '../../ports/db.ts';
@@ -71,6 +71,11 @@ export const shareUrl = (deps: Deps) => async (c: Context) => {
       enableComment: body.enableComment,
       enableJoin: body.enableJoin ?? true,
     });
+    // Museum restamps the collection on every public_collection_tokens INSERT
+    // (the fn_update_collections_updation_time trigger) — the owner's other
+    // devices learn about the link through the re-emitted feed entry (D62).
+    // The return-existing path below inserts nothing, so it does not bump.
+    await bumpCollectionForward(deps, body.collectionID, deps.ids.nextUpdationTime());
     return c.json({ result: publicUrlJson(deps, link) });
   } catch (err) {
     if (!(err instanceof ConditionFailedError)) throw err;

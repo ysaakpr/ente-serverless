@@ -8,7 +8,7 @@ import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { MICROS_PER_DAY } from '../lib/time.ts';
 import { filePoolPin, getFile, restampLink, thumbPoolPin, type FileRow, type LinkRow } from './files.ts';
-import { getCollection } from './collections.ts';
+import { bumpCollectionForward, getCollection } from './collections.ts';
 import { purgeQueueRow } from './objectSweep.ts';
 
 export const TRASH_DIFF_LIMIT = 2500;
@@ -88,7 +88,10 @@ export const trashFile = async (
   // links are indexed under the file for reverse lookup (gsi3)
   for (const link of links) {
     if (link.isDeleted) continue;
-    await deps.db.put(restampLink(deps, link, true));
+    const tombstoned = restampLink(deps, link, true);
+    await deps.db.put(tombstoned);
+    // museum TrashFiles restamps every affected collection (repo/trash.go, D62)
+    await bumpCollectionForward(deps, link.collectionID, tombstoned.updationTime);
   }
   const existing = await getTrashRow(deps, userId, file.fileId);
   const now = deps.clock.nowMicros();

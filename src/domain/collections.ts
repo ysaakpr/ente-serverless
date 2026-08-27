@@ -375,6 +375,33 @@ export const bumpCollection = async (deps: Deps, row: CollectionRow, patch: Reco
   await deps.db.put(next);
 };
 
+/**
+ * Museum bumps collections.updation_time on EVERY collection_files mutation
+ * (repo/file.go Create/Update/UpdateMagicAttributes/UpdateThumbnail,
+ * repo/collection.go AddFiles/MoveFiles/RestoreFiles/RemoveFilesV3,
+ * repo/trash.go TrashFiles — all end in `UPDATE collections SET
+ * updation_time`) and on every public_collection_tokens INSERT/UPDATE (the
+ * fn_update_collections_updation_time_using_update_at trigger). Without the
+ * bump the collection never re-emits in /collections/v2, and the stock
+ * clients — which only re-diff collections whose updationTime advanced —
+ * never pull the change (the collect-upload-invisible bug, D62).
+ *
+ * `stamp` is the mutation's own updationTime (museum sets equality — the
+ * oracle shows collection stamp == the new file link's stamp). Forward-only,
+ * like the trigger's `updation_time < NEW.updated_at` guard; re-reads the row
+ * to narrow the read-modify-write window. Deleted collections bump too
+ * (museum's SQL has no is_deleted filter).
+ */
+export const bumpCollectionForward = async (
+  deps: Deps,
+  collectionId: number,
+  stamp: number,
+): Promise<void> => {
+  const row = await getCollection(deps, collectionId);
+  if (!row || row.updationTime >= stamp) return;
+  await deps.db.put({ ...row, updationTime: stamp, gsi2sk: `${padTime(stamp)}#${row.collectionId}` });
+};
+
 export const assertBatchSize = (n: number): void => {
   if (n > DEFAULT_MAX_BATCH_SIZE) throw errBatchSizeTooLarge(); // museum -> 413
 };

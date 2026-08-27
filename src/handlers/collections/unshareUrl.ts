@@ -13,7 +13,7 @@
 import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { resolveCollectionAccess } from '../../domain/collections.ts';
+import { bumpCollectionForward, resolveCollectionAccess } from '../../domain/collections.ts';
 import { disableLink } from '../../domain/sharing.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
@@ -25,6 +25,10 @@ export const unshareUrl = (deps: Deps) => async (c: Context) => {
     verifyOwner: true,
     includeDeleted: true, // museum verifyOwnership has no deleted filter
   });
-  await disableLink(deps, collectionId);
+  const disabled = await disableLink(deps, collectionId);
+  // Museum's disable is an UPDATE on public_collection_tokens, so the
+  // collection-restamp trigger fires — the feed re-emits with publicURLs []
+  // and synced devices drop the link (D62). No active link -> nothing fired.
+  if (disabled) await bumpCollectionForward(deps, collectionId, deps.ids.nextUpdationTime());
   return c.body(null, 200);
 };

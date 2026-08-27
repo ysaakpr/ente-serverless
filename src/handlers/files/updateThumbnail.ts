@@ -18,6 +18,7 @@ import {
   type FileRow,
 } from '../../domain/files.ts';
 import { blobsForPoolId } from '../../domain/storagePools.ts';
+import { bumpCollectionForward } from '../../domain/collections.ts';
 import { enqueueObjectDeletion } from '../../domain/objectSweep.ts';
 import { errBadRequestSentinel, errNotFound, errPermissionDenied } from '../../lib/errors.ts';
 import { ApiError } from '../../lib/errors.ts';
@@ -97,6 +98,8 @@ export const updateThumbnail = (deps: Deps) => async (c: Context) => {
     if (link.isDeleted) continue;
     const stamped = deps.ids.nextUpdationTime();
     await deps.db.put({ ...link, updationTime: stamped, gsi1sk: `${padTime(stamped)}#${body.fileID}` });
+    // museum UpdateThumbnail bumps every containing collection (D62)
+    await bumpCollectionForward(deps, link.collectionID as number, stamped);
   }
   return c.body(null, 200);
 };
