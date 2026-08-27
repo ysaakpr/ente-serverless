@@ -58,6 +58,7 @@ resource "aws_lambda_function" "api" {
       PRESIGN_PUBLIC_GET_EXPIRY_SECONDS = tostring(var.presign_public_get_expiry_seconds)
       PUBLIC_LINK_DAILY_DOWNLOADS       = tostring(var.public_link_daily_downloads)
       PUBLIC_LINK_DAILY_UPLOADS         = tostring(var.public_link_daily_uploads)
+      PUBLIC_LINK_DAILY_DEVICES         = tostring(var.public_link_daily_devices)
       # Origin lock (finding 4): the app 403s any request not carrying this
       # value in x-origin-secret; CloudFront injects it at the origin, so the
       # public Function URL stops bypassing every edge control.

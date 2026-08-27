@@ -40,7 +40,7 @@ import {
   validateLinkDeviceToken,
   validatePasswordJwt,
 } from '../domain/publicLinks.ts';
-import { linkDeviceLimitExceeded } from '../lib/errors.ts';
+import { linkDeviceLimitExceeded, SentinelError } from '../lib/errors.ts';
 import { clientIp } from '../lib/ip.ts';
 
 export interface PublicAccessInfo {
@@ -95,6 +95,9 @@ export const requirePublicAccess = (deps: Deps) => async (c: Context, next: Next
         c.header('X-Ente-Link-Device-Token', newLinkDeviceToken(deps, link));
       }
     } catch (err) {
+      // The daily admission ceiling (P2-1, D53) surfaces as the same bare-429
+      // SentinelError the download/upload ceilings use — not a 500.
+      if (err instanceof SentinelError) return c.json({}, err.httpStatus as 429);
       console.error('public link device admission failed', err);
       return c.json({ error: 'something went wrong' }, 500); // museum's 500 body
     }

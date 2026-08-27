@@ -6,7 +6,7 @@
  * GetPublicCollection, pkg/controller/collections/share.go GetPublicDiff.
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { signupAccount, type Account } from '../helpers/client.ts';
@@ -224,6 +224,54 @@ describe('device limit', () => {
     expect(effectiveDeviceLimit(50)).toBe(500); // DeviceLimitThreshold * 10
     expect(effectiveDeviceLimit(0)).toBe(0);
     expect(effectiveDeviceLimit(10)).toBe(10);
+  });
+
+  it('admission rows carry the rolling TTL backstop — DEVICE# and DEVICES both (P2-1, D53)', async () => {
+    expect((await infoAs({ ip: '10.2.0.1', ua: 'phone' })).status).toBe(200);
+    const rows = world.deps.db.dump().filter((r) => r.pk.startsWith('PUBTOKEN#'));
+    const device = rows.find((r) => (r.sk as string).startsWith('DEVICE#'))!;
+    const counter = rows.find((r) => r.sk === 'DEVICES')!;
+    const nowSec = world.deps.clock.nowMicros() / 1_000_000;
+    for (const row of [device, counter]) {
+      expect(typeof row.ttl).toBe('number');
+      // 90 days out, the link-META validTill+90d margin.
+      expect(row.ttl as number).toBeGreaterThan(nowSec + 89 * 24 * 3600);
+      expect(row.ttl as number).toBeLessThanOrEqual(nowSec + 91 * 24 * 3600);
+    }
+  });
+
+  it('a lost same-device admission race is admitted without double-counting (conditional put, P3-1, D53)', async () => {
+    const phone = { ip: '10.3.0.1', ua: 'phone' };
+    expect((await infoAs(phone)).status).toBe(200);
+    // Simulate the race: a second admit whose pre-check read "unseen" before
+    // the first one's write landed — the conditional DEVICE# put then fires
+    // against the existing row and must fail WITHOUT incrementing DEVICES.
+    const db = world.deps.db;
+    const realGet = db.get.bind(db);
+    const spy = vi
+      .spyOn(db, 'get')
+      .mockImplementation(async (pk, sk) => (sk.startsWith('DEVICE#') ? null : realGet(pk, sk)));
+    const raced = await infoAs(phone);
+    spy.mockRestore();
+    expect(raced.status).toBe(200);
+    const counter = db.dump().find((r) => r.sk === 'DEVICES')!;
+    expect(counter.count).toBe(1);
+  });
+
+  it('the per-link daily admission ceiling 429s new devices; admitted ones keep working; next UTC day resets (P2-1, D53)', async () => {
+    world.deps.config.publicLinkDailyDeviceLimit = 2;
+    const phone = { ip: '10.4.0.1', ua: 'phone' };
+    expect((await infoAs(phone)).status).toBe(200);
+    expect((await infoAs({ ip: '10.4.0.2', ua: 'laptop' })).status).toBe(200);
+    const capped = await infoAs({ ip: '10.4.0.3', ua: 'tablet' });
+    expect(capped.status).toBe(429);
+    expect(await capped.json()).toEqual({}); // the download/upload ceilings' bare-429 shape
+    // No row was minted for the refused device, and admitted devices stay in.
+    const counter = world.deps.db.dump().find((r) => r.sk === 'DEVICES')!;
+    expect(counter.count).toBe(2);
+    expect((await infoAs(phone)).status).toBe(200);
+    world.deps.clock.advance(24 * 3600 * 1_000_000); // next UTC day, fresh row
+    expect((await infoAs({ ip: '10.4.0.3', ua: 'tablet' })).status).toBe(200);
   });
 
   it('expiry sliding under a device JWT still 410s (validTill is re-checked every request)', async () => {

@@ -12,6 +12,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import sodium from '../lib/sodium.ts';
 import type { Deps } from '../deps.ts';
+import { ConditionFailedError } from '../ports/db.ts';
 import { keys } from './model.ts';
 import { getLinkForCollection, type PublicLinkRow } from './sharing.ts';
 import { getCollection, type CollectionRole, type CollectionRow } from './collections.ts';
@@ -167,12 +168,25 @@ export const deviceHash = (ip: string, ua: string): string =>
 export const effectiveDeviceLimit = (deviceLimit: number): number =>
   deviceLimit === 50 ? 500 : deviceLimit;
 
+/** Rolling TTL backstop on admission rows (security review P2-1, D53): 90
+ * days, the link-META validTill+90d margin. Reaped rows just get re-admitted
+ * later — museum keeps access_history forever, so "admitted stays admitted"
+ * drifting back to "re-admitted" is the accepted delta (D53). */
+const DEVICE_ROW_TTL_SECONDS = 90 * 24 * 3600;
+
 /**
  * Admit (ip, ua) against the link's device limit — museum isDeviceLimitReached:
  * a device that ever got in stays in regardless of the current limit; new
  * devices are admitted (and recorded) only under the limit. The record + count
- * ride one transactWrite (put-if-absent + atomic counter) so concurrent new
- * devices cannot double-count; museum's SELECT-then-INSERT is racier.
+ * ride one transactWrite: the DEVICE# put is CONDITIONED on not-exists, so a
+ * concurrent admit of the same device loses the whole transaction (mapped to
+ * admitted — it is already recorded and counted once) and can never
+ * double-increment DEVICES (P3-1). Two DIFFERENT devices racing under the
+ * last slot can still both land — museum's SELECT-then-INSERT is racier, so
+ * that over-admission is accepted drift (D53). Both rows carry the rolling
+ * TTL backstop, and every NEW admission burns the per-link daily ceiling
+ * first (429 once over) — /info is password-whitelisted, so admission there
+ * must not be an unbounded write amplifier (P2-1).
  */
 export const admitDevice = async (
   deps: Deps,
@@ -189,10 +203,24 @@ export const admitDevice = async (
     const count = ((await deps.db.get(counter.pk, counter.sk))?.count as number) ?? 0;
     if (count >= limit) return { admitted: false };
   }
-  await deps.db.transactWrite([
-    { kind: 'put', item: { ...row, admittedAt: deps.clock.nowMicros() } },
-    { kind: 'counter', key: keys.publicLinkDeviceCount(link.tokenHash), deltas: { count: 1 } },
-  ]);
+  await bumpDailyCeiling(deps, link.tokenHash, 'devices', deps.config.publicLinkDailyDeviceLimit);
+  const now = deps.clock.nowMicros();
+  const ttl = Math.ceil(now / MICROS_PER_SECOND) + DEVICE_ROW_TTL_SECONDS;
+  try {
+    await deps.db.transactWrite([
+      { kind: 'put', item: { ...row, admittedAt: now, ttl }, ifNotExists: true },
+      {
+        kind: 'counter',
+        key: keys.publicLinkDeviceCount(link.tokenHash),
+        deltas: { count: 1 },
+        set: { ttl },
+      },
+    ]);
+  } catch (err) {
+    // Lost a same-device race: the winner already recorded AND counted it.
+    if (err instanceof ConditionFailedError) return { admitted: true };
+    throw err;
+  }
   return { admitted: true };
 };
 
@@ -340,11 +368,12 @@ export const recordPasswordAttempt = async (
 /** Per-link daily ceiling (plan §4.1d): one counter row per UTC day, TTL'd
  * two days out; increment-then-judge so the cap binds under concurrency.
  * kind 'downloads' covers presigned GET issuance; 'uploads' covers upload-url
- * mints AND commits (each counts 1 against the same daily limit). 429 over. */
+ * mints AND commits (each counts 1 against the same daily limit); 'devices'
+ * covers NEW device admissions (P2-1, D53). 429 over. */
 export const bumpDailyCeiling = async (
   deps: Deps,
   tokenHashHex: string,
-  kind: 'downloads' | 'uploads',
+  kind: 'downloads' | 'uploads' | 'devices',
   limit: number,
 ): Promise<void> => {
   if (limit <= 0) return;

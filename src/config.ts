@@ -69,6 +69,10 @@ export interface Config {
    */
   publicLinkDailyDownloadLimit: number;
   publicLinkDailyUploadLimit: number;
+  /** Daily NEW-device admissions per link (security review P2-1, D53): /info
+   * is password-whitelisted and admission fires there, so without a ceiling a
+   * token holder cycling User-Agents mints unbounded rows. Same 429 family. */
+  publicLinkDailyDeviceLimit: number;
 }
 
 export const configFromEnv = (): Config => ({
@@ -101,4 +105,5 @@ export const configFromEnv = (): Config => ({
   presignPublicGetExpirySeconds: Number(process.env.PRESIGN_PUBLIC_GET_EXPIRY_SECONDS ?? 3600),
   publicLinkDailyDownloadLimit: Number(process.env.PUBLIC_LINK_DAILY_DOWNLOADS ?? 10_000),
   publicLinkDailyUploadLimit: Number(process.env.PUBLIC_LINK_DAILY_UPLOADS ?? 1_000),
+  publicLinkDailyDeviceLimit: Number(process.env.PUBLIC_LINK_DAILY_DEVICES ?? 1_000),
 });

@@ -165,6 +165,9 @@ describe('lambda env carries the Phase D/F knobs (D51/D52)', () => {
     expect(text).toMatch(
       /PUBLIC_LINK_DAILY_UPLOADS\s*=\s*tostring\(var\.public_link_daily_uploads\)/,
     );
+    expect(text).toMatch(
+      /PUBLIC_LINK_DAILY_DEVICES\s*=\s*tostring\(var\.public_link_daily_devices\)/,
+    );
   });
 
   it('tofu defaults agree with config.ts (the D11 discipline)', () => {
@@ -184,6 +187,7 @@ describe('lambda env carries the Phase D/F knobs (D51/D52)', () => {
       ['PRESIGN_PUBLIC_GET_EXPIRY_SECONDS', 'presign_public_get_expiry_seconds'],
       ['PUBLIC_LINK_DAILY_DOWNLOADS', 'public_link_daily_downloads'],
       ['PUBLIC_LINK_DAILY_UPLOADS', 'public_link_daily_uploads'],
+      ['PUBLIC_LINK_DAILY_DEVICES', 'public_link_daily_devices'],
     ] as const) {
       const want = configDefault(env);
       // Both declarations must agree: dev/variables.tf is the tfvars

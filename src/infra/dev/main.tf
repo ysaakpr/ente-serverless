@@ -73,6 +73,7 @@ module "compute" {
   presign_public_get_expiry_seconds = var.presign_public_get_expiry_seconds
   public_link_daily_downloads       = var.public_link_daily_downloads
   public_link_daily_uploads         = var.public_link_daily_uploads
+  public_link_daily_devices         = var.public_link_daily_devices
 
   origin_secret            = random_password.origin_secret.result
   api_reserved_concurrency = var.api_reserved_concurrency

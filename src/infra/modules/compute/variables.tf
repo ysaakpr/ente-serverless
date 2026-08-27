@@ -93,3 +93,8 @@ variable "public_link_daily_uploads" {
   type    = number
   default = 1000
 }
+
+variable "public_link_daily_devices" {
+  type    = number
+  default = 1000
+}

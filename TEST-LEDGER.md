@@ -25,7 +25,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | presign-expiry.test.ts | presign expiry split (finding 5, D44) | SEC | 3 | 3 | ✅ |
 | presign-md5.test.ts | ? | ? | 5 | 5 | ✅ |
 | public-collect.test.ts | ? | ? | 5 | 5 | ✅ |
-| public-collection.test.ts | ? | ? | 8 | 8 | ✅ |
+| public-collection.test.ts | ? | ? | 11 | 11 | ✅ |
 | public-download.test.ts | ? | ? | 4 | 4 | ✅ |
 | public-password.test.ts | ? | ? | 5 | 5 | ✅ |
 | security-review-2.test.ts | ? | ? | 11 | 11 | ✅ |
@@ -49,4 +49,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 | web.test.ts | infra guards: albums web hosting (D52) | P3-F | 20 | 20 | ✅ |
 
-**Total: 385/385 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 388/388 passing.** CI must fail if any implemented endpoint is below 100%.

@@ -30,7 +30,7 @@ import {
   assertSealedCollectionKey,
   getLinkForCollection,
 } from '../../domain/sharing.ts';
-import { validatePasswordJwt } from '../../domain/publicLinks.ts';
+import { passHashEquals, validatePasswordJwt } from '../../domain/publicLinks.ts';
 import {
   errBadRequestSentinel,
   errInvalidPassword,
@@ -64,7 +64,9 @@ export const joinLink = (deps: Deps) => async (c: Context) => {
   if (!link.enableJoin) throw errBadRequestSentinel();
 
   const accessToken = c.req.header('X-Auth-Access-Token') || c.req.query('accessToken') || '';
-  if (link.token !== accessToken) throw errPermissionDenied(); // token doesn't match collection
+  // Constant-time (P3-2, D53): the verify-password compare helper, reused —
+  // an attacker-supplied token must not leak match length via `!==` timing.
+  if (!passHashEquals(link.token, accessToken)) throw errPermissionDenied(); // token doesn't match collection
 
   if (link.passHash) {
     const jwt = c.req.header('X-Auth-Access-Token-JWT') || c.req.query('accessTokenJWT') || '';

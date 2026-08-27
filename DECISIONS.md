@@ -1122,6 +1122,45 @@ source says Y — source won).
     logging, and the manual open-a-real-link gate on the pinned build —
     which stays the release gate before the README row flips to Done.
 
+- **D53 [SHARING 2026-08-27] Security-review fixes on the public-links branch
+  — device-admission TTL + daily ceiling (P2-1), atomic same-device admission
+  (P3-1), constant-time join-link token compare (P3-2).** Judgment calls:
+  - **P2-1a — admission rows get a rolling TTL backstop**: DEVICE#<hash> rows
+    and the DEVICES counter now carry `ttl` = now + 90 days (the link-META
+    validTill+90d margin), refreshed on the counter at every new admission.
+    Museum keeps public_collection_access_history forever, so a device reaped
+    after 90 quiet days simply gets RE-admitted (burning a slot and a ceiling
+    unit again) — "admitted stays admitted" drifting to "re-admitted" is the
+    accepted delta; the counter can also briefly overcount reaped rows near
+    the limit, which only errs toward stricter. The disable-link purge of the
+    PUBTOKEN partition is unchanged (TTL is the backstop, not the cleanup).
+  - **P2-1b — per-link daily admission ceiling**: new knob
+    `PUBLIC_LINK_DAILY_DEVICES` (default 1000, 0 = off) → config
+    `publicLinkDailyDeviceLimit` → `bumpDailyCeiling(kind: 'devices')`, wired
+    env→config→tofu exactly like the D51/D52 download/upload ceilings
+    (compute + dev variables, guard-matched defaults). Needed because
+    /public-collection/info is password-whitelisted AND device-admitting: a
+    token holder cycling User-Agents was unbounded permanent rows + write
+    cost, and with a deviceLimit set could exhaust slots to lock out real
+    viewers. A tripped ceiling fails the ADMISSION as the same bare-429
+    SentinelError the other ceilings raise (the middleware rethrows it past
+    its museum-500 catch-all); already-admitted devices are untouched.
+  - **P3-1 — the DEVICE# put is now conditioned on not-exists** inside the
+    existing transactWrite, so a concurrent admit of the SAME device loses
+    the transaction, maps ConditionFailedError to admitted, and can never
+    double-increment DEVICES. Two DIFFERENT devices racing under the last
+    slot can still both land (read-then-judge on the counter) — museum's
+    SELECT-then-INSERT is racier still, so that over-admission stays as
+    accepted, museum-consistent drift rather than new port machinery.
+  - **P3-2 — /collections/join-link token compare**: `link.token !==
+    accessToken` became `passHashEquals` (the branch's timingSafeEqual
+    helper from verify-password) — an attacker-supplied token must not leak
+    prefix-match timing.
+  - **Residuals accepted, unchanged**: the share email-enumeration oracle is
+    upstream-faithful (D50), and the XFF-based caps can be skewed only via
+    the direct Function URL, which the tracked origin-lock finding (D47/D52
+    ORIGIN_SECRET) already closes for edge traffic.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1
