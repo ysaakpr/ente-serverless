@@ -8,11 +8,12 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
 | auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
+| collection-share.test.ts | ? | ? | 11 | 11 | ✅ |
 | collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
 | cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
 | db-counters.test.ts | F0 race-free capped counter (security review) | SEC | 4 | 4 | ✅ |
 | db-transact.test.ts | transactWrite atomicity + 100-op cap (D48) | P3-A | 4 | 4 | ✅ |
-| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 8 | 8 | ✅ |
+| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 9 | 9 | ✅ |
 | entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
 | file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
@@ -25,6 +26,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | security-review-2.test.ts | ? | ? | 11 | 11 | ✅ |
 | send-ott.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
 | sharing-authz.test.ts | ? | ? | 6 | 6 | ✅ |
+| sharing-feed.test.ts | ? | ? | 9 | 9 | ✅ |
 | sharing.test.ts | [SHARING] dual-write + link rows (D48) | P3-A | 10 | 10 | ✅ |
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
 | srp-endpoints.test.ts | [AUTH-SRP] | M1 | 24 | 24 | ✅ |
@@ -40,4 +42,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 
-**Total: 305/305 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 326/326 passing.** CI must fail if any implemented endpoint is below 100%.

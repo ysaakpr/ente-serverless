@@ -823,6 +823,83 @@ source says Y — source won).
     trusts with the collection key. Non-members and unknown ids stay 404
     (enumeration resistance preserved).
 
+- **D50 [SHARING 2026-08-27] Phase C: collaborator share endpoints + the
+  sharee sync feed, pinned against museum source fetched 2026-08-27
+  (pkg/api/collection.go, pkg/controller/collections/share.go +
+  key_validation.go + diff.go, pkg/repo/collection.go, ente/collection.go —
+  the pinned oracle image is frozen 2026-08-16, so anything newer than the
+  freeze is flagged capture-gated below).** Routes are museum's:
+  `POST /collections/share`, `POST /collections/unshare`,
+  `POST /collections/leave/:collectionID`, `GET /collections/sharees`, all
+  answering `{"sharees":[{id,email,name:"",role}]}` where museum does.
+  Judgment calls:
+  - **The per-user unshare tombstone is a `SHAREDTOMB#` row, and its feed
+    entry reuses the blanked global-tombstone shape.** Museum has no separate
+    tombstone: the collection_shares row itself flips `is_deleted` and the
+    sharee-feed scan emits it with the collection's live fields, the share's
+    encryptedKey, owner email blanked, and `sharees`/`publicURLs` as `[]`.
+    This repo emits the pre-existing blanked shape (key material empty,
+    sharees/publicURLs null) — clients act only on `id`+`isDeleted`.
+    Capture-gated. Related divergence: museum's shared-feed join has NO
+    is_deleted filter, so a stale unshare re-surfaces whenever the collection
+    is later restamped; ours surfaces once per tombstone stamp (re-stamped on
+    repeat removals). Idempotent either way; capture-gated.
+  - **The sharee's live feed entry is museum's scan, field for field**
+    (GetCollectionsSharedWithUser): `encryptedKey` = the share row's wrapped
+    key with NO `keyDecryptionNonce` (never selected; omitempty; sealed boxes
+    need no nonce), owner block carries the real owner's email, `attributes`
+    is the zero struct `{"version":0}`, the owner's private magicMetadata is
+    withheld while pubMagicMetadata passes, and `sharees` is the full live
+    list including the caller. `sharedAt` is stored (first-share time, kept on
+    live re-share, re-stamped on resurrection — the ON CONFLICT CASE) and
+    emitted; the field may postdate the frozen oracle — capture-gated.
+    `sharedMagicMetadata` and the plain-name legacy column have no equivalent
+    here (no sharee-magic-metadata endpoint yet — Phase E at the earliest).
+  - **GET /collections/:id now swaps in the sharee's wrapped key** (museum
+    GetWithSharingDetailsForUser) while the collection's own
+    keyDecryptionNonce rides along unchanged — museum's exact quirk. Sharees
+    lists are populated for every caller on getById and both feed halves;
+    the create response keeps `sharees: null` (museum returns the fresh
+    struct, Sharees never set).
+  - **publicURLs stays null everywhere until Phase D.** Museum emits `[]` on
+    both v2 feed halves and null only on a link-less getById, then filters
+    links for non-owner roles (FilterPublicURLsForRole — seam comment left in
+    collectionToJson). Pre-sharing behaviour kept; capture-gated with Phase D.
+    Same call for the owned-feed owner block: museum's owned scan leaves
+    owner.email "", this repo has always filled it — kept, capture-gated.
+  - **Role menu is VIEWER|COLLABORATOR; ADMIN is 400.** Museum's repo accepts
+    ADMIN on share (and 500s on unknown strings); nothing in this repo can
+    honour an ADMIN row (D49), so zod refuses it as 400. Capture-gated.
+    Sealed-key validation matches museum's plain-error-to-bare-500 mapping
+    (validateSealedCollectionKey: exactly 80 bytes), including a MISSING
+    encryptedKey (not binding-required upstream → 500, not 400).
+    AllowParticipantSharing verified from source: favorites ARE shareable;
+    uncategorized only as VIEWER. Share carries NO app-mismatch check in
+    museum (ErrInvalidApp is create-time only) — none added, per the Phase B
+    handoff question. Sharing a DELETED collection: museum's repo.Get does
+    not filter is_deleted so it would proceed; this repo 404s — capture-gated.
+  - **Leave removes the leaver's OWN files from the collection** — verified in
+    source (Leave → UnShare → UnShareContext's collection_files update), same
+    composite as unshare (`revokeShareeAccess`: row pair + tombstone in one
+    transaction, then the sharee's link tombstones, then a collection
+    restamp). Owner-leave is 403, leaving a collection never shared with you
+    is a 200 no-op, both museum-exact.
+  - **Cascades.** deleteCollectionV3 now (a) trashes only OWNER-owned files
+    and merely unlinks sharee-owned ones (museum TrashV3 +
+    removeAllFilesAddedByOthers — the old code would have trashed a
+    collaborator's file into the owner's trash), and (b) removes + feed-
+    tombstones every sharee (museum ScheduleDelete's collection_shares
+    UPDATE), chunked at 33 sharees per transaction (3 ops each, under
+    MAX_TRANSACT_OPS; each sharee's ops stay in one chunk — only the batch as
+    a whole is non-atomic past 33, where museum's single SQL UPDATE is).
+    Account deletion (reapUserData) revokes both directions — collections
+    shared WITH the user via the full unshare composite (their files leave
+    others' albums too), collections the user OWNED via removeAllSharees —
+    matching ResetUserSharingAccess; cast/social/link cleanup has no
+    equivalent surface here yet. Best-effort like the rest of the reaper.
+  - Non-member 403-vs-404 stays as D49 left it (this repo 403s), now also
+    covering the post-unshare probes in the new tests.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

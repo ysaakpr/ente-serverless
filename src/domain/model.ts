@@ -61,10 +61,10 @@ export const keys = {
   publicLinkToken: (tokenHash: string) => ({ pk: `PUBTOKEN#${tokenHash}`, sk: 'META' }),
   /** Per-collection pointer to its active link (holds the tokenHash). */
   collectionLink: (collectionId: number) => ({ pk: `COL#${collectionId}`, sk: 'LINK' }),
-  /** Per-user unshare tombstone for the sharee's diff feed. Reserved in Phase
-   * A, written by nothing yet — feed semantics land in Phase C. The sk
-   * deliberately does NOT match the `SHARED#` prefix, so live listings never
-   * see tombstones. */
+  /** Per-user unshare tombstone for the sharee's /collections/v2 feed
+   * (written by sharing.ts removeSharee/removeAllSharees since Phase C; a
+   * re-share deletes it). The sk deliberately does NOT match the `SHARED#`
+   * prefix, so live listings never see tombstones. */
   sharedTombstone: (userId: number, collectionId: number) => ({
     pk: `USER#${userId}`,
     sk: `SHAREDTOMB#${collectionId}`,
@@ -77,6 +77,10 @@ export const skPrefixes = {
   sharee: 'SHAREE#',
   /** All collections shared with one user (USER#<id> partition). */
   sharedWithUser: 'SHARED#',
+  /** All unshare tombstones for one user (USER#<id> partition). Distinct from
+   * `SHARED#` — 'SHAREDTOMB#'.startsWith('SHARED#') is false (T ≠ #), so live
+   * listings never see tombstones. */
+  sharedTombstone: 'SHAREDTOMB#',
 };
 
 // GSI partitions

@@ -393,3 +393,67 @@ describe('SES delivery on LocalStack', () => {
     expect(mine[0]!.Subject).toMatch(/^Verification code: \d{6}$/);
   });
 });
+
+describe('Phase C sharing on LocalStack (real transactWrite paths)', () => {
+  it('share -> sharee feed -> unshare tombstone -> re-share resurrection, on DynamoDB', async () => {
+    const ownerKeys = makeClientKeys();
+    const mateEmail = uniqueEmail();
+    const owner = await fullSignup(uniqueEmail(), ownerKeys);
+    const mate = await fullSignup(mateEmail, makeClientKeys());
+
+    const create = await world.request('POST', '/collections', {
+      token: owner.token,
+      body: {
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        encryptedName: b64(randomBytes(12)),
+        nameDecryptionNonce: b64(randomBytes(24)),
+        type: 'album',
+        attributes: { version: 0 },
+      },
+    });
+    expect(create.status).toBe(200);
+    const album = ((await create.json()) as { collection: { id: number } }).collection.id;
+
+    // Share (dual-write + tombstone-delete transaction on real DynamoDB).
+    const wrapped = b64(randomBytes(80));
+    const share = await world.request('POST', '/collections/share', {
+      token: owner.token,
+      body: { collectionID: album, email: mateEmail, encryptedKey: wrapped },
+    });
+    expect(share.status).toBe(200);
+    expect(((await share.json()) as { sharees: Array<{ id: number }> }).sharees.map((s) => s.id)).toEqual([mate.id]);
+
+    // Sharee feed: the entry carries THEIR wrapped key and the owner's email.
+    const getV2 = async (token: string, sinceTime = 0) => {
+      const res = await world.request('GET', `/collections/v2?sinceTime=${sinceTime}`, { token });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as {
+        collections: Array<{ id: number; encryptedKey: string; isDeleted?: boolean; updationTime: number; owner: { email: string } }>;
+      }).collections;
+    };
+    const feed = await getV2(mate.token);
+    const entry = feed.find((c) => c.id === album)!;
+    expect(entry.encryptedKey).toBe(wrapped);
+    const synced = Math.max(...feed.map((c) => c.updationTime));
+
+    // Unshare (row deletes + tombstone put in ONE TransactWriteItems).
+    const unshare = await world.request('POST', '/collections/unshare', {
+      token: owner.token,
+      body: { collectionID: album, email: mateEmail },
+    });
+    expect(unshare.status).toBe(200);
+    const delta = await getV2(mate.token, synced);
+    expect(delta.find((c) => c.id === album)!.isDeleted).toBe(true);
+
+    // Re-share resurrects: the tombstone delete rides the same transaction.
+    const reshare = await world.request('POST', '/collections/share', {
+      token: owner.token,
+      body: { collectionID: album, email: mateEmail, encryptedKey: b64(randomBytes(80)) },
+    });
+    expect(reshare.status).toBe(200);
+    const back = await getV2(mate.token);
+    expect(back.filter((c) => c.id === album)).toHaveLength(1);
+    expect(back.find((c) => c.id === album)!.isDeleted).toBeUndefined();
+  });
+});

@@ -7,7 +7,8 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { getUser } from './users.ts';
-import { getSharee, type ShareeRole } from './sharing.ts';
+import { getSharee, listSharees, removeSharee, type ShareeRole, type ShareeRow } from './sharing.ts';
+import { getFile, restampLink, type LinkRow } from './files.ts';
 import { ConditionFailedError } from '../ports/db.ts';
 import {
   errBadRequestSentinel,
@@ -161,11 +162,48 @@ export const newCollectionRow = (
   };
 };
 
-/** museum Collection JSON (ente/collection.go). */
-export const collectionToJson = async (deps: Deps, row: CollectionRow): Promise<Record<string, unknown>> => {
+/** museum ente.CollectionUser JSON ({id,email,name,role}; name deprecated,
+ * always empty from GetSharees — repo/collection.go). */
+export interface CollectionUserJson {
+  id: number;
+  email: string;
+  name: string;
+  role: string;
+}
+
+/** The sharee list of one collection, as museum GetSharees emits it
+ * (repo/collection.go: live shares only, one CollectionUser per sharee).
+ * Museum skips users whose encrypted_email is NULLed (deleted accounts);
+ * the account-deletion cascade removes our rows instead, so the isDeleted
+ * filter here is defensive. Always an array, [] when unshared. */
+export const shareesJson = async (deps: Deps, collectionId: number): Promise<CollectionUserJson[]> => {
+  const rows = await listSharees(deps, collectionId);
+  const out: CollectionUserJson[] = [];
+  for (const r of rows) {
+    const user = await getUser(deps, r.userID);
+    if (!user || user.isDeleted) continue;
+    out.push({ id: r.userID, email: user.email, name: '', role: r.role });
+  }
+  return out;
+};
+
+/** museum Collection JSON (ente/collection.go). `opts.sharees` is the
+ * caller-resolved sharee list (getById + the /collections/v2 feed populate it,
+ * matching museum's GetWithSharingDetailsForUser / GetCollectionsOwnedByUserV2);
+ * left undefined it stays null, which is museum's create-response shape (a
+ * fresh Collection struct never sets Sharees). */
+export const collectionToJson = async (
+  deps: Deps,
+  row: CollectionRow,
+  opts: { sharees?: CollectionUserJson[] } = {},
+): Promise<Record<string, unknown>> => {
   const owner = await getUser(deps, row.ownerID);
   if (row.isDeleted) {
-    // Tombstone: id + isDeleted + updationTime; key material blanked.
+    // Tombstone: id + isDeleted + updationTime; key material blanked. Serves
+    // both the owner's global tombstone and the sharee's per-user unshare
+    // tombstone (museum keeps the share row's encryptedKey and emits
+    // sharees/publicURLs as [] there — this blanked shape is the pre-sharing
+    // behaviour, kept consistent; capture-gated, D50).
     return {
       id: row.collectionId,
       owner: { id: row.ownerID, email: '', name: '', role: '' },
@@ -192,13 +230,83 @@ export const collectionToJson = async (deps: Deps, row: CollectionRow): Promise<
     nameDecryptionNonce: row.nameDecryptionNonce,
     type: row.type,
     attributes: row.attributes,
-    sharees: null,
+    sharees: opts.sharees ?? null,
+    // Phase D seam: once share links exist, populate PublicURL objects here and
+    // filter them for non-owner roles (museum FilterPublicURLsForRole — a
+    // sharee never sees the link token). Museum emits [] on the v2 feeds and
+    // null only on a link-less getById; null everywhere is the pre-sharing
+    // behaviour, kept until Phase D captures pin it (D50).
     publicURLs: null,
     updationTime: row.updationTime,
     ...(row.magicMetadata ? { magicMetadata: row.magicMetadata } : {}),
     ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),
     app: row.app,
   };
+};
+
+/**
+ * A shared collection as the SHAREE's /collections/v2 feed emits it — museum
+ * GetCollectionsSharedWithUser (repo/collection.go), field for field:
+ *  - encryptedKey is the sharee's own wrapped key (collection_shares.
+ *    encrypted_key), and keyDecryptionNonce is ABSENT (the SELECT never reads
+ *    it; sealed boxes need no nonce; the JSON tag is omitempty);
+ *  - owner carries the real owner's email;
+ *  - attributes is the zero struct {"version":0} (not selected there);
+ *  - the owner's private magicMetadata is never exposed, pubMagicMetadata is;
+ *  - sharees is the full live list, the caller included.
+ */
+export const sharedCollectionToJson = async (
+  deps: Deps,
+  row: CollectionRow,
+  share: ShareeRow,
+): Promise<Record<string, unknown>> => {
+  const owner = await getUser(deps, row.ownerID);
+  return {
+    id: row.collectionId,
+    owner: { id: row.ownerID, email: owner?.email ?? '', name: '', role: '' },
+    encryptedKey: share.encryptedKey,
+    name: '',
+    encryptedName: row.encryptedName,
+    nameDecryptionNonce: row.nameDecryptionNonce,
+    type: row.type,
+    attributes: { version: 0 },
+    sharees: await shareesJson(deps, row.collectionId),
+    publicURLs: null, // Phase D (museum: FilterPublicURLsForRole over the active link)
+    updationTime: row.updationTime,
+    ...(share.sharedAt ? { sharedAt: share.sharedAt } : {}),
+    ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),
+    app: row.app,
+  };
+};
+
+/**
+ * Revoke one sharee's access — museum UnShareContext (repo/collection.go),
+ * shared by unshare, leave and the account-deletion cascade:
+ *  1. drop both participant rows + write the per-user feed tombstone (one
+ *     transaction, removeSharee);
+ *  2. tombstone the SHAREE'S OWN file links in the collection (museum:
+ *     `UPDATE collection_files SET is_deleted = TRUE ... AND f_owner_id =
+ *     $sharee`) so their contributions leave everyone's diff;
+ *  3. restamp the collection so the owner's (and remaining sharees') next
+ *     /collections/v2 refreshes the sharee list.
+ */
+export const revokeShareeAccess = async (
+  deps: Deps,
+  collection: CollectionRow,
+  shareeUserID: number,
+): Promise<void> => {
+  await removeSharee(deps, collection.collectionId, shareeUserID);
+  const links = await deps.db.query<LinkRow>(gsi.collectionDiff(collection.collectionId), {
+    index: 'gsi1',
+  });
+  for (const link of links) {
+    if (link.isDeleted) continue;
+    const file = await getFile(deps, link.fileID);
+    if (file && file.ownerID === shareeUserID) {
+      await deps.db.put(restampLink(deps, link, true));
+    }
+  }
+  await bumpCollection(deps, collection, {});
 };
 
 /** Find the user's special collection (favorites/uncategorized) for an app. */

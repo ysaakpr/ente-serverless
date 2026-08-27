@@ -56,6 +56,10 @@ import { addFiles, moveFiles, removeFilesV3, restoreFiles } from './handlers/col
 import { renameCollection, updateCollectionMagicMetadata } from './handlers/collections/rename.ts';
 import { deleteCollectionV3 } from './handlers/collections/deleteV3.ts';
 import { getCollectionById } from './handlers/collections/getById.ts';
+import { shareCollection } from './handlers/collections/share.ts';
+import { unshareCollection } from './handlers/collections/unshare.ts';
+import { leaveCollection } from './handlers/collections/leave.ts';
+import { getCollectionSharees } from './handlers/collections/sharees.ts';
 import { createEntityKey, ensureEntityKey, getEntityKey } from './handlers/entity/key.ts';
 import { createEntity, deleteEntity, entityDiff, updateEntity } from './handlers/entity/data.ts';
 import { getFeatureFlags, getRemoteStoreValue, updateRemoteStoreValue } from './handlers/stubs/remoteStore.ts';
@@ -196,6 +200,10 @@ export const buildApp = (deps: Deps): Hono => {
   app.post('/collections/move-files', authed, handler(moveFiles(deps)));
   app.post('/collections/restore-files', authed, handler(restoreFiles(deps)));
   app.post('/collections/v3/remove-files', authed, handler(removeFilesV3(deps)));
+  app.post('/collections/share', authed, handler(shareCollection(deps)));
+  app.post('/collections/unshare', authed, handler(unshareCollection(deps)));
+  app.post('/collections/leave/:collectionID', authed, handler(leaveCollection(deps)));
+  app.get('/collections/sharees', authed, handler(getCollectionSharees(deps)));
   app.post('/collections/rename', authed, handler(renameCollection(deps)));
   app.put('/collections/magic-metadata', authed, handler(updateCollectionMagicMetadata(deps, false)));
   app.put('/collections/public-magic-metadata', authed, handler(updateCollectionMagicMetadata(deps, true)));

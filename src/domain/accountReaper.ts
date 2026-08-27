@@ -15,13 +15,39 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi } from './model.ts';
 import { getFile, type LinkRow } from './files.ts';
-import type { CollectionRow } from './collections.ts';
+import { getCollection, revokeShareeAccess, type CollectionRow } from './collections.ts';
+import { listSharedCollectionIds, removeAllSharees, removeSharee } from './sharing.ts';
 import { enqueueObjectDeletion } from './objectSweep.ts';
 
 /** SKs under USER#<id> that hold key material or auth secrets. */
 const SENSITIVE_USER_SKS = ['KEYS', 'SRP', '2FA', '2FASETUP'] as const;
 
 export const reapUserData = async (deps: Deps, userId: number): Promise<void> => {
+  // 0) Sharing cascade — museum ResetUserSharingAccess (collections/
+  //    collection.go HandleAccountDeletion): every share row where the user is
+  //    sharee OR sharer is revoked. Both directions are cheaply enumerable
+  //    (SHARED# reverse rows / gsi2 + SHAREE# rows), so no TODO remains here.
+  //    Best-effort like the rest of the reaper: the tombstoned account is
+  //    already unreachable.
+  try {
+    // Collections shared WITH the user: revoke like an unshare, which also
+    // unlinks the user's own files from those albums (museum UnShareContext).
+    for (const colId of await listSharedCollectionIds(deps, userId)) {
+      const col = await getCollection(deps, colId);
+      if (col) await revokeShareeAccess(deps, col, userId);
+      else await removeSharee(deps, colId, userId);
+    }
+    // Collections the user OWNED and shared with others: drop every sharee
+    // pair + tombstone their feeds so the album disappears on their next sync.
+    const owned = await deps.db.query<CollectionRow>(gsi.userCollections(userId), {
+      index: 'gsi2',
+    });
+    for (const col of owned) {
+      await removeAllSharees(deps, col.collectionId);
+    }
+  } catch (err) {
+    console.error('account reaper: sharing cascade failed', userId, err);
+  }
   // 1) Enqueue every file/thumbnail object the user owns, discovered through
   //    their collections -> links -> files, for the sweep to reclaim.
   try {
