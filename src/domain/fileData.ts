@@ -5,8 +5,10 @@
  */
 
 import type { Deps } from '../deps.ts';
+import type { Blobs } from '../ports/blobs.ts';
 import { keys, padTime } from './model.ts';
-import { getFile, type FileRow } from './files.ts';
+import { filePoolPin, getFile, type FileRow } from './files.ts';
+import { blobsForPoolId } from './storagePools.ts';
 import { errNotFound, errPermissionDenied } from '../lib/errors.ts';
 
 export type FdType = 'mldata' | 'vid_preview' | 'img_preview';
@@ -109,19 +111,27 @@ export interface S3FileMetadata {
   client: string;
 }
 
+/**
+ * Derived data (mldata / previews) lives with its FILE's pinned pool (H2,
+ * D55) — self-consistent under pool reassignment: the file row is already in
+ * hand on every file-data route (getOwnedFile), so resolution is free.
+ */
+export const fileDataBlobs = async (deps: Deps, file: FileRow): Promise<Blobs> =>
+  blobsForPoolId(deps, filePoolPin(file));
+
 export const writeMetadataObject = async (
-  deps: Deps,
+  blobs: Blobs,
   key: string,
   metadata: S3FileMetadata,
 ): Promise<number> => {
   const body = Buffer.from(JSON.stringify(metadata));
-  await deps.blobs.put(key, body);
+  await blobs.put(key, body);
   return body.length;
 };
 
-export const readMetadataObject = async (deps: Deps, key: string): Promise<S3FileMetadata | null> => {
+export const readMetadataObject = async (blobs: Blobs, key: string): Promise<S3FileMetadata | null> => {
   try {
-    return JSON.parse((await deps.blobs.get(key)).toString()) as S3FileMetadata;
+    return JSON.parse((await blobs.get(key)).toString()) as S3FileMetadata;
   } catch {
     return null;
   }

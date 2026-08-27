@@ -8,7 +8,8 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { keys, padTime } from '../../domain/model.ts';
-import { getFile, objectGuardKey } from '../../domain/files.ts';
+import { getFile, loadQuotaContext, objectGuardKey, thumbPoolPin, type FileRow } from '../../domain/files.ts';
+import { blobsForPoolId } from '../../domain/storagePools.ts';
 import { enqueueObjectDeletion } from '../../domain/objectSweep.ts';
 import { errBadRequestSentinel, errNotFound, errPermissionDenied } from '../../lib/errors.ts';
 import { ApiError } from '../../lib/errors.ts';
@@ -32,32 +33,54 @@ export const updateThumbnail = (deps: Deps) => async (c: Context) => {
   if (!file) throw errNotFound();
   if (file.ownerID !== userId) throw errPermissionDenied();
 
-  const head = await deps.blobs.head(body.thumbnail.objectKey);
+  // Pool pins (H2, D55): a REPLACED thumbnail's bytes were presigned into the
+  // owner's CURRENT pool; an unchanged key keeps the old pin.
+  const oldKey = file.thumbnail.objectKey;
+  const oldThumbPin = thumbPoolPin(file);
+  const keyChanged = oldKey !== body.thumbnail.objectKey;
+  const newThumbPin = keyChanged
+    ? (await loadQuotaContext(deps, userId)).pool?.poolId
+    : oldThumbPin;
+
+  const head = await (await blobsForPoolId(deps, newThumbPin)).head(body.thumbnail.objectKey);
   if (!head) throw new ApiError('OBJECT_SIZE_FETCH_FAILED', 503);
   const diff = head.contentLength - file.info.thumbSize;
   if (diff > 0) return c.json({}, 500); // museum: plain error -> 500
 
   const updationTime = deps.ids.nextUpdationTime();
-  const oldKey = file.thumbnail.objectKey;
+  const updatedItem: FileRow = {
+    ...file,
+    thumbnail: { objectKey: body.thumbnail.objectKey, decryptionHeader: body.thumbnail.decryptionHeader },
+    info: { ...file.info, thumbSize: head.contentLength },
+    updationTime,
+  };
+  delete updatedItem.thumbPoolId;
+  if (newThumbPin && newThumbPin !== file.storagePoolId) updatedItem.thumbPoolId = newThumbPin;
   const ops: Parameters<Deps['db']['transactWrite']>[0] = [
-    {
-      kind: 'put',
-      item: {
-        ...file,
-        thumbnail: { objectKey: body.thumbnail.objectKey, decryptionHeader: body.thumbnail.decryptionHeader },
-        info: { ...file.info, thumbSize: head.contentLength },
-        updationTime,
-      },
-    },
+    { kind: 'put', item: updatedItem },
     { kind: 'put', item: { ...objectGuardKey(body.thumbnail.objectKey), fileId: body.fileID, type: 'thumbnail' } },
     { kind: 'counter', key: { pk: keys.userUsage(userId).pk, sk: 'USAGE' }, deltas: { bytes: diff } },
   ];
-  if (oldKey && oldKey !== body.thumbnail.objectKey) {
+  // Mirror the byte deltas onto the pool counters (H2, D55).
+  if (oldThumbPin === newThumbPin) {
+    if (newThumbPin && diff !== 0) {
+      ops.push({ kind: 'counter', key: { pk: keys.poolUsage(newThumbPin).pk, sk: 'USAGE' }, deltas: { bytes: diff } });
+    }
+  } else {
+    if (oldThumbPin) {
+      ops.push({ kind: 'counter', key: { pk: keys.poolUsage(oldThumbPin).pk, sk: 'USAGE' }, deltas: { bytes: -file.info.thumbSize } });
+    }
+    if (newThumbPin) {
+      ops.push({ kind: 'counter', key: { pk: keys.poolUsage(newThumbPin).pk, sk: 'USAGE' }, deltas: { bytes: head.contentLength } });
+    }
+  }
+  if (keyChanged && oldKey) {
     ops.push({ kind: 'delete', key: { pk: `OBJ#${oldKey}`, sk: 'META' } });
   }
   await deps.db.transactWrite(ops);
-  if (oldKey && oldKey !== body.thumbnail.objectKey) {
-    await enqueueObjectDeletion(deps, [oldKey]); // sweep cron drains it (D6)
+  if (keyChanged && oldKey) {
+    // sweep cron drains it (D6); deletes go to the OLD pin's bucket (H2).
+    await enqueueObjectDeletion(deps, [{ objectKey: oldKey, poolId: oldThumbPin }]);
   }
 
   const links = await deps.db.query(`FILE-LINKS#${body.fileID}`, { index: 'gsi3' });

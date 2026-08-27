@@ -8,10 +8,14 @@ import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { assertQuota, MAX_UPLOAD_URLS } from '../../domain/files.ts';
+import { blobsForPool } from '../../domain/storagePools.ts';
 
 export const getUploadUrls = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
-  await assertQuota(deps, userId, null);
+  // Mints presign into the uploader's CURRENT pool (H2, D55) — the quota
+  // check already loaded the user+pool rows, so this costs no extra read.
+  const ctx = await assertQuota(deps, userId, null);
+  const blobs = await blobsForPool(deps, ctx.pool);
   let count = Number.parseInt(c.req.query('count') ?? '0', 10) || 0;
   if (count > MAX_UPLOAD_URLS) count = MAX_UPLOAD_URLS;
 
@@ -20,7 +24,7 @@ export const getUploadUrls = (deps: Deps) => async (c: Context) => {
       const objectKey = `${userId}/${deps.rand.uuid()}`;
       return {
         objectKey,
-        url: await deps.blobs.presignPut(objectKey, deps.config.presignPutExpirySeconds),
+        url: await blobs.presignPut(objectKey, deps.config.presignPutExpirySeconds),
       };
     }),
   );

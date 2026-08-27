@@ -2,7 +2,7 @@
 
 import type { Deps } from '../../src/deps.ts';
 import { MemoryDb } from '../../src/adapters/memory/db.memory.ts';
-import { MemoryBlobs } from '../../src/adapters/memory/blobs.memory.ts';
+import { MemoryBlobs, MemoryBlobsResolver } from '../../src/adapters/memory/blobs.memory.ts';
 import { MemoryMail } from '../../src/adapters/memory/mail.memory.ts';
 import { RealRand, TestClock } from '../../src/adapters/memory/system.memory.ts';
 import { configFromEnv, type Config } from '../../src/config.ts';
@@ -31,9 +31,11 @@ export const makeWorld = async (
 ): Promise<TestWorld> => {
   await sodiumReady();
   const clock = new TestClock();
+  const blobs = new MemoryBlobs();
   const deps = {
     db: new MemoryDb(),
-    blobs: new MemoryBlobs(),
+    blobs,
+    blobsResolver: new MemoryBlobsResolver(blobs),
     mail: new MemoryMail(),
     clock,
     rand: new RealRand(),

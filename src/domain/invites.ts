@@ -35,6 +35,10 @@ export interface InviteRow {
    * today; stored so a future multi-home deployment can route without a
    * migration. Nothing reads it yet. */
   home: string;
+  /** Pre-signup pool assignment (H2, D55): copied onto the user row when the
+   * invite is consumed, so signup lands the user straight in their pool.
+   * Set via `make pool-attach EMAIL=... POOL=...` before the user signs up. */
+  storagePoolId?: string;
   createdAt: number;
   /** Set when a signup consumes the invite; the row is kept for audit. */
   consumedAt?: number;
@@ -60,20 +64,38 @@ export const hasUsableInvite = async (deps: InviteDeps, email: string): Promise<
 export const upsertInvite = async (
   deps: InviteDeps,
   email: string,
-  opts: { storageLimitBytes?: number; viewer?: boolean } = {},
+  opts: { storageLimitBytes?: number; viewer?: boolean; storagePoolId?: string } = {},
 ): Promise<InviteRow> => {
   const normalized = normalizeEmail(email);
   const existing = await getInvite(deps, normalized);
+  // A pool assignment made by `make pool-attach` survives a re-invite unless
+  // this upsert explicitly sets one (H2, D55).
+  const storagePoolId = opts.storagePoolId ?? (existing?.storagePoolId as string | undefined);
   const row: InviteRow = {
     ...keys.invite(normalized),
     email: normalized,
     ...(opts.storageLimitBytes !== undefined ? { storageLimitBytes: opts.storageLimitBytes } : {}),
     viewer: opts.viewer ?? false,
     home: 'local',
+    ...(storagePoolId ? { storagePoolId } : {}),
     createdAt: existing?.createdAt ?? deps.clock.nowMicros(),
   };
   await deps.db.put(row);
   return row;
+};
+
+/** Pre-signup pool assignment on an invite row (H2, D55); null clears it. */
+export const setInvitePool = async (
+  deps: InviteDeps,
+  email: string,
+  poolId: string | null,
+): Promise<InviteRow | null> => {
+  const normalized = normalizeEmail(email);
+  const invite = await getInvite(deps, normalized);
+  if (!invite) return null;
+  const key = keys.invite(normalized);
+  await deps.db.update(key.pk, key.sk, { storagePoolId: poolId ?? undefined });
+  return { ...invite, storagePoolId: poolId ?? undefined };
 };
 
 /** Delete an UNCONSUMED invite. Consumed rows are audit trail — refuse. */
@@ -98,12 +120,17 @@ export const revokeInvite = async (
 export const inviteConsumption = (
   deps: InviteDeps,
   invite: InviteRow,
-): { consumedRow: InviteRow; userAttrs: Pick<UserRow, 'storageLimitBytes' | 'viewer' | 'home'> } => ({
+): {
+  consumedRow: InviteRow;
+  userAttrs: Pick<UserRow, 'storageLimitBytes' | 'viewer' | 'home' | 'storagePoolId'>;
+} => ({
   consumedRow: { ...invite, consumedAt: deps.clock.nowMicros() },
   userAttrs: {
     ...(invite.storageLimitBytes !== undefined ? { storageLimitBytes: invite.storageLimitBytes } : {}),
     ...(invite.viewer ? { viewer: true } : {}),
     home: invite.home,
+    // Signup lands the user straight in their pool (H2, D55).
+    ...(invite.storagePoolId ? { storagePoolId: invite.storagePoolId } : {}),
   },
 });
 

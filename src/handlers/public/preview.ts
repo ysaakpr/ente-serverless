@@ -12,6 +12,8 @@ import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { publicAccess } from '../../middleware/publicAccess.ts';
 import { bumpDailyCeiling, getPublicLinkedFile } from '../../domain/publicLinks.ts';
+import { thumbPoolPin } from '../../domain/files.ts';
+import { blobsForPoolId } from '../../domain/storagePools.ts';
 import { ApiError, errBadRequestSentinel, SentinelError } from '../../lib/errors.ts';
 
 const signedThumbUrl = async (deps: Deps, c: Context): Promise<string> => {
@@ -20,7 +22,8 @@ const signedThumbUrl = async (deps: Deps, c: Context): Promise<string> => {
   const { link } = publicAccess(c);
   const file = await getPublicLinkedFile(deps, link, fileId);
   await bumpDailyCeiling(deps, link.tokenHash, 'downloads', deps.config.publicLinkDailyDownloadLimit);
-  return deps.blobs.presignGet(file.thumbnail.objectKey!, deps.config.presignPublicGetExpirySeconds);
+  const blobs = await blobsForPoolId(deps, thumbPoolPin(file)); // pinned pool (H2, D55)
+  return blobs.presignGet(file.thumbnail.objectKey!, deps.config.presignPublicGetExpirySeconds);
 };
 
 export const publicPreviewFile = (deps: Deps) => async (c: Context) => {

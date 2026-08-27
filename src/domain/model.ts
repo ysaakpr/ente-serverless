@@ -99,6 +99,16 @@ export const keys = {
   // and an invite is operator data, not a user secret. No gsi attributes
   // (the D48 rollback rule holds for every new row type).
   invite: (lowercasedEmail: string) => ({ pk: `INVITE#${lowercasedEmail}`, sk: 'META' }),
+
+  // --- BYO storage pools (Phase H2, D55). Ops-provisioned rows only — written
+  // by tools/storagePool.ts, read wherever blobs are resolved; no client route
+  // creates them. No gsi attributes (the D48 rollback rule holds), so `main`
+  // deployed against a table with pool rows behaves exactly as before —
+  // provided no user row carries storagePoolId yet (detach first).
+  /** Pool descriptor: bucket, region, credentials (encrypted), quota. */
+  storagePool: (poolId: string) => ({ pk: `POOL#${poolId}`, sk: 'META' }),
+  /** Shared usage counter, mirrored atomically with the per-user USAGE row. */
+  poolUsage: (poolId: string) => ({ pk: `POOL#${poolId}`, sk: 'USAGE' }),
 };
 
 /** sk prefixes for partition listings over the sharing rows. */

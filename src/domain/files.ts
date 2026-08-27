@@ -5,8 +5,10 @@
  */
 
 import type { Deps } from '../deps.ts';
+import type { Blobs } from '../ports/blobs.ts';
 import type { UserRow } from './users.ts';
 import { keys, gsi, padTime } from './model.ts';
+import { getPool, getPoolUsage, type PoolRow } from './storagePools.ts';
 import { getSharee } from './sharing.ts';
 import { ConditionFailedError } from '../ports/db.ts';
 import {
@@ -55,8 +57,25 @@ export interface FileRow {
   pubMagicMetadata?: MagicMetadata;
   info: { fileSize: number; thumbSize: number };
   updationTime: number;
+  /**
+   * Pool PIN (H2, D55): which pool the FILE object's bytes live in, stamped
+   * at commit time; absent = the central default bucket. Reads/purges resolve
+   * the bucket from the pin, never from the owner's current pool — so pool
+   * reassignment affects only NEW uploads. Top-level attributes never reach
+   * the wire (fileToDiffJson/echoFile pick fields explicitly).
+   */
+  storagePoolId?: string;
+  /** Thumbnail's pin, ONLY when it diverges from storagePoolId (a thumbnail
+   * replaced after the owner moved pools lands in the new pool while the
+   * original stays pinned). Resolve with thumbPoolPin(). */
+  thumbPoolId?: string;
   [attr: string]: unknown;
 }
+
+/** Pin resolution: which pool each object's bytes actually live in. */
+export const filePoolPin = (file: FileRow): string | undefined => file.storagePoolId;
+export const thumbPoolPin = (file: FileRow): string | undefined =>
+  file.thumbPoolId ?? file.storagePoolId;
 
 export interface LinkRow {
   pk: string;
@@ -123,6 +142,27 @@ export const getUsage = async (deps: Deps, userId: number): Promise<{ bytes: num
 };
 
 /**
+ * The user row + its pool row, loaded once per quota check (H1's seam, now
+ * carrying the H2 pool too). Callers that also mint or verify objects reuse
+ * this context to pick the right blobs client — no second GetItem. A user
+ * whose storagePoolId points at a MISSING pool row fails closed (5xx) rather
+ * than silently routing to the central bucket.
+ */
+export interface QuotaContext {
+  user: UserRow | null;
+  pool: PoolRow | null;
+}
+
+export const loadQuotaContext = async (deps: Deps, userId: number): Promise<QuotaContext> => {
+  const user = await deps.db.get<UserRow>(keys.user(userId).pk, 'META');
+  const poolId = user?.storagePoolId as string | undefined;
+  if (!poolId) return { user, pool: null };
+  const pool = await getPool(deps, poolId);
+  if (!pool) throw new Error(`user ${userId} is attached to unknown storage pool ${poolId}`);
+  return { user, pool };
+};
+
+/**
  * museum UsageCtrl.CanUploadFile: 426 when usage (+ size) exceeds the plan.
  * The limit is per-user since D54 — the user row's storageLimitBytes when set
  * (0 means ZERO: no uploads at all, deliberately unlike the 0-disables-it
@@ -132,28 +172,54 @@ export const getUsage = async (deps: Deps, userId: number): Promise<{ bytes: num
  * exceeded"). One extra GetItem per quota check, shared by every upload-url
  * mint and commit; the public collect path passes the LINK OWNER's id here,
  * so a viewer's or 0-byte owner's links can't collect either.
+ *
+ * Pool quota (H2, D55) — precedence, all surfacing as the SAME museum-shaped
+ * 426: viewer blocks first, then the per-user limit (a 0 override blocks
+ * before any pool math), then the pool's shared cap checked against the
+ * POOL#/USAGE counter (absent cap = unlimited pool). A DISABLED pool refuses
+ * new uploads here too; reads and purges still resolve through the pin.
+ * `poolAddBytes` lets update paths charge the pool only its NET delta when
+ * old and new bytes live in different pools; it defaults to `addBytes`.
  */
-export const assertQuota = async (deps: Deps, userId: number, addBytes: number | null): Promise<void> => {
-  const user = await deps.db.get<UserRow>(keys.user(userId).pk, 'META');
+export const assertQuota = async (
+  deps: Deps,
+  userId: number,
+  addBytes: number | null,
+  ctx?: QuotaContext,
+  poolAddBytes?: number | null,
+): Promise<QuotaContext> => {
+  ctx ??= await loadQuotaContext(deps, userId);
+  const { user, pool } = ctx;
   if (user?.viewer) throw errStorageLimitExceeded();
+  const over = (used: number, add: number | null, cap: number): boolean =>
+    add === null ? used >= cap : used + add > cap;
   const { bytes } = await getUsage(deps, userId);
   const limit = user?.storageLimitBytes ?? deps.config.freePlanStorageBytes;
-  if (addBytes === null) {
-    if (bytes >= limit) throw errStorageLimitExceeded();
-    return;
+  if (over(bytes, addBytes, limit)) throw errStorageLimitExceeded();
+  if (pool) {
+    if (pool.disabled) throw errStorageLimitExceeded();
+    if (pool.poolStorageLimitBytes !== undefined) {
+      const poolBytes = (await getPoolUsage(deps, pool.poolId)).bytes;
+      if (over(poolBytes, poolAddBytes === undefined ? addBytes : poolAddBytes, pool.poolStorageLimitBytes)) {
+        throw errStorageLimitExceeded();
+      }
+    }
   }
-  if (bytes + addBytes > limit) throw errStorageLimitExceeded();
+  return ctx;
 };
 
-/** HeadObject both objects in parallel; 503 OBJECT_SIZE_FETCH_FAILED when missing. */
+/** HeadObject both objects in parallel; 503 OBJECT_SIZE_FETCH_FAILED when
+ * missing. Since H2 the two objects can live in different buckets (update
+ * paths after a pool move), so each head rides its own Blobs client. */
 export const verifyObjects = async (
-  deps: Deps,
+  fileBlobs: Blobs,
+  thumbBlobs: Blobs,
   fileKey: string,
   thumbKey: string,
 ): Promise<{ fileSize: number; thumbSize: number }> => {
   const [fileHead, thumbHead] = await Promise.all([
-    deps.blobs.head(fileKey),
-    deps.blobs.head(thumbKey),
+    fileBlobs.head(fileKey),
+    thumbBlobs.head(thumbKey),
   ]);
   if (!fileHead || !thumbHead) {
     throw new ApiError('OBJECT_SIZE_FETCH_FAILED', 503);

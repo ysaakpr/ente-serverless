@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import type { Deps } from '../../src/deps.ts';
 import { DynamoDb } from '../../src/adapters/aws/db.dynamo.ts';
 import { S3Blobs } from '../../src/adapters/aws/blobs.s3.ts';
+import { S3BlobsResolver } from '../../src/adapters/aws/blobs.pool.ts';
 import { SesMail } from '../../src/adapters/aws/mail.ses.ts';
 import { RealRand, SystemClock } from '../../src/adapters/memory/system.memory.ts';
 import { configFromEnv } from '../../src/config.ts';
@@ -40,9 +41,11 @@ export const makeIntWorld = async (): Promise<IntWorld> => {
     hardcodedOttValue: '123456',
   };
   const clock = new SystemClock();
+  const blobs = new S3Blobs(config);
   const deps: Deps = {
     db: new DynamoDb(config),
-    blobs: new S3Blobs(config),
+    blobs,
+    blobsResolver: new S3BlobsResolver(config, blobs),
     mail: new SesMail(config),
     clock,
     rand: new RealRand(),

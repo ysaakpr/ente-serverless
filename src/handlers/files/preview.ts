@@ -6,14 +6,17 @@
 import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { getAccessibleFile } from '../../domain/files.ts';
+import { getAccessibleFile, thumbPoolPin } from '../../domain/files.ts';
+import { blobsForPoolId } from '../../domain/storagePools.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
 const signedThumbUrl = async (deps: Deps, c: Context): Promise<string> => {
   const fileId = Number.parseInt(c.req.param('fileID') ?? '', 10);
   if (!Number.isFinite(fileId)) throw errBadRequestSentinel();
   const file = await getAccessibleFile(deps, auth(c).userId, fileId);
-  return deps.blobs.presignGet(file.thumbnail.objectKey!, deps.config.presignGetExpirySeconds);
+  // The bucket comes from the thumbnail's PIN, never the caller's pool (H2, D55).
+  const blobs = await blobsForPoolId(deps, thumbPoolPin(file));
+  return blobs.presignGet(file.thumbnail.objectKey!, deps.config.presignGetExpirySeconds);
 };
 
 export const previewFile = (deps: Deps) => async (c: Context) => {

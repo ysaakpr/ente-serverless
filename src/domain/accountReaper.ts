@@ -14,10 +14,10 @@
 
 import type { Deps } from '../deps.ts';
 import { keys, gsi } from './model.ts';
-import { getFile, type LinkRow } from './files.ts';
+import { filePoolPin, getFile, thumbPoolPin, type LinkRow } from './files.ts';
 import { getCollection, revokeShareeAccess, type CollectionRow } from './collections.ts';
 import { disableLink, listSharedCollectionIds, removeAllSharees, removeSharee } from './sharing.ts';
-import { enqueueObjectDeletion } from './objectSweep.ts';
+import { enqueueObjectDeletion, type PurgeEntry } from './objectSweep.ts';
 
 /** SKs under USER#<id> that hold key material or auth secrets. */
 const SENSITIVE_USER_SKS = ['KEYS', 'SRP', '2FA', '2FASETUP'] as const;
@@ -58,8 +58,16 @@ export const reapUserData = async (deps: Deps, userId: number): Promise<void> =>
     const collections = await deps.db.query<CollectionRow>(gsi.userCollections(userId), {
       index: 'gsi2',
     });
-    const objectKeys: string[] = [];
+    const entries: PurgeEntry[] = [];
     const seen = new Set<number>();
+    // Pool usage is SHARED (H2, D55): a departing member's bytes must leave
+    // the pool counters or the household's cap stays inflated forever.
+    const poolDeltas = new Map<string, { bytes: number; fileCount: number }>();
+    const addPool = (pin: string | undefined, bytes: number, fileCount = 0) => {
+      if (!pin) return;
+      const cur = poolDeltas.get(pin) ?? { bytes: 0, fileCount: 0 };
+      poolDeltas.set(pin, { bytes: cur.bytes + bytes, fileCount: cur.fileCount + fileCount });
+    };
     for (const col of collections) {
       const links = await deps.db.query<LinkRow>(gsi.collectionDiff(col.collectionId), {
         index: 'gsi1',
@@ -70,12 +78,19 @@ export const reapUserData = async (deps: Deps, userId: number): Promise<void> =>
         seen.add(fileId);
         const file = await getFile(deps, fileId);
         if (!file || file.ownerID !== userId) continue;
-        for (const key of [file.file?.objectKey, file.thumbnail?.objectKey]) {
-          if (key) objectKeys.push(key);
-        }
+        if (file.file?.objectKey) entries.push({ objectKey: file.file.objectKey, poolId: filePoolPin(file) });
+        if (file.thumbnail?.objectKey) entries.push({ objectKey: file.thumbnail.objectKey, poolId: thumbPoolPin(file) });
+        addPool(filePoolPin(file), -(file.info?.fileSize ?? 0), -1);
+        addPool(thumbPoolPin(file), -(file.info?.thumbSize ?? 0));
       }
     }
-    await enqueueObjectDeletion(deps, objectKeys);
+    await enqueueObjectDeletion(deps, entries);
+    for (const [pin, deltas] of poolDeltas) {
+      await deps.db.addToCounters(keys.poolUsage(pin).pk, 'USAGE', {
+        bytes: deltas.bytes,
+        ...(deltas.fileCount ? { fileCount: deltas.fileCount } : {}),
+      });
+    }
   } catch (err) {
     // Leave the objects; a failed enumeration must not fail the deletion. The
     // tombstone stands, so nothing is reachable meanwhile.

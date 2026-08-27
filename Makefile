@@ -7,7 +7,8 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
-	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage
+	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage \
+	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable
 
 test:
 	npx vitest run test/unit
@@ -83,6 +84,58 @@ revoke-invite:
 set-storage:
 	@test -n "$(EMAIL)" -a -n "$(STORAGE_GB)" || { echo "usage: make set-storage EMAIL=... STORAGE_GB=<n|default>"; exit 1; }
 	@$(INVITE_TOOL) set-storage "$(EMAIL)" "$(STORAGE_GB)"
+
+# ---------------------------------------------------------------------------
+# BYO storage pools (Phase H2, D55) — operator tooling, never a client
+# surface. One pool = one S3 bucket shared by many users (a household);
+# object keys stay <userID>/<uuid>, and pool membership never grants access
+# to other members' photos. Env-driven exactly like tools/invite.ts.
+# pool-create runs a validation checklist (creds, HeadBucket, PUT/GET/DELETE
+# probe, tagging, multipart, public-access-block, CORS, abort-MPU lifecycle)
+# and REFUSES to onboard on hard failures. HASHING_KEY is needed by
+# pool-create with ACCESS_KEY (credential encryption) and by
+# pool-attach/pool-detach (hashed user lookup).
+#   make pool-create POOL=smith BUCKET=smith-photos REGION=eu-west-1 \
+#        ROLE_ARN=arn:aws:iam::123:role/ente-pool EXTERNAL_ID=$(openssl rand -hex 16)
+#   make pool-create POOL=smith BUCKET=... REGION=... ACCESS_KEY=... SECRET_KEY=... [ENDPOINT=...]
+#   make pool-attach EMAIL=alice@example.com POOL=smith   (user row, or invite row pre-signup)
+#   make pool-detach EMAIL=alice@example.com
+#   make pools
+#   make pool-set-quota POOL=smith STORAGE_GB=<n|unlimited>
+#   make pool-disable POOL=smith / make pool-enable POOL=smith
+# ---------------------------------------------------------------------------
+POOL_TOOL = node --experimental-transform-types tools/storagePool.ts
+
+pool-create:
+	@test -n "$(POOL)" -a -n "$(BUCKET)" -a -n "$(REGION)" || { \
+		echo "usage: make pool-create POOL=... BUCKET=... REGION=... (ROLE_ARN=... EXTERNAL_ID=... | ACCESS_KEY=... SECRET_KEY=... [ENDPOINT=...]) [STORAGE_GB=...]"; exit 1; }
+	@$(POOL_TOOL) create "$(POOL)" --bucket "$(BUCKET)" --region "$(REGION)" \
+		$(if $(ROLE_ARN),--role-arn "$(ROLE_ARN)") $(if $(EXTERNAL_ID),--external-id "$(EXTERNAL_ID)") \
+		$(if $(ACCESS_KEY),--access-key "$(ACCESS_KEY)") $(if $(SECRET_KEY),--secret-key "$(SECRET_KEY)") \
+		$(if $(ENDPOINT),--endpoint "$(ENDPOINT)") $(if $(STORAGE_GB),--storage-gb $(STORAGE_GB))
+
+pool-attach:
+	@test -n "$(EMAIL)" -a -n "$(POOL)" || { echo "usage: make pool-attach EMAIL=... POOL=..."; exit 1; }
+	@$(POOL_TOOL) attach "$(EMAIL)" "$(POOL)"
+
+pool-detach:
+	@test -n "$(EMAIL)" || { echo "usage: make pool-detach EMAIL=..."; exit 1; }
+	@$(POOL_TOOL) detach "$(EMAIL)"
+
+pools:
+	@$(POOL_TOOL) list
+
+pool-set-quota:
+	@test -n "$(POOL)" -a -n "$(STORAGE_GB)" || { echo "usage: make pool-set-quota POOL=... STORAGE_GB=<n|unlimited>"; exit 1; }
+	@$(POOL_TOOL) set-quota "$(POOL)" "$(STORAGE_GB)"
+
+pool-disable:
+	@test -n "$(POOL)" || { echo "usage: make pool-disable POOL=..."; exit 1; }
+	@$(POOL_TOOL) disable "$(POOL)"
+
+pool-enable:
+	@test -n "$(POOL)" || { echo "usage: make pool-enable POOL=..."; exit 1; }
+	@$(POOL_TOOL) enable "$(POOL)"
 
 oracle-up:
 	docker compose -f docker-compose.oracle.yml up -d --wait

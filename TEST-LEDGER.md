@@ -20,9 +20,10 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
 | invites.test.ts | [INVITES] [QUOTA] invite gating + per-user storage (D54) | H1 | 18 | 18 | ✅ |
 | join-link.test.ts | ? | ? | 4 | 4 | ✅ |
-| lifecycle.test.ts | infra guards | M7 | 37 | 37 | ✅ |
+| lifecycle.test.ts | infra guards | M7 | 39 | 39 | ✅ |
 | origin-lock.test.ts | origin lock (finding 4, D43) | SEC | 4 | 4 | ✅ |
 | ping.test.ts | [HEALTH] | M1 | 2 | 2 | ✅ |
+| pools.int.test.ts | ? | ? | 2 | 2 | ✅ |
 | presign-expiry.test.ts | presign expiry split (finding 5, D44) | SEC | 3 | 3 | ✅ |
 | presign-md5.test.ts | ? | ? | 5 | 5 | ✅ |
 | public-collect.test.ts | ? | ? | 5 | 5 | ✅ |
@@ -38,6 +39,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
 | srp-endpoints.test.ts | [AUTH-SRP] | M1 | 24 | 24 | ✅ |
 | srp-math.test.ts | [AUTH-SRP] | M1 | 5 | 5 | ✅ |
+| storage-pools.test.ts | ? | ? | 15 | 15 | ✅ |
 | stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 9 | 9 | ✅ |
 | subscription.test.ts | [BILLING] free-sub determinism (gate finding D30) | M5 | 7 | 7 | ✅ |
 | totp.test.ts | [AUTH-2FA] TOTP math (RFC 6238) | M5 | 11 | 11 | ✅ |
@@ -50,4 +52,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 | web.test.ts | infra guards: albums web hosting (D52) | P3-F | 20 | 20 | ✅ |
 
-**Total: 406/406 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 425/425 passing.** CI must fail if any implemented endpoint is below 100%.

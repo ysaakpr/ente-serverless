@@ -18,6 +18,7 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { publicAccess } from '../../middleware/publicAccess.ts';
 import { assertQuota } from '../../domain/files.ts';
+import { blobsForPool } from '../../domain/storagePools.ts';
 import {
   assertCollectEnabled,
   bumpDailyCeiling,
@@ -38,11 +39,14 @@ export const publicUploadUrl = (deps: Deps) => async (c: Context) => {
 
   if (body.contentLength <= 0) throw errBadRequestSentinel();
   if (body.contentLength > deps.config.maxFileSizeBytes) throw errBadRequestSentinel();
-  await assertQuota(deps, collection.ownerID, body.contentLength);
+  // Collected bytes land in the LINK OWNER's current pool, like any other
+  // owner-attributed upload (H2, D55); the commit stamps the pin as usual.
+  const ctx = await assertQuota(deps, collection.ownerID, body.contentLength);
+  const blobs = await blobsForPool(deps, ctx.pool);
   await bumpDailyCeiling(deps, link.tokenHash, 'uploads', deps.config.publicLinkDailyUploadLimit);
 
   const objectKey = `${collection.ownerID}/${deps.rand.uuid()}`;
-  const url = await deps.blobs.presignPut(
+  const url = await blobs.presignPut(
     objectKey,
     deps.config.presignPutExpirySeconds,
     body.contentMD5,

@@ -55,6 +55,18 @@ data "aws_iam_policy_document" "api" {
     resources = [var.objects_bucket_arn]
   }
 
+  # BYO storage pools (H2, D55): the execution role — shared by the API lambda
+  # AND the trash-purge worker — assumes each pool's bucket-access role.
+  # Resource "*" is deliberate: the real gate is each POOL role's trust policy
+  # plus its mandatory ExternalId — only a role that explicitly trusts THIS
+  # role (and whose ExternalId the pool row carries) can be assumed at all, so
+  # enumerating pool ARNs here would add churn, not security.
+  statement {
+    sid       = "PoolAssumeRole"
+    actions   = ["sts:AssumeRole"]
+    resources = ["*"]
+  }
+
   statement {
     sid       = "Mail"
     actions   = ["ses:SendEmail"]

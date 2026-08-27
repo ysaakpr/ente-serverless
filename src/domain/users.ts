@@ -26,6 +26,14 @@ export interface UserRow {
   viewer?: boolean;
   /** Federation seam, copied from the invite row ('local' today, D54). */
   home?: string;
+  /**
+   * BYO storage pool membership (H2, D55): NEW uploads mint/commit into this
+   * pool's bucket. Absent = the central default bucket. Purely a
+   * storage/billing routing attribute — NEVER consulted by authorization.
+   * Set via `make pool-attach` (or copied from the invite row at signup);
+   * existing files keep their pins when this changes.
+   */
+  storagePoolId?: string;
   [attr: string]: unknown;
 }
 

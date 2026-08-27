@@ -22,6 +22,8 @@ import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { publicAccess } from '../../middleware/publicAccess.ts';
 import { bumpDailyCeiling, getPublicLinkedFile } from '../../domain/publicLinks.ts';
+import { filePoolPin } from '../../domain/files.ts';
+import { blobsForPoolId } from '../../domain/storagePools.ts';
 import { ApiError, errBadRequestSentinel, errPermissionDenied, SentinelError } from '../../lib/errors.ts';
 
 const signedOriginalUrl = async (deps: Deps, c: Context): Promise<string> => {
@@ -31,7 +33,8 @@ const signedOriginalUrl = async (deps: Deps, c: Context): Promise<string> => {
   if (!link.enableDownload) throw errPermissionDenied(); // divergence: enforced server-side
   const file = await getPublicLinkedFile(deps, link, fileId);
   await bumpDailyCeiling(deps, link.tokenHash, 'downloads', deps.config.publicLinkDailyDownloadLimit);
-  return deps.blobs.presignGet(file.file.objectKey!, deps.config.presignPublicGetExpirySeconds);
+  const blobs = await blobsForPoolId(deps, filePoolPin(file)); // pinned pool (H2, D55)
+  return blobs.presignGet(file.file.objectKey!, deps.config.presignPublicGetExpirySeconds);
 };
 
 export const publicDownloadFile = (deps: Deps) => async (c: Context) => {

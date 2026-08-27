@@ -7,14 +7,17 @@
 import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { getAccessibleFile } from '../../domain/files.ts';
+import { filePoolPin, getAccessibleFile } from '../../domain/files.ts';
+import { blobsForPoolId } from '../../domain/storagePools.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
 const signedFileUrl = async (deps: Deps, c: Context): Promise<string> => {
   const fileId = Number.parseInt(c.req.param('fileID') ?? '', 10);
   if (!Number.isFinite(fileId)) throw errBadRequestSentinel();
   const file = await getAccessibleFile(deps, auth(c).userId, fileId);
-  return deps.blobs.presignGet(file.file.objectKey!, deps.config.presignGetExpirySeconds);
+  // The bucket comes from the file's PIN, never the caller's pool (H2, D55).
+  const blobs = await blobsForPoolId(deps, filePoolPin(file));
+  return blobs.presignGet(file.file.objectKey!, deps.config.presignGetExpirySeconds);
 };
 
 export const downloadFile = (deps: Deps) => async (c: Context) => {

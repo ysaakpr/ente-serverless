@@ -1246,6 +1246,103 @@ source says Y — source won).
     paged Scan filtered to INVITE# — the one operator-only full listing, not
     worth an index (D48 discipline).
 
+- **D55 [OPS 2026-08-27] Phase H2: BYO storage pools — user-group-owned S3
+  buckets, many users : one bucket, server/CLI-side only.** A pool is ONE
+  bucket (typically owned and paid for by a household — "me and my partner one
+  bucket, my brother and his partner another") shared by MULTIPLE users; users
+  map many-to-one onto pools via `storagePoolId` on the user row. Object keys
+  stay `<userID>/<uuid>`, so members keep their own prefixes inside the shared
+  bucket. Deliberately OFF-PARITY (museum's S3 config is global); HARD
+  CONSTRAINT honoured: zero client-visible changes — clients only ever see
+  presigned URLs, and with no pool rows the surface is byte-identical to
+  pre-H2, so **capture-diff must simply run without pool rows** (the default;
+  no harness change needed). Judgment calls:
+  - **Pools are INVISIBLE to authorization.** getAccessibleFile and
+    resolveCollectionAccess never consult pool state — locked by a grep-level
+    test over their extracted sources plus route probes (two members of one
+    pool, no share → 404/403 exactly as strangers; access opens only via a
+    normal share). The pool is a storage/billing grouping, nothing else.
+  - **Schema**: `POOL#<poolId>/META` (mode 'role'|'keys', bucket, region,
+    endpoint?, roleArn+externalId or encryptedAccessKey/encryptedSecretKey,
+    poolStorageLimitBytes?, createdAt, disabled?) + `POOL#<poolId>/USAGE`
+    counter row, mirrored atomically wherever the per-user USAGE row mutates
+    (commit transaction, update paths, thumbnail replace, trash purge,
+    account reaper). No gsi attributes — the D48 rollback rule holds;
+    rollback caveat: detach users before deploying `main`, since old code
+    ignores `storagePoolId` and would mint against the central bucket.
+  - **File-level pool PINNING**: the commit stamps `storagePoolId` on the
+    FILE row (the row every download/purge path already reads — resolution
+    costs no extra read); absent = central bucket. `thumbPoolId` exists ONLY
+    when a post-move thumbnail replacement lands the thumb in a different
+    pool than the original (updateThumbnail / updateFileAttributes re-pin
+    per object: replaced key → current pool, unchanged key → old pin).
+    Downloads, previews, file-data (derived data follows the FILE's pin),
+    public downloads, purge deletes and account-deletion cleanup all resolve
+    the bucket from the PIN — **pool reassignment therefore affects only NEW
+    uploads**; nothing is migrated and nothing strands.
+  - **Quota precedence**, all one museum-shaped 426: viewer blocks first,
+    then the per-user limit (D54; a 0 override blocks before any pool math),
+    then the pool's shared cap against the POOL usage counter (absent =
+    unlimited pool). A `disabled` pool 426s new mints/commits; reads and
+    purges still resolve. assertQuota now returns the loaded {user, pool}
+    context so every mint reuses the read (H1's one-GetItem discipline kept;
+    pool users pay +2 GetItems: pool META + pool USAGE).
+  - **Credential handling**: mode 'role' (PREFERRED) stores roleArn +
+    ExternalId — no long-lived secret at rest at all; ExternalId is MANDATORY
+    (putPool refuses without it) as the confused-deputy guard: the pool
+    role's trust policy + ExternalId is what stops anyone who learns the ARN
+    from pointing their own deployment at the bucket. Temp creds are cached
+    ~50 min (10-min refresh margin) and **presigns from a role pool are
+    clamped to the remaining session lifetime** — a SigV4 URL signed with
+    temporary credentials dies with the session whatever X-Amz-Expires says,
+    so role-pool PUT/GET URLs live ≤ ~1h instead of the config'd 24h/7d
+    (documented deviation; keys-mode pools keep the full expiries). Mode
+    'keys' (for S3-compatibles + LocalStack) secretbox-encrypts both values
+    with a key derived from HASHING_KEY (fixed context, same
+    derive-don't-reuse family as the D51 JWT secret) — NEVER plaintext at
+    rest, never logged, decrypted only into the in-process client cache. KMS
+    was considered and rejected: HASHING_KEY is already the deployment's
+    root secret (losing it orphans every account), so a KMS dependency adds
+    IAM surface and per-call cost without changing the trust model.
+  - **sts:AssumeRole on Resource "*"** in the execution role (shared by the
+    API lambda and the trash-purge worker): acceptable because assuming a
+    role ALSO requires that role's trust policy to name this principal (plus
+    the ExternalId) — enumerating pool ARNs in the policy would add churn,
+    not security. Guard-tested, including that both lambdas still share the
+    one role.
+  - **The household caveat** (stated, not solved): whoever holds the pool
+    bucket's credentials — the household member who owns the AWS account —
+    can LIST and DELETE the ciphertext out-of-band. That is an AVAILABILITY
+    lever, not a confidentiality one: bytes are end-to-end encrypted, and a
+    member's own prefix names reveal only object counts/sizes. Members who
+    don't hold bucket credentials have no path at all (the server never
+    discloses other members' keys). Same trust shape as any BYO-storage
+    arrangement; the operator should say so to households.
+  - **Quarantine behaviour**: the object sweep resolves blobs per queue row's
+    pinned pool; a pool that fails to resolve or whose delete errors
+    quarantines THAT pool's remaining rows for the run — logged and counted,
+    rows left intact for retry — while other pools and the central bucket
+    keep sweeping. One broken household bucket can never stall global GC or
+    crash the cron.
+  - **Ops CLI**: tools/storagePool.ts (`make pool-create/pool-attach/
+    pool-detach/pools/pool-set-quota/pool-disable/pool-enable`), env-driven
+    like tools/invite.ts. pool-create runs a validation checklist FIRST and
+    refuses to write on hard failures (creds/AssumeRole, HeadBucket,
+    PUT+GET+DELETE probe, PutObjectTagging, multipart create+abort, and an
+    explicitly-open public-access block); warns on missing PAB config
+    (S3-compatibles), missing browser-PUT CORS (D33), and a missing
+    abort-MPU lifecycle rule. pool-attach works on user rows AND unconsumed
+    invite rows (the H1 seam: signup copies `storagePoolId` onto the user
+    row; `make invite` re-runs preserve it). Listing is a paged Scan — the
+    same operator-only full-listing exception as invites (D48 discipline).
+  - **Role-mode validation caveat**: the CLI assumes the pool role with the
+    OPERATOR's ambient credentials, so the pool role's trust policy must
+    admit the operator as well as the Lambda execution role (same
+    ExternalId). LocalStack e2e uses mode 'keys' (LocalStack accepts the STS
+    API but has no real assumable identities); the AssumeRole path is locked
+    at unit level with a stubbed STS client (ExternalId sent, creds cached,
+    presign clamped).
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

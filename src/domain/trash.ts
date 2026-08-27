@@ -7,7 +7,7 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { MICROS_PER_DAY } from '../lib/time.ts';
-import { getFile, restampLink, type FileRow, type LinkRow } from './files.ts';
+import { filePoolPin, getFile, restampLink, thumbPoolPin, type FileRow, type LinkRow } from './files.ts';
 import { getCollection } from './collections.ts';
 import { enqueueObjectDeletion } from './objectSweep.ts';
 
@@ -132,13 +132,30 @@ export const permanentlyDelete = async (deps: Deps, userId: number, row: TrashRo
   if (!file) return;
   const bytes = (file.info.fileSize ?? 0) + (file.info.thumbSize ?? 0);
   await deps.db.addToCounters(keys.userUsage(userId).pk, 'USAGE', { bytes: -bytes, fileCount: -1 });
-  const objectKeys = [file.file.objectKey, file.thumbnail.objectKey].filter(
-    (k): k is string => !!k,
-  );
-  for (const key of objectKeys) {
-    await deps.db.delete(`OBJ#${key}`, 'META');
+  // Mirror onto the pool counters the bytes are PINNED to (H2, D55) — the
+  // file object and a replaced thumbnail can be pinned to different pools.
+  const filePin = filePoolPin(file);
+  const thumbPin = thumbPoolPin(file);
+  const poolDeltas = new Map<string, { bytes: number; fileCount: number }>();
+  if (filePin) poolDeltas.set(filePin, { bytes: -(file.info.fileSize ?? 0), fileCount: -1 });
+  if (thumbPin) {
+    const cur = poolDeltas.get(thumbPin) ?? { bytes: 0, fileCount: 0 };
+    poolDeltas.set(thumbPin, { ...cur, bytes: cur.bytes - (file.info.thumbSize ?? 0) });
   }
-  await enqueueObjectDeletion(deps, objectKeys);
+  for (const [pin, deltas] of poolDeltas) {
+    await deps.db.addToCounters(keys.poolUsage(pin).pk, 'USAGE', {
+      bytes: deltas.bytes,
+      ...(deltas.fileCount ? { fileCount: deltas.fileCount } : {}),
+    });
+  }
+  const entries = [
+    ...(file.file.objectKey ? [{ objectKey: file.file.objectKey, poolId: filePin }] : []),
+    ...(file.thumbnail.objectKey ? [{ objectKey: file.thumbnail.objectKey, poolId: thumbPin }] : []),
+  ];
+  for (const { objectKey } of entries) {
+    await deps.db.delete(`OBJ#${objectKey}`, 'META');
+  }
+  await enqueueObjectDeletion(deps, entries); // sweep deletes from the pinned pool
   await deps.db.delete(file.pk, file.sk);
 };
 

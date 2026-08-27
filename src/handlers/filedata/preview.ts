@@ -7,7 +7,7 @@
 import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { getFdRow, getOwnedFile, objectKey, upsertFdRow, type FdType } from '../../domain/fileData.ts';
+import { fileDataBlobs, getFdRow, getOwnedFile, objectKey, upsertFdRow, type FdType } from '../../domain/fileData.ts';
 import { badRequest, errNotFound } from '../../lib/errors.ts';
 
 const PREVIEW_TYPES = ['vid_preview', 'img_preview'];
@@ -28,7 +28,8 @@ export const previewUploadUrl = (deps: Deps) => async (c: Context) => {
     throw badRequest('invalid count, should be between 1 and 10000');
   }
   const { userId } = auth(c);
-  await getOwnedFile(deps, userId, fileId);
+  const file = await getOwnedFile(deps, userId, fileId);
+  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
 
   const objectID = `${type === 'vid_preview' ? 'pv' : 'pi'}_${deps.rand.uuid()}`;
   const key = objectKey(fileId, userId, type, objectID);
@@ -39,19 +40,20 @@ export const previewUploadUrl = (deps: Deps) => async (c: Context) => {
     await upsertFdRow(deps, userId, fileId, type, { objectID });
   }
   if (isMultiPart) {
-    const multipart = await deps.blobs.createMultipart(key, count, deps.config.presignPutExpirySeconds);
+    const multipart = await blobs.createMultipart(key, count, deps.config.presignPutExpirySeconds);
     return c.json({ objectID, partURLs: multipart.partUrls, completeURL: multipart.completeUrl });
   }
-  return c.json({ objectID, url: await deps.blobs.presignPut(key, deps.config.presignPutExpirySeconds) });
+  return c.json({ objectID, url: await blobs.presignPut(key, deps.config.presignPutExpirySeconds) });
 };
 
 export const previewUrl = (deps: Deps) => async (c: Context) => {
   const { fileId, type } = parse(c);
   const { userId } = auth(c);
-  await getOwnedFile(deps, userId, fileId);
+  const file = await getOwnedFile(deps, userId, fileId);
+  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
 
   const row = await getFdRow(deps, fileId, type);
   if (!row || row.isDeleted || !row.objectID) throw errNotFound();
   const key = objectKey(fileId, userId, type, row.objectID);
-  return c.json({ url: await deps.blobs.presignGet(key, deps.config.presignGetExpirySeconds) });
+  return c.json({ url: await blobs.presignGet(key, deps.config.presignGetExpirySeconds) });
 };

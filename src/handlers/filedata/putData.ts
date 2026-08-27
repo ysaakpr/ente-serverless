@@ -9,6 +9,7 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import {
+  fileDataBlobs,
   getOwnedFile,
   isValidObjectId,
   metadataKey,
@@ -35,10 +36,11 @@ export const putFileData = (deps: Deps) => async (c: Context) => {
     throw badRequest('encryptedData and decryptionHeader (only) are required for derived meta');
   }
   const { userId } = auth(c);
-  await getOwnedFile(deps, userId, body.fileID);
+  const file = await getOwnedFile(deps, userId, body.fileID);
+  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
 
   const key = metadataKey(body.fileID, userId, 'mldata');
-  const size = await writeMetadataObject(deps, key, {
+  const size = await writeMetadataObject(blobs, key, {
     v: body.version ?? 1,
     encryptedData: body.encryptedData,
     header: body.decryptionHeader,
@@ -64,16 +66,17 @@ export const putVideoData = (deps: Deps) => async (c: Context) => {
   // malformed objectID we probed (D41).
   if (!isValidObjectId(body.objectID)) throw errBadRequestSentinel();
   const { userId } = auth(c);
-  await getOwnedFile(deps, userId, body.fileID);
+  const file = await getOwnedFile(deps, userId, body.fileID);
+  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
 
   // The client uploaded the encrypted HLS video via preview-upload-url; verify it.
   const videoKey = objectKey(body.fileID, userId, 'vid_preview', body.objectID);
-  const head = await deps.blobs.head(videoKey);
+  const head = await blobs.head(videoKey);
   if (!head) throw new ApiError('OBJECT_SIZE_FETCH_FAILED', 503);
   if (head.contentLength !== body.objectSize) throw badRequest('mismatch in object size');
 
   const playlistSize = await writeMetadataObject(
-    deps,
+    blobs,
     metadataKey(body.fileID, userId, 'vid_preview', body.objectID),
     {
       v: body.version ?? 1,

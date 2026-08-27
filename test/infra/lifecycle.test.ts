@@ -362,6 +362,35 @@ describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
   });
 });
 
+/**
+ * BYO storage pools (H2, D55): the one infra change is sts:AssumeRole on the
+ * shared execution role (API lambda + trash-purge worker use the same role,
+ * asserted here so a future role split cannot silently drop the worker's
+ * ability to purge pool objects). Resource "*" is the documented decision —
+ * each pool role's trust policy + ExternalId is the real gate.
+ */
+describe('storage pool guards (H2, D55)', () => {
+  const iamTf = () => readTf('modules/compute/iam.tf');
+
+  it('the execution role can assume pool roles', () => {
+    const iam = iamTf();
+    const at = iam.indexOf('"PoolAssumeRole"');
+    expect(at, 'no PoolAssumeRole statement').toBeGreaterThan(-1);
+    const block = iam.slice(at, iam.indexOf('}', at));
+    expect(block).toContain('"sts:AssumeRole"');
+    expect(block).toMatch(/resources\s*=\s*\["\*"\]/);
+  });
+
+  it('both lambdas share the one role the statement lands on', () => {
+    // If this breaks, the trash-purge worker got its own role — it needs the
+    // PoolAssumeRole statement too (it deletes objects from pool buckets).
+    const compute = readTf('modules/compute/main.tf');
+    const roleRefs = compute.match(/role\s*=\s*aws_iam_role\.api\.arn/g) ?? [];
+    expect(roleRefs.length).toBeGreaterThanOrEqual(2);
+    expect(compute).not.toContain('resource "aws_iam_role" "trash_purge"');
+  });
+});
+
 describe('config/tofu default agreement (D11)', () => {
   it('free_plan_storage_bytes matches the config.ts default (10 TiB)', () => {
     const TEN_TIB = 10 * 1024 ** 4;

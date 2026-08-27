@@ -12,6 +12,7 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { publicAccess } from '../../middleware/publicAccess.ts';
 import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
+import { blobsForPool } from '../../domain/storagePools.ts';
 import {
   assertCollectEnabled,
   bumpDailyCeiling,
@@ -43,11 +44,13 @@ export const publicMultipartUploadUrl = (deps: Deps) => async (c: Context) => {
   const partCount = Math.ceil(body.contentLength / body.partLength);
   if (partCount > MAX_MULTIPART_PART_COUNT) throw errBadRequestSentinel();
   if (body.partMd5s.length !== partCount) throw errBadRequestSentinel();
-  await assertQuota(deps, collection.ownerID, null);
+  // Collect mints presign into the LINK OWNER's current pool (H2, D55).
+  const ctx = await assertQuota(deps, collection.ownerID, null);
+  const blobs = await blobsForPool(deps, ctx.pool);
   await bumpDailyCeiling(deps, link.tokenHash, 'uploads', deps.config.publicLinkDailyUploadLimit);
 
   const objectKey = `${collection.ownerID}/${deps.rand.uuid()}`;
-  const multipart = await deps.blobs.createMultipart(
+  const multipart = await blobs.createMultipart(
     objectKey,
     partCount,
     deps.config.presignPutExpirySeconds,
