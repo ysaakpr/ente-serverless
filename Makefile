@@ -227,9 +227,17 @@ ALBUMS_WEB_REPO = https://github.com/ente-io/ente
 # patch script injects basePath/assetPrefix = /albums into the sparse clone
 # before the build. Anchor-checked: a tag bump that changes the config's
 # shape fails the build loudly instead of exporting an unprefixed app.
+# Sparse set: web/ (the npm workspace) AND rust/ — the workspace's ente-wasm /
+# ente-wasm-core / ente-space-wasm packages wasm-pack-build crates that live at
+# rust/bindings/wasm/*, path-dependent on the rust/ cargo workspace, so the
+# whole rust/ tree must be present (requires rustup + wasm32-unknown-unknown +
+# wasm-pack on PATH). Stale/partial clones need no special handling: the
+# unconditional rm -rf below starts every run from a fresh clone, so a changed
+# sparse set or an earlier failed run can never leave dist/ente-web-src stale.
 build-web: require-profile
 	@command -v git >/dev/null || { echo "git is required"; exit 1; }
 	@command -v npm >/dev/null || { echo "npm is required (the ente web workspace pins npm 11.x — a very old npm may refuse)"; exit 1; }
+	@command -v cargo >/dev/null || { echo "cargo is required (rustup with the wasm32-unknown-unknown target — the workspace wasm-pack-builds rust/bindings/wasm/*)"; exit 1; }
 	@ORIGIN="$${ALBUMS_API_ORIGIN:-$$($(TF) output -raw server_url 2>/dev/null)}"; \
 	case "$$ORIGIN" in \
 		http*) ;; \
@@ -238,7 +246,7 @@ build-web: require-profile
 	echo "==> building ente albums $(ALBUMS_WEB_TAG) against $$ORIGIN"; \
 	rm -rf dist/ente-web-src dist/web-albums; \
 	git clone --depth 1 --branch $(ALBUMS_WEB_TAG) --filter=blob:none --sparse $(ALBUMS_WEB_REPO) dist/ente-web-src && \
-	git -C dist/ente-web-src sparse-checkout set web && \
+	git -C dist/ente-web-src sparse-checkout set web rust && \
 	node --experimental-transform-types scripts/patch-albums-basepath.ts \
 		dist/ente-web-src/web/apps/albums/next.config.js && \
 	cd dist/ente-web-src/web && npm ci && \
