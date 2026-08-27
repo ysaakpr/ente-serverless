@@ -17,6 +17,7 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import {
   ConditionFailedError,
+  MAX_TRANSACT_OPS,
   type Db,
   type Item,
   type QueryOptions,
@@ -222,6 +223,11 @@ export class DynamoDb implements Db {
   }
 
   async transactWrite(ops: TransactOp[]): Promise<void> {
+    if (ops.length > MAX_TRANSACT_OPS) {
+      throw new Error(
+        `transactWrite: ${ops.length} ops exceeds DynamoDB's TransactWriteItems limit of ${MAX_TRANSACT_OPS}`,
+      );
+    }
     const items = ops.map((op) => {
       if (op.kind === 'put') {
         return {

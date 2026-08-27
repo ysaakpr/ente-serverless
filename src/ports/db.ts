@@ -26,6 +26,9 @@ export interface QueryOptions {
 
 export type UpdatePatch = Record<string, unknown>;
 
+/** DynamoDB's TransactWriteItems ceiling; both adapters refuse larger batches. */
+export const MAX_TRANSACT_OPS = 100;
+
 export interface TransactOp {
   kind: 'put' | 'delete' | 'counter';
   item?: Item;
@@ -58,6 +61,8 @@ export interface Db {
     deltas: Record<string, number>,
     set?: Record<string, unknown>,
   ): Promise<Record<string, number>>;
+  /** Atomic all-or-nothing batch, at most MAX_TRANSACT_OPS ops (the DynamoDB
+   * TransactWriteItems limit — larger batches throw before touching the table). */
   transactWrite(ops: TransactOp[]): Promise<void>;
 }
 

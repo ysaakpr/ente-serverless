@@ -201,6 +201,34 @@ describe('M1 gate on LocalStack', () => {
 
     await world.deps.db.delete(pk, 'META');
   });
+
+  /**
+   * Phase A (PENDING-FEATURES-PLAN §4.7): the sharing dual-writes assume a
+   * failing condition rolls back EVERY op in the batch on real DynamoDB —
+   * MemoryDb proves the port contract, this proves the adapter honours it.
+   */
+  it('DynamoDB rolls back the whole transactWrite batch on a failed condition', async () => {
+    const ns = `int-${randomUUID()}`;
+    await world.deps.db.put({ pk: `COL#${ns}`, sk: 'SHAREE#1', role: 'VIEWER' });
+    await world.deps.db.put({ pk: `COL#${ns}`, sk: 'LINK', tokenHash: 'existing' });
+
+    await expect(
+      world.deps.db.transactWrite([
+        { kind: 'put', item: { pk: `COL#${ns}`, sk: 'SHAREE#2', role: 'VIEWER' } },
+        { kind: 'delete', key: { pk: `COL#${ns}`, sk: 'SHAREE#1' } },
+        // Condition failure: the LINK pointer above already exists.
+        { kind: 'put', ifNotExists: true, item: { pk: `COL#${ns}`, sk: 'LINK', tokenHash: 'x' } },
+      ]),
+    ).rejects.toBeInstanceOf(ConditionFailedError);
+
+    // Put rolled back, delete rolled back, loser's pointer never landed.
+    expect(await world.deps.db.get(`COL#${ns}`, 'SHAREE#2')).toBeNull();
+    expect((await world.deps.db.get(`COL#${ns}`, 'SHAREE#1'))!.role).toBe('VIEWER');
+    expect((await world.deps.db.get(`COL#${ns}`, 'LINK'))!.tokenHash).toBe('existing');
+
+    await world.deps.db.delete(`COL#${ns}`, 'SHAREE#1');
+    await world.deps.db.delete(`COL#${ns}`, 'LINK');
+  });
 });
 
 describe('M3 gate on LocalStack (real presigned HTTP)', () => {

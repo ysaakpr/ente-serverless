@@ -220,9 +220,11 @@ export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: 
 };
 
 /**
- * Download/preview authz (ObjectRepo.GetAccessibleObject): the caller owns
- * the file, or shares a collection with it. Trashed files remain readable by
- * the owner. 404 (sql.ErrNoRows path) when neither holds or the file is gone.
+ * Download/preview authz (ObjectRepo.GetAccessibleObject). Today: OWNER-ONLY
+ * — museum additionally grants access to members of a collection containing
+ * the file, and that sharee branch lands with the Phase B authz seam
+ * (PENDING-FEATURES-PLAN §2). Trashed files remain readable by the owner.
+ * 404 (sql.ErrNoRows path) for everyone else and for missing files.
  */
 export const getAccessibleFile = async (deps: Deps, userId: number, fileId: number): Promise<FileRow> => {
   const file = await getFile(deps, fileId);

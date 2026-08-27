@@ -738,6 +738,38 @@ source says Y — source won).
     distribution + web ACL to the FREE tier`), including that the target can
     never create a paid tier.
 
+- **D48 [SCHEMA 2026-08-27] Sharing/public-link lookups use explicit
+  reverse-lookup partitions (PENDING-FEATURES-PLAN §2 Option 2), NOT a new
+  `gsi4`.** Phase A schema foundation, decided before any sharing handler
+  exists so it is cut once. Three parts:
+  - **Reverse partitions over gsi4.** "Collections shared with me" is a dual
+    write: `COL#<id>/SHAREE#<userID>` + `USER#<userID>/SHARED#<colID>`, both
+    sides applied in one `transactWrite` (the port primitive already existed;
+    it now also refuses batches past DynamoDB's 100-item TransactWriteItems
+    ceiling, both adapters). "Token → collection" is its own PK
+    (`PUBTOKEN#<tokenHash>/META`, a plain GetItem) plus a `COL#<id>/LINK`
+    pointer so the owner finds the active link. A `gsi4` would have been
+    cleaner to query but costs an online backfill on the prod table, mirrored
+    memory-adapter + tofu changes, and the last cheap index — the dual-write
+    tax is paid instead, and *only* `src/domain/sharing.ts` may write the
+    pairs (no handler touches one side directly, so the sides cannot drift).
+    `USER#<id>/SHAREDTOMB#<colID>` is reserved for the Phase C per-user
+    unshare tombstone (deliberately NOT under the `SHARED#` prefix, so live
+    listings never see tombstones); nothing writes it yet.
+  - **Link tokens are hashed at rest** (sha256, the `tokenHash` discipline
+    session tokens already follow). Unlike session tokens there is no
+    list-sessions-style route that must return the plaintext, so only the
+    hash is stored; the plaintext exists once, in the create response, and a
+    disabled link is never resurrected — re-enabling mints a new token
+    (plan §4.3 margin against leaked URLs).
+  - **Rollback rule: new row types set NO gsi1/gsi2/gsi3 attributes.** The
+    GSIs are sparse, so sharee/link/tombstone rows are invisible to every
+    pre-sharing query path by construction — code deployed from `main`
+    against a table already containing Phase A rows behaves exactly as
+    today. Enforced by the "rollback rule" test in
+    `test/unit/sharing.test.ts`; the key shapes live in `src/domain/model.ts`
+    with the rule stated where the next row type will be added.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

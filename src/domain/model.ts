@@ -40,13 +40,52 @@ export const keys = {
   remoteStore: (userId: number, key: string) => ({ pk: `USER#${userId}`, sk: `STORE#${key}` }),
   /** Store-and-ignore push registration (one row per user). */
   pushToken: (userId: number) => ({ pk: `USER#${userId}`, sk: 'PUSHTOKEN' }),
+
+  // --- Sharing + public links (PENDING-FEATURES-PLAN §2 Phase A, D48) ---
+  // Rollback rule: none of these rows may set gsi1/gsi2/gsi3 attributes. The
+  // GSIs are sparse, so staying out of them keeps every pre-sharing query
+  // path blind to the new rows — old code deployed against a table containing
+  // them behaves exactly as before.
+  /** Participant row, collection side: who can see COL#<id>. */
+  collectionSharee: (collectionId: number, userId: number) => ({
+    pk: `COL#${collectionId}`,
+    sk: `SHAREE#${userId}`,
+  }),
+  /** Participant row, user side (dual-written): collections shared with me. */
+  userSharedCollection: (userId: number, collectionId: number) => ({
+    pk: `USER#${userId}`,
+    sk: `SHARED#${collectionId}`,
+  }),
+  /** Public link token → collection: a plain GetItem. tokenHash only — the
+   * plaintext token never lands at rest (same discipline as TOKEN# rows). */
+  publicLinkToken: (tokenHash: string) => ({ pk: `PUBTOKEN#${tokenHash}`, sk: 'META' }),
+  /** Per-collection pointer to its active link (holds the tokenHash). */
+  collectionLink: (collectionId: number) => ({ pk: `COL#${collectionId}`, sk: 'LINK' }),
+  /** Per-user unshare tombstone for the sharee's diff feed. Reserved in Phase
+   * A, written by nothing yet — feed semantics land in Phase C. The sk
+   * deliberately does NOT match the `SHARED#` prefix, so live listings never
+   * see tombstones. */
+  sharedTombstone: (userId: number, collectionId: number) => ({
+    pk: `USER#${userId}`,
+    sk: `SHAREDTOMB#${collectionId}`,
+  }),
+};
+
+/** sk prefixes for partition listings over the sharing rows. */
+export const skPrefixes = {
+  /** All sharees of one collection (COL#<id> partition). */
+  sharee: 'SHAREE#',
+  /** All collections shared with one user (USER#<id> partition). */
+  sharedWithUser: 'SHARED#',
 };
 
 // GSI partitions
 export const gsi = {
   /** gsi1: file membership + diff feed for one collection. */
   collectionDiff: (collectionId: number) => `COL#${collectionId}#DIFF`,
-  /** gsi2: all collections visible to a user, by updationTime. */
+  /** gsi2: collections OWNED by a user, by updationTime. Shared-with-me
+   * visibility is NOT here — it lives in the `SHARED#` reverse rows above,
+   * merged at query time (Phase C). */
   userCollections: (userId: number) => `USER#${userId}#COLS`,
   /** gsi3: tokens per user / trash diff per user. */
   userTokens: (userId: number) => `USER#${userId}#TOKENS`,
