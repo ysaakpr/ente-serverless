@@ -242,7 +242,10 @@ describe('add-files / remove-files / delete', () => {
     expect(foreign.status).toBe(403);
   });
 
-  it('remove-files v3 refuses removing own files (museum 400); owner checks hold', async () => {
+  it('remove-files v3: collection-owner-owned files stay 400 (museum isRemoveAllowed); non-members 403', async () => {
+    // Files owned by the collection owner are never removable via remove-files
+    // — for anyone, sharing or not (clients move or trash instead). The
+    // sharee-role directions live in sharing-authz.test.ts.
     const a = await createAlbum(world, account, 'a');
     const up = await uploadAndCommit(world, account, a, new Uint8Array(randomBytes(64)), new Uint8Array(randomBytes(16)));
     const res = await world.request('POST', '/collections/v3/remove-files', {
@@ -256,7 +259,7 @@ describe('add-files / remove-files / delete', () => {
       token: other.token,
       body: { collectionID: a, fileIDs: [up.fileId] },
     });
-    expect(foreign.status).toBe(403); // not their collection
+    expect(foreign.status).toBe(403); // not a member of the collection
   });
 
   it('delete v3: keepFiles=false trashes; keepFiles=true requires empty; specials undeletable', async () => {

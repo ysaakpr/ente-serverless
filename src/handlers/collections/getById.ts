@@ -8,7 +8,7 @@
 import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { collectionToJson, getOwnedCollection } from '../../domain/collections.ts';
+import { collectionToJson, resolveCollectionAccess } from '../../domain/collections.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
 export const getCollectionById = (deps: Deps) => async (c: Context) => {
@@ -16,6 +16,10 @@ export const getCollectionById = (deps: Deps) => async (c: Context) => {
   if (!Number.isFinite(collectionId)) throw errBadRequestSentinel();
   const { userId } = auth(c);
 
-  const row = await getOwnedCollection(deps, userId, collectionId, { includeDeleted: true });
-  return c.json({ collection: await collectionToJson(deps, row) });
+  // Any member may read — museum GetCollection (collections/collection.go)
+  // resolves access for OWNER, COLLABORATOR and VIEWER alike, deleted included.
+  const { collection } = await resolveCollectionAccess(deps, userId, collectionId, {
+    includeDeleted: true,
+  });
+  return c.json({ collection: await collectionToJson(deps, collection) });
 };

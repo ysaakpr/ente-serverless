@@ -6,6 +6,7 @@
 
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
+import { getSharee } from './sharing.ts';
 import { ConditionFailedError } from '../ports/db.ts';
 import {
   badRequest,
@@ -220,17 +221,30 @@ export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: 
 };
 
 /**
- * Download/preview authz (ObjectRepo.GetAccessibleObject). Today: OWNER-ONLY
- * — museum additionally grants access to members of a collection containing
- * the file, and that sharee branch lands with the Phase B authz seam
- * (PENDING-FEATURES-PLAN §2). Trashed files remain readable by the owner.
- * 404 (sql.ErrNoRows path) for everyone else and for missing files.
+ * Download/preview authz (ObjectRepo.GetAccessibleObjectWithDCs,
+ * pkg/repo/object.go): accessible to the file's owner, or to anyone who is
+ * owner or sharee of a collection that still LINKS the file (museum's SQL:
+ * live collection_files row joined to a live collection_shares row). Trashed
+ * files remain readable by the owner — their links are tombstoned, but the
+ * owner branch never consults links. Non-members and unknown ids both read
+ * as 404 (the sql.ErrNoRows path) — membership is never disclosed as 403.
  */
 export const getAccessibleFile = async (deps: Deps, userId: number, fileId: number): Promise<FileRow> => {
   const file = await getFile(deps, fileId);
   if (!file) throw errNotFound();
   if (file.ownerID === userId) return file;
-  throw errNotFound(); // sharing lands post-core; non-members read as not-found
+  // Sharee branch: the gsi3 FILE-LINKS reverse index lists every collection
+  // linking this file. Grant on the first live link whose collection the
+  // caller can see — sharee row first (the common case, one GetItem), then
+  // collection owner (a collaborator-owned file inside the owner's album).
+  const links = await deps.db.query<LinkRow>(`FILE-LINKS#${fileId}`, { index: 'gsi3' });
+  for (const link of links) {
+    if (link.isDeleted) continue;
+    if (await getSharee(deps, link.collectionID, userId)) return file;
+    const collection = await deps.db.get(keys.collection(link.collectionID).pk, 'META');
+    if (collection?.ownerID === userId) return file;
+  }
+  throw errNotFound();
 };
 
 /** museum VerifyFileOwnership: 400 when ids are unknown, 403 on foreign files. */

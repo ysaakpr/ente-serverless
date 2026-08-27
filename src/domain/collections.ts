@@ -7,6 +7,7 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { getUser } from './users.ts';
+import { getSharee, type ShareeRole } from './sharing.ts';
 import { ConditionFailedError } from '../ports/db.ts';
 import {
   errBadRequestSentinel,
@@ -73,19 +74,58 @@ export const putCollection = async (deps: Deps, row: CollectionRow): Promise<Col
 export const getCollection = async (deps: Deps, collectionId: number): Promise<CollectionRow | null> =>
   deps.db.get<CollectionRow>(keys.collection(collectionId).pk, 'META');
 
-/** Owner-verified fetch; 404 unknown, 403 foreign (museum verifyOwnership). */
+/** museum ente.CollectionParticipantRole (ente/access.go), minus ADMIN —
+ * nothing in this repo can mint an ADMIN row yet (D49). */
+export type CollectionRole = 'OWNER' | ShareeRole;
+
+export interface CollectionAccess {
+  collection: CollectionRow;
+  role: CollectionRole;
+}
+
+/**
+ * Role-aware access resolver — port of museum's access controller
+ * (pkg/controller/access/collection.go GetCollection), same check order:
+ * 404 unknown; `verifyOwner` short-circuits with 403 BEFORE the sharee
+ * lookup (museum's VerifyOwner branch — a sharee still reads 403 on
+ * owner-only routes); owner -> OWNER, else the sharee row's role (a single
+ * GetItem, never a listing), else denied; deleted reads as 404 unless
+ * `includeDeleted`. One divergence, deliberate: museum surfaces
+ * non-membership as 404 (sql.ErrNoRows from GetCollectionShareeRole through
+ * handler.go) — this throws 403 instead, matching the task contract and the
+ * pre-sharing owner-only behaviour; capture-gated, D49.
+ */
+export const resolveCollectionAccess = async (
+  deps: Deps,
+  userId: number,
+  collectionId: number,
+  opts: { includeDeleted?: boolean; verifyOwner?: boolean } = {},
+): Promise<CollectionAccess> => {
+  const collection = await getCollection(deps, collectionId);
+  if (!collection) throw errNotFound();
+  if (opts.verifyOwner && collection.ownerID !== userId) throw errPermissionDenied();
+  let role: CollectionRole;
+  if (collection.ownerID === userId) {
+    role = 'OWNER';
+  } else {
+    const sharee = await getSharee(deps, collectionId, userId);
+    if (!sharee) throw errPermissionDenied(); // museum: 404 via sql.ErrNoRows (D49)
+    role = sharee.role;
+  }
+  if (collection.isDeleted && !opts.includeDeleted) throw errNotFound();
+  return { collection, role };
+};
+
+/** Owner-verified fetch; 404 unknown, 403 foreign (museum VerifyOwner /
+ * verifyOwnership) — the thin wrapper owner-only handlers keep using. */
 export const getOwnedCollection = async (
   deps: Deps,
   userId: number,
   collectionId: number,
   opts: { includeDeleted?: boolean } = {},
-): Promise<CollectionRow> => {
-  const row = await getCollection(deps, collectionId);
-  if (!row) throw errNotFound();
-  if (row.ownerID !== userId) throw errPermissionDenied();
-  if (row.isDeleted && !opts.includeDeleted) throw errNotFound();
-  return row;
-};
+): Promise<CollectionRow> =>
+  (await resolveCollectionAccess(deps, userId, collectionId, { ...opts, verifyOwner: true }))
+    .collection;
 
 export const newCollectionRow = (
   deps: Deps,

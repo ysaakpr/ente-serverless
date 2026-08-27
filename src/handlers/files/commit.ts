@@ -58,6 +58,10 @@ export const commitSchema = z.object({
 type CommitBody = z.infer<typeof commitSchema>;
 
 export const createFile = async (deps: Deps, userId: number, body: CommitBody) => {
+  // Commit stays OWNER-ONLY even under sharing — museum file.go
+  // validateFileCreateOrUpdateReq: "Creating a file requires collection
+  // ownership, not shared access". A collaborator commits into a collection
+  // they own, then /collections/add-files it into the shared album (D49).
   const collection = await getOwnedCollection(deps, userId, body.collectionID);
 
   const sizes = await verifyObjects(deps, body.file.objectKey!, body.thumbnail.objectKey!);

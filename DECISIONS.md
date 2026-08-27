@@ -770,6 +770,59 @@ source says Y — source won).
     `test/unit/sharing.test.ts`; the key shapes live in `src/domain/model.ts`
     with the rule stated where the next row type will be added.
 
+- **D49 [AUTHZ 2026-08-27] Phase B authz seam: role-aware access resolution,
+  with museum re-verified from source where the plan's audit was wrong.**
+  `resolveCollectionAccess` (src/domain/collections.ts) ports museum's access
+  controller (pkg/controller/access/collection.go GetCollection) including its
+  check order and the `VerifyOwner` short-circuit; `getOwnedCollection` is now
+  a thin owner-requiring wrapper, so owner-only routes are byte-identical.
+  Judgment calls, each pinned against museum source fetched 2026-08-27
+  (ente-io/ente main — the pinned oracle image is frozen 2026-08-16 main and
+  the cited lines predate the freeze):
+  - **removeFilesV3's dead branch became museum's real matrix**
+    (file_action.go isRemoveAllowed): files owned by the COLLECTION OWNER are
+    never removable via this endpoint — 400 for everyone (owner included;
+    clients move or trash instead); past that gate the owner removes any
+    sharee-owned files, and a sharee removes only files they own (403
+    otherwise). Museum's ADMIN remove-suggestion flow is out of scope: no code
+    path here can mint an ADMIN participant row, so `CollectionRole` models
+    OWNER/COLLABORATOR/VIEWER only. The old test locking the unconditional 400
+    was rewritten in the same commit (plan §4.8).
+  - **/files/info did NOT get "filter-to-accessible".** The
+    PENDING-FEATURES-PLAN §1 audit claimed museum filters to accessible files;
+    museum source says otherwise — GetFileInfo (pkg/controller/file.go) gates
+    on FileRepo.VerifyFileOwner, pure strict ownership (400 unknown/partial,
+    403 foreign), sharing or not. Strict ownership stands unchanged;
+    capture-gated (a capture showing sharee access flips this).
+  - **File commit stays owner-only.** The plan expected collaborators to
+    commit into shared collections; museum's validateFileCreateOrUpdateReq
+    says "Creating a file requires collection ownership, not shared access"
+    (the check carries a "Warning: Do not remove" in pre-prune history). The
+    collaborator flow is commit-into-own-collection + /collections/add-files
+    (AddFiles allows Role.CanAdd() = OWNER|COLLABORATOR|ADMIN). Quota and
+    object-key attribution stay with the uploader — unchanged.
+  - **Non-members read 403, museum reads 404.** On role-resolved paths
+    (getById, diff v2, add-files, remove-files v3) museum surfaces
+    non-membership as sql.ErrNoRows from GetCollectionShareeRole → 404 via
+    handler.go's status mapping. This repo throws errPermissionDenied (403),
+    matching the pre-sharing owner-only behaviour and the existing locked
+    tests. Deliberate, capture-gated: if the capture-diff harness confirms
+    museum's 404, flip the resolver's non-member throw and the tests together.
+  - **Deleted-collection diffs still serve tombstones to the owner.** Museum
+    GetDiffV2 passes IncludeDeleted:false (deleted → 404); this repo keeps the
+    pre-Phase-B behaviour (includeDeleted:true) because the trash replay gate
+    diffs deleted albums to convergence. Capture-gated with the same rule.
+  - **getAccessibleFile's sharee branch** ports the accessible-object SQL
+    (pkg/repo/object.go GetAccessibleObjectWithDCs): owner, else any live
+    FILE-LINKS row whose collection the caller is sharee of (getSharee, one
+    GetItem) or owns. One simplification: museum's owner branch technically
+    requires a live collection_shares row with from_user_id = actor; this repo
+    grants the collection owner directly, so an owner who unshared everyone
+    keeps reading a collaborator's still-linked file where museum would 404 —
+    strictly more permissive for exactly the user the E2EE model already
+    trusts with the collection key. Non-members and unknown ids stay 404
+    (enumeration resistance preserved).
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

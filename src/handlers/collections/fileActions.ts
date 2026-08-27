@@ -2,22 +2,26 @@
  * POST /collections/add-files · /collections/move-files ·
  * /collections/restore-files · /collections/v3/remove-files (auth) —
  * src: pkg/controller/collections/file_action.go, semantics preserved:
- *  - add: owned collection + owned, untrashed files (FILE_IN_TRASH 409)
- *  - move: both collections owned, to != from, files owned, untrashed
- *  - restore: trash tombstone flips isRestored, link recreated with new keys
- *  - remove v3: removing files YOU own from YOUR collection is a 400
- *    ("can not remove files owned collection owner") — clients move instead.
+ *  - add: OWNER or COLLABORATOR (museum Role.CanAdd()) + files the CALLER
+ *    owns, untrashed (FILE_IN_TRASH 409)
+ *  - move: both collections owned (VerifyOwner), to != from, files owned
+ *  - restore: owned collection (VerifyOwner); tombstone flips isRestored
+ *  - remove v3: any member resolves, then isRemoveAllowed — files owned by
+ *    the collection owner are never removable this way (400, clients move or
+ *    trash instead); the owner removes any sharee-owned files; a sharee
+ *    removes only files they own (403 otherwise). Museum's ADMIN
+ *    remove-suggestion branch is out of scope (no ADMIN rows exist, D49).
  */
 
 import type { Context } from 'hono';
 import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { assertBatchSize, getOwnedCollection } from '../../domain/collections.ts';
-import { getFile, linkRow, restampLink, verifyFileOwnership, type LinkRow } from '../../domain/files.ts';
+import { assertBatchSize, getOwnedCollection, resolveCollectionAccess } from '../../domain/collections.ts';
+import { getFile, linkRow, restampLink, verifyFileOwnership, type FileRow, type LinkRow } from '../../domain/files.ts';
 import { getTrashRow, markRestored } from '../../domain/trash.ts';
 import { keys } from '../../domain/model.ts';
-import { ApiError, badRequest, errBadRequestSentinel } from '../../lib/errors.ts';
+import { ApiError, badRequest, errBadRequestSentinel, errPermissionDenied } from '../../lib/errors.ts';
 
 const fileItemSchema = z.object({
   id: z.number(),
@@ -72,7 +76,10 @@ export const addFiles = (deps: Deps) => async (c: Context) => {
   const body = addSchema.parse(await c.req.json());
   assertBatchSize(body.files.length);
   const { userId } = auth(c);
-  await getOwnedCollection(deps, userId, body.collectionID);
+  // museum AddFiles: any member resolves, then Role.CanAdd() — OWNER or
+  // COLLABORATOR; a collaborator adds files THEY OWN into the shared album.
+  const { role } = await resolveCollectionAccess(deps, userId, body.collectionID);
+  if (role !== 'OWNER' && role !== 'COLLABORATOR') throw errPermissionDenied();
   await verifyFileOwnership(deps, userId, body.files.map((f) => f.id));
   await assertNotTrashed(deps, userId, body.files.map((f) => f.id));
   for (const item of body.files) await upsertLink(deps, body.collectionID, item);
@@ -121,7 +128,7 @@ export const removeFilesV3 = (deps: Deps) => async (c: Context) => {
   const body = removeSchema.parse(await c.req.json());
   assertBatchSize(body.fileIDs.length);
   const { userId } = auth(c);
-  const collection = await getOwnedCollection(deps, userId, body.collectionID);
+  const { collection } = await resolveCollectionAccess(deps, userId, body.collectionID);
 
   // Filter to files actively in the collection (museum FilterActiveFileIDs).
   const active: number[] = [];
@@ -131,11 +138,21 @@ export const removeFilesV3 = (deps: Deps) => async (c: Context) => {
   }
   if (active.length === 0) return c.body(null, 200);
 
-  // Core scope = every file is owned by the collection owner, and museum
-  // rejects that case outright (clients must move or trash instead).
-  const owned = await Promise.all(active.map((id) => getFile(deps, id)));
-  if (owned.some((f) => f && f.ownerID === collection.ownerID)) {
-    throw badRequest('can not remove files owned collection owner, admins can perform remove suggestion');
+  // museum isRemoveAllowed (file_action.go): files owned by the collection
+  // owner are never removable via this endpoint (clients move or trash
+  // instead) — 400 for the owner themselves and for any sharee (the ADMIN
+  // remove-suggestion path is out of scope, D49). Past that gate the owner
+  // removes anything; a sharee removes only files they own.
+  const files = (await Promise.all(active.map((id) => getFile(deps, id)))).filter(
+    (f): f is FileRow => f !== null,
+  );
+  if (files.some((f) => f.ownerID === collection.ownerID)) {
+    throw userId === collection.ownerID
+      ? badRequest('can not remove files owned collection owner, admins can perform remove suggestion')
+      : badRequest('can not remove files owned by album owner');
+  }
+  if (userId !== collection.ownerID && files.some((f) => f.ownerID !== userId)) {
+    throw errPermissionDenied(); // 'can not remove files owned by others'
   }
   for (const id of active) {
     const link = await getLink(deps, body.collectionID, id);
