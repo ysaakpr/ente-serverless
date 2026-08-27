@@ -7,14 +7,14 @@
  * presigned URLs — and capture-diff runs with no pool rows (byte-identical).
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { signupAccount, type Account } from '../helpers/client.ts';
-import { createAlbum, encryptBlob, uploadAndCommit } from '../helpers/upload.ts';
+import { createAlbum, encryptBlob, uploadAndCommit, type UploadedFile } from '../helpers/upload.ts';
 import { createShareUrl, publicRequest } from '../helpers/publicClient.ts';
 import {
   decryptPoolSecret,
@@ -24,10 +24,16 @@ import {
   setPoolDisabled,
   setUserPool,
 } from '../../src/domain/storagePools.ts';
-import { getFile } from '../../src/domain/files.ts';
+import { getFile, thumbPoolPin } from '../../src/domain/files.ts';
+import { getFdRow } from '../../src/domain/fileData.ts';
 import { getUser } from '../../src/domain/users.ts';
 import { upsertInvite } from '../../src/domain/invites.ts';
-import { enqueueObjectDeletion, sweepDeletedObjects } from '../../src/domain/objectSweep.ts';
+import { keys } from '../../src/domain/model.ts';
+import {
+  enqueueObjectDeletion,
+  requeuePoolRows,
+  sweepDeletedObjects,
+} from '../../src/domain/objectSweep.ts';
 import { S3BlobsResolver } from '../../src/adapters/aws/blobs.pool.ts';
 import { S3Blobs } from '../../src/adapters/aws/blobs.s3.ts';
 import { b64 } from '../../src/lib/b64.ts';
@@ -156,6 +162,256 @@ describe('pool routing + file pinning', () => {
     const album = await createAlbum(world, kid);
     const up = await upload(kid, album);
     expect(await poolBucket('fam').head(up.fileObjectKey)).not.toBeNull();
+  });
+});
+
+/** Mint an upload URL as `account` (their CURRENT pool), upload `cipher`, and
+ * return the objectKey — the raw material for thumbnail/attribute updates. */
+const mintAndUpload = async (account: Account, cipher: Uint8Array): Promise<string> => {
+  const res = await world.request('GET', '/files/upload-urls?count=1', { token: account.token });
+  expect(res.status).toBe(200);
+  const { urls } = (await res.json()) as { urls: Array<{ objectKey: string; url: string }> };
+  await world.deps.blobs.uploadViaUrl(urls[0]!.url, cipher);
+  return urls[0]!.objectKey;
+};
+
+describe('thumb pin divergence into CENTRAL (D56): the sentinel', () => {
+  let alice: Account;
+  let album: number;
+  let up: UploadedFile;
+
+  /** Pool commit, then detach — the reviewer's stranding scenario. */
+  const pooledThenDetached = async (poolId: string) => {
+    await makePool(poolId);
+    alice = await signupAccount(world, `detach-${poolId}@b.c`);
+    await setUserPool(world.deps, alice.email, poolId);
+    album = await createAlbum(world, alice);
+    up = await upload(alice, album, 96, 48);
+    await setUserPool(world.deps, alice.email, null);
+  };
+
+  const assertCentralThumb = async (thumbKey: string, thumb: ReturnType<typeof encryptBlob>, poolId: string) => {
+    // the row says it explicitly: file stays pooled, thumb pinned CENTRAL
+    const row = (await getFile(world.deps, up.fileId))!;
+    expect(row.storagePoolId).toBe(poolId);
+    expect(row.thumbPoolId).toBe(''); // the sentinel — absence would resolve to the pool
+    expect(thumbPoolPin(row)).toBeUndefined();
+
+    // preview presigns the CENTRAL bucket (this was the silent 404)
+    const pv = await world.request('GET', `/files/preview/v2/${up.fileId}`, { token: alice.token });
+    expect(pv.status).toBe(200);
+    const { url } = (await pv.json()) as { url: string };
+    expect(url).not.toContain('pool=');
+    expect(Buffer.from(await world.deps.blobs.downloadViaUrl(url))).toEqual(Buffer.from(thumb.cipher));
+
+    // the pool counter dropped the old thumb bytes (only the file remains pooled)
+    expect((await getPoolUsage(world.deps, poolId)).bytes).toBe(up.file.cipher.length);
+
+    // delete sweeps the thumb from CENTRAL and the file from the pool (this was the leak)
+    await world.request('POST', '/files/trash', {
+      token: alice.token,
+      body: { items: [{ fileID: up.fileId, collectionID: album }] },
+    });
+    const del = await world.request('POST', '/trash/delete', {
+      token: alice.token,
+      body: { fileIDs: [up.fileId] },
+    });
+    expect(del.status).toBe(200);
+    await sweepDeletedObjects(world.deps);
+    expect(await world.deps.blobs.head(thumbKey)).toBeNull();
+    expect(await poolBucket(poolId).head(up.fileObjectKey)).toBeNull();
+    const usage = await getPoolUsage(world.deps, poolId);
+    expect(usage.bytes).toBe(0);
+    expect(usage.fileCount).toBe(0);
+  };
+
+  it('PUT /files/thumbnail after detach: replacement pins central, presigns central, sweeps central', async () => {
+    await pooledThenDetached('t1');
+    const thumb = encryptBlob(new Uint8Array(randomBytes(8)));
+    const thumbKey = await mintAndUpload(alice, thumb.cipher); // central mint post-detach
+    const res = await world.request('PUT', '/files/thumbnail', {
+      token: alice.token,
+      body: { fileID: up.fileId, thumbnail: { objectKey: thumbKey, decryptionHeader: thumb.decryptionHeader } },
+    });
+    expect(res.status).toBe(200);
+    expect(await world.deps.blobs.head(thumbKey)).not.toBeNull(); // bytes really are central
+    await assertCentralThumb(thumbKey, thumb, 't1');
+  });
+
+  it('updateFileAttributes after detach: unchanged file keeps its pin, replaced thumb pins central', async () => {
+    await pooledThenDetached('t2');
+    const thumb = encryptBlob(new Uint8Array(randomBytes(8)));
+    const thumbKey = await mintAndUpload(alice, thumb.cipher);
+    const res = await world.request('POST', '/files', {
+      token: alice.token,
+      body: {
+        id: up.fileId,
+        collectionID: album,
+        file: { objectKey: up.fileObjectKey, decryptionHeader: up.file.decryptionHeader },
+        thumbnail: { objectKey: thumbKey, decryptionHeader: thumb.decryptionHeader },
+        metadata: {},
+      },
+    });
+    expect(res.status).toBe(200);
+    await assertCentralThumb(thumbKey, thumb, 't2');
+  });
+
+  it('inverse stays correct: a CENTRAL file whose replacement thumb lands in a pool gets an explicit pool pin', async () => {
+    const bob = await signupAccount(world, 'central-then-pool@b.c');
+    const bobAlbum = await createAlbum(world, bob);
+    const bobUp = await upload(bob, bobAlbum, 96, 48); // central commit
+    await makePool('t3');
+    await setUserPool(world.deps, bob.email, 't3');
+
+    const thumb = encryptBlob(new Uint8Array(randomBytes(8)));
+    const thumbKey = await mintAndUpload(bob, thumb.cipher); // pool mint post-attach
+    const res = await world.request('PUT', '/files/thumbnail', {
+      token: bob.token,
+      body: { fileID: bobUp.fileId, thumbnail: { objectKey: thumbKey, decryptionHeader: thumb.decryptionHeader } },
+    });
+    expect(res.status).toBe(200);
+
+    const row = (await getFile(world.deps, bobUp.fileId))!;
+    expect(row.storagePoolId).toBeUndefined();
+    expect(row.thumbPoolId).toBe('t3');
+    expect(thumbPoolPin(row)).toBe('t3');
+    expect((await getPoolUsage(world.deps, 't3')).bytes).toBe(thumb.cipher.length);
+
+    const pv = await world.request('GET', `/files/preview/v2/${bobUp.fileId}`, { token: bob.token });
+    const { url } = (await pv.json()) as { url: string };
+    expect(url).toContain('pool=t3');
+
+    // and the delete path splits correctly: thumb from the pool, file from central
+    await world.request('POST', '/files/trash', {
+      token: bob.token,
+      body: { items: [{ fileID: bobUp.fileId, collectionID: bobAlbum }] },
+    });
+    await world.request('POST', '/trash/delete', { token: bob.token, body: { fileIDs: [bobUp.fileId] } });
+    await sweepDeletedObjects(world.deps);
+    expect(await poolBucket('t3').head(thumbKey)).toBeNull();
+    expect(await world.deps.blobs.head(bobUp.fileObjectKey)).toBeNull();
+    expect((await getPoolUsage(world.deps, 't3')).bytes).toBe(0);
+  });
+});
+
+describe('file-data write paths honour pool controls (D56)', () => {
+  let alice: Account;
+  let album: number;
+  let up: UploadedFile;
+
+  beforeEach(async () => {
+    await makePool('fd');
+    alice = await signupAccount(world, 'fd-pool@b.c');
+    await setUserPool(world.deps, alice.email, 'fd');
+    album = await createAlbum(world, alice);
+    up = await upload(alice, album);
+  });
+
+  it('disabled pool: preview mints + server-side writes 426 (museum shape); reads still serve', async () => {
+    // stand up a served vid_preview BEFORE disabling
+    const mintRes = await world.request(
+      'GET',
+      `/files/data/preview-upload-url?fileID=${up.fileId}&type=vid_preview`,
+      { token: alice.token },
+    );
+    expect(mintRes.status).toBe(200);
+    const { objectID, url } = (await mintRes.json()) as { objectID: string; url: string };
+    expect(url).toContain('pool=fd'); // file-data rides the FILE's pin
+    const videoBytes = new Uint8Array(randomBytes(512));
+    await world.deps.blobs.uploadViaUrl(url, videoBytes);
+    const playlist = b64(randomBytes(64));
+    const commit = await world.request('PUT', '/files/video-data', {
+      token: alice.token,
+      body: { fileID: up.fileId, objectID, objectSize: videoBytes.length, playlist, playlistHeader: b64(randomBytes(24)) },
+    });
+    expect(commit.status).toBe(200);
+
+    await setPoolDisabled(world.deps, 'fd', true);
+
+    // every WRITE path refuses with the same museum-shaped 426
+    const single = await world.request(
+      'GET',
+      `/files/data/preview-upload-url?fileID=${up.fileId}&type=vid_preview`,
+      { token: alice.token },
+    );
+    expect(single.status).toBe(426);
+    expect(await single.json()).toEqual({});
+    const multi = await world.request(
+      'GET',
+      `/files/data/preview-upload-url?fileID=${up.fileId}&type=vid_preview&isMultiPart=true&count=3`,
+      { token: alice.token },
+    );
+    expect(multi.status).toBe(426);
+    const mldata = await world.request('PUT', '/files/data', {
+      token: alice.token,
+      body: { fileID: up.fileId, type: 'mldata', encryptedData: b64(randomBytes(32)), decryptionHeader: b64(randomBytes(24)) },
+    });
+    expect(mldata.status).toBe(426);
+    const video = await world.request('PUT', '/files/video-data', {
+      token: alice.token,
+      body: { fileID: up.fileId, objectID, objectSize: videoBytes.length, playlist, playlistHeader: b64(randomBytes(24)) },
+    });
+    expect(video.status).toBe(426);
+
+    // READS keep resolving through the pin
+    const preview = await world.request(
+      'GET',
+      `/files/data/preview?fileID=${up.fileId}&type=vid_preview`,
+      { token: alice.token },
+    );
+    expect(preview.status).toBe(200);
+    const previewUrl = ((await preview.json()) as { url: string }).url;
+    expect(Buffer.from(await world.deps.blobs.downloadViaUrl(previewUrl))).toEqual(Buffer.from(videoBytes));
+    const fetchRes = await world.request('POST', '/files/data/fetch', {
+      token: alice.token,
+      body: { fileIDs: [up.fileId], type: 'vid_preview' },
+    });
+    expect(fetchRes.status).toBe(200);
+  });
+
+  it('the pool counter is charged where the size is KNOWN: mldata + video-data, net of replacement; img_preview mints stay uncharged', async () => {
+    const base = (await getPoolUsage(world.deps, 'fd')).bytes;
+
+    // mldata: the server writes the object, so it knows the size
+    const putMl = () =>
+      world.request('PUT', '/files/data', {
+        token: alice.token,
+        body: { fileID: up.fileId, type: 'mldata', encryptedData: b64(randomBytes(32)), decryptionHeader: b64(randomBytes(24)) },
+      });
+    expect((await putMl()).status).toBe(200);
+    const mlRow = (await getFdRow(world.deps, up.fileId, 'mldata'))!;
+    expect(mlRow.size).toBeGreaterThan(0);
+    expect((await getPoolUsage(world.deps, 'fd')).bytes).toBe(base + mlRow.size);
+    // a REPLACEMENT charges only the delta (same-size payload -> no change)
+    expect((await putMl()).status).toBe(200);
+    expect((await getPoolUsage(world.deps, 'fd')).bytes).toBe(base + mlRow.size);
+
+    // vid_preview: charged at the video-data COMMIT (where HeadObject verified the size)
+    const mintRes = await world.request(
+      'GET',
+      `/files/data/preview-upload-url?fileID=${up.fileId}&type=vid_preview`,
+      { token: alice.token },
+    );
+    const { objectID, url } = (await mintRes.json()) as { objectID: string; url: string };
+    const videoBytes = new Uint8Array(randomBytes(300));
+    await world.deps.blobs.uploadViaUrl(url, videoBytes);
+    const commit = await world.request('PUT', '/files/video-data', {
+      token: alice.token,
+      body: { fileID: up.fileId, objectID, objectSize: videoBytes.length, playlist: b64(randomBytes(64)), playlistHeader: b64(randomBytes(24)) },
+    });
+    expect(commit.status).toBe(200);
+    const vidRow = (await getFdRow(world.deps, up.fileId, 'vid_preview'))!;
+    expect((await getPoolUsage(world.deps, 'fd')).bytes).toBe(base + mlRow.size + vidRow.size);
+
+    // img_preview has NO commit step, so its mint stays uncharged (documented
+    // exemption, D56 — see the filedata reconciliation NEXT-TASKS item)
+    const img = await world.request(
+      'GET',
+      `/files/data/preview-upload-url?fileID=${up.fileId}&type=img_preview`,
+      { token: alice.token },
+    );
+    expect(img.status).toBe(200);
+    expect((await getPoolUsage(world.deps, 'fd')).bytes).toBe(base + mlRow.size + vidRow.size);
   });
 });
 
@@ -313,6 +569,107 @@ describe('purge + sweep against pinned pools', () => {
     expect(remaining.every((r) => r.poolId === 'ghost')).toBe(true);
   });
 
+  it('permanent delete is ONE transaction: the pool decrement rides with the row deletes and queue rows (D56)', async () => {
+    await makePool('tx');
+    const alice = await signupAccount(world, 'tx@b.c');
+    await setUserPool(world.deps, alice.email, 'tx');
+    const album = await createAlbum(world, alice);
+    const up = await upload(alice, album);
+
+    const calls: Array<Parameters<typeof world.deps.db.transactWrite>[0]> = [];
+    const orig = world.deps.db.transactWrite.bind(world.deps.db);
+    world.deps.db.transactWrite = async (ops) => {
+      calls.push(ops);
+      return orig(ops);
+    };
+    await world.request('POST', '/files/trash', {
+      token: alice.token,
+      body: { items: [{ fileID: up.fileId, collectionID: album }] },
+    });
+    const del = await world.request('POST', '/trash/delete', {
+      token: alice.token,
+      body: { fileIDs: [up.fileId] },
+    });
+    expect(del.status).toBe(200);
+
+    // crash-consistency by op-grouping: the ONE transact carrying the pool
+    // counter also carries the tombstone's companions — user counter, OBJ
+    // guards, queue rows and the file row itself.
+    const txn = calls.find((ops) =>
+      ops.some((op) => op.kind === 'counter' && op.key!.pk === keys.poolUsage('tx').pk),
+    );
+    expect(txn, 'no transact carried the pool counter').toBeDefined();
+    expect(txn!.some((op) => op.kind === 'counter' && op.key!.pk === keys.userUsage(alice.userId).pk)).toBe(true);
+    expect(txn!.some((op) => op.kind === 'delete' && op.key!.pk === keys.file(up.fileId).pk)).toBe(true);
+    expect(txn!.filter((op) => op.kind === 'put' && op.item!.pk === 'PURGEQ')).toHaveLength(2);
+    expect(txn!.filter((op) => op.kind === 'delete' && op.key!.pk.startsWith('OBJ#'))).toHaveLength(2);
+  });
+
+  it('account reaper: each pool decrement rides the same transact as its queue rows (D56)', async () => {
+    await makePool('rp');
+    const alice = await signupAccount(world, 'rp@b.c');
+    await setUserPool(world.deps, alice.email, 'rp');
+    const album = await createAlbum(world, alice);
+    await upload(alice, album);
+
+    const calls: Array<Parameters<typeof world.deps.db.transactWrite>[0]> = [];
+    const orig = world.deps.db.transactWrite.bind(world.deps.db);
+    world.deps.db.transactWrite = async (ops) => {
+      calls.push(ops);
+      return orig(ops);
+    };
+    const { reapUserData } = await import('../../src/domain/accountReaper.ts');
+    await reapUserData(world.deps, alice.userId);
+
+    const txn = calls.find((ops) =>
+      ops.some((op) => op.kind === 'counter' && op.key!.pk === keys.poolUsage('rp').pk),
+    );
+    expect(txn, 'no transact carried the pool counter').toBeDefined();
+    expect(txn!.filter((op) => op.kind === 'put' && op.item!.pk === 'PURGEQ')).toHaveLength(2);
+    expect((await getPoolUsage(world.deps, 'rp')).bytes).toBe(0);
+  });
+
+  it('pool-requeue drains quarantined rows: re-pinned to central they sweep; other pools\' rows untouched (D56)', async () => {
+    await world.deps.blobs.put('1/ghost-obj', Buffer.from('x'));
+    await enqueueObjectDeletion(world.deps, [
+      { objectKey: '1/ghost-obj', poolId: 'ghost' },
+      { objectKey: '1/other-obj', poolId: 'other-ghost' },
+    ]);
+    expect(await sweepDeletedObjects(world.deps)).toBe(0); // both pools unresolvable -> quarantined
+
+    // operator asserts the ghost bytes actually live centrally and re-pins
+    expect(await requeuePoolRows(world.deps, 'ghost', null)).toBe(1);
+    expect(await sweepDeletedObjects(world.deps)).toBe(1);
+    expect(await world.deps.blobs.head('1/ghost-obj')).toBeNull();
+
+    const remaining = world.deps.db.dump().filter((r) => r.pk === 'PURGEQ');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.poolId).toBe('other-ghost');
+  });
+
+  it('default-bucket delete failures are LOGGED with the key and the row retried — no more silent swallowing (D56)', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await enqueueObjectDeletion(world.deps, [{ objectKey: '1/stuck-obj' }]);
+      const origDelete = world.deps.blobs.delete.bind(world.deps.blobs);
+      world.deps.blobs.delete = async () => {
+        throw new Error('boom');
+      };
+      expect(await sweepDeletedObjects(world.deps)).toBe(0);
+      world.deps.blobs.delete = origDelete;
+
+      expect(
+        spy.mock.calls.some((args) => String(args[0]).includes('1/stuck-obj')),
+        'no console.error naming the stuck key',
+      ).toBe(true);
+      // row intact for the next run — and it drains once the bucket recovers
+      expect(world.deps.db.dump().filter((r) => r.pk === 'PURGEQ')).toHaveLength(1);
+      expect(await sweepDeletedObjects(world.deps)).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('account deletion enqueues pinned deletes and returns the bytes to the pool counter', async () => {
     await makePool('bye');
     const alice = await signupAccount(world, 'bye@b.c');
@@ -447,6 +804,44 @@ describe('credentials at rest + role mode', () => {
     expect(calls[0]!.ExternalId).toBe('the-external-id');
     expect(calls[0]!.RoleArn).toBe('arn:aws:iam::123456789012:role/ente-pool');
   });
+
+  it('concurrent presigns after idle share ONE AssumeRole — no STS thundering herd (D56)', async () => {
+    let stsCalls = 0;
+    const slowSts = {
+      send: async () => {
+        stsCalls += 1;
+        // yield long enough that all callers arrive while the refresh is in flight
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          Credentials: {
+            AccessKeyId: 'ASIASTUB',
+            SecretAccessKey: 'stub-secret',
+            SessionToken: 'stub-token',
+            Expiration: new Date(Date.now() + 3600 * 1000),
+          },
+        };
+      },
+    };
+    const config = world.deps.config;
+    const resolver = new S3BlobsResolver(config, new S3Blobs(config), slowSts as never);
+    const blobs = await resolver.forPool({
+      poolId: 'herd-pool',
+      mode: 'role',
+      bucket: 'herd-bucket',
+      region: 'us-east-1',
+      roleArn: 'arn:aws:iam::123456789012:role/ente-pool-herd',
+      externalId: 'the-external-id',
+    });
+
+    const urls = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => blobs.presignPut(`1/obj-${i}`, 7 * 24 * 3600)),
+    );
+    expect(stsCalls).toBe(1);
+    // and every one of them clamped against the session it signed with
+    for (const url of urls) {
+      expect(Number(new URL(url).searchParams.get('X-Amz-Expires'))).toBeLessThanOrEqual(3600);
+    }
+  });
 });
 
 describe('pool-create CLI secret passing (H3): POOL_ACCESS_KEY/POOL_SECRET_KEY env form', () => {
@@ -481,5 +876,22 @@ describe('pool-create CLI secret passing (H3): POOL_ACCESS_KEY/POOL_SECRET_KEY e
     const res = runCli(createArgs, {});
     expect(res.status).toBe(2);
     expect(res.stderr).toContain('usage:');
+  });
+
+  it('role mode REFUSES a ROLE_ARN outside the ente-pool-* naming convention (D56)', () => {
+    // The execution role's sts:AssumeRole is scoped to role/ente-pool-*; a
+    // differently-named role would onboard fine (the CLI validates with the
+    // OPERATOR's creds) and then fail every server-side presign.
+    const res = runCli(
+      [
+        'create', 'rolepool', '--bucket', 'b', '--region', 'us-east-1',
+        '--role-arn', 'arn:aws:iam::123456789012:role/household-bucket-access',
+        '--external-id', 'x', '--skip-validation',
+      ],
+      {},
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('ente-pool-');
+    expect(res.stderr).toContain('naming convention');
   });
 });

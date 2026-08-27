@@ -66,16 +66,44 @@ export interface FileRow {
    */
   storagePoolId?: string;
   /** Thumbnail's pin, ONLY when it diverges from storagePoolId (a thumbnail
-   * replaced after the owner moved pools lands in the new pool while the
-   * original stays pinned). Resolve with thumbPoolPin(). */
+   * replaced after the owner moved pools lands wherever the owner's CURRENT
+   * pool is while the original stays pinned). '' is the CENTRAL_THUMB_PIN
+   * sentinel — "the central bucket" — needed because plain absence means
+   * "same as storagePoolId", which cannot express a detached owner's
+   * replacement thumb landing central while the original stays pooled (D56).
+   * Resolve with thumbPoolPin(); re-stamp with restampThumbPin(). */
   thumbPoolId?: string;
   [attr: string]: unknown;
 }
 
+/** thumbPoolId sentinel: the thumb diverged from the file pin INTO the
+ * central bucket (D56). Absent still means "follows storagePoolId". */
+export const CENTRAL_THUMB_PIN = '';
+
 /** Pin resolution: which pool each object's bytes actually live in. */
 export const filePoolPin = (file: FileRow): string | undefined => file.storagePoolId;
-export const thumbPoolPin = (file: FileRow): string | undefined =>
-  file.thumbPoolId ?? file.storagePoolId;
+export const thumbPoolPin = (file: FileRow): string | undefined => {
+  if (file.thumbPoolId === undefined) return file.storagePoolId;
+  return file.thumbPoolId === CENTRAL_THUMB_PIN ? undefined : file.thumbPoolId;
+};
+
+/**
+ * Re-stamp a row's thumb pin from the RESOLVED pins (undefined = central):
+ * absent when thumb and file agree (thumbPoolPin falls back), the pool id when
+ * the thumb diverged into a pool, and the CENTRAL_THUMB_PIN sentinel when it
+ * diverged into the central bucket. Shared by BOTH re-stamp sites
+ * (updateThumbnail / updateFileAttributes) so they cannot drift (D56).
+ */
+export const restampThumbPin = (
+  row: FileRow,
+  filePin: string | undefined,
+  thumbPin: string | undefined,
+): void => {
+  delete row.thumbPoolId;
+  if ((thumbPin ?? CENTRAL_THUMB_PIN) !== (filePin ?? CENTRAL_THUMB_PIN)) {
+    row.thumbPoolId = thumbPin ?? CENTRAL_THUMB_PIN;
+  }
+};
 
 export interface LinkRow {
   pk: string;

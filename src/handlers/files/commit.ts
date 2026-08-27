@@ -18,6 +18,7 @@ import {
   loadQuotaContext,
   objectGuardKey,
   resolveDuplicateCommit,
+  restampThumbPin,
   thumbPoolPin,
   validateCommitShape,
   verifyObjects,
@@ -250,11 +251,12 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
     info: { fileSize: sizes.fileSize, thumbSize: sizes.thumbSize },
     updationTime,
   };
-  // Re-stamp the pins; delete rather than write undefined (put replaces whole items).
+  // Re-stamp the pins; delete rather than write undefined (put replaces whole
+  // items). The thumb pin uses the shared helper: a thumb diverging into the
+  // CENTRAL bucket needs the explicit sentinel, not absence (D56).
   delete updatedItem.storagePoolId;
-  delete updatedItem.thumbPoolId;
   if (newFilePin) updatedItem.storagePoolId = newFilePin;
-  if (newThumbPin && newThumbPin !== newFilePin) updatedItem.thumbPoolId = newThumbPin;
+  restampThumbPin(updatedItem, newFilePin, newThumbPin);
   ops.push(
     { kind: 'put', item: updatedItem },
     { kind: 'put', item: { ...objectGuardKey(body.file.objectKey!), fileId: body.id, type: 'file' } },

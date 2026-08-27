@@ -55,16 +55,20 @@ data "aws_iam_policy_document" "api" {
     resources = [var.objects_bucket_arn]
   }
 
-  # BYO storage pools (H2, D55): the execution role — shared by the API lambda
-  # AND the trash-purge worker — assumes each pool's bucket-access role.
-  # Resource "*" is deliberate: the real gate is each POOL role's trust policy
-  # plus its mandatory ExternalId — only a role that explicitly trusts THIS
-  # role (and whose ExternalId the pool row carries) can be assumed at all, so
-  # enumerating pool ARNs here would add churn, not security.
+  # BYO storage pools (H2, D55; scoped D56): the execution role — shared by
+  # the API lambda AND the trash-purge worker — assumes each pool's
+  # bucket-access role. Scoped to the ente-pool-* NAMING CONVENTION instead of
+  # "*": each pool role's trust policy + mandatory ExternalId remains the real
+  # gate, but a pool role whose trust policy names the ACCOUNT ROOT (a common
+  # operator shortcut) is assumable by ANY principal in that account holding
+  # sts:AssumeRole on "*" — the name scope keeps this deployment's reach to
+  # roles that opted into the convention, without the per-pool ARN churn that
+  # made enumeration unattractive. pool-create refuses role ARNs outside the
+  # convention (tools/storagePool.ts).
   statement {
     sid       = "PoolAssumeRole"
     actions   = ["sts:AssumeRole"]
-    resources = ["*"]
+    resources = ["arn:aws:iam::*:role/ente-pool-*"]
   }
 
   statement {

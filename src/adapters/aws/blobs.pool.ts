@@ -71,9 +71,13 @@ export class S3BlobsResolver implements BlobsResolver {
   private roleBlobs(pool: PoolDescriptor): Blobs {
     let client: S3Client | undefined;
     let expiresAtMs = 0;
+    /** In-flight refresh (D56): concurrent callers arriving after an idle
+     * spell share ONE AssumeRole instead of thundering-herding STS — and each
+     * of them then clamps against the session it actually signs with, since
+     * expiresAtMs is stamped before the shared promise resolves. */
+    let refreshing: Promise<S3Client> | undefined;
 
-    const getClient = async (): Promise<S3Client> => {
-      if (client && expiresAtMs - Date.now() > REFRESH_MARGIN_SECONDS * 1000) return client;
+    const refresh = async (): Promise<S3Client> => {
       const res = await (this.sts ?? getStsClient(this.config)).send(
         new AssumeRoleCommand({
           RoleArn: pool.roleArn!,
@@ -98,6 +102,16 @@ export class S3BlobsResolver implements BlobsResolver {
         },
       });
       return client;
+    };
+
+    const getClient = async (): Promise<S3Client> => {
+      if (client && expiresAtMs - Date.now() > REFRESH_MARGIN_SECONDS * 1000) return client;
+      // A failed refresh clears the slot so the NEXT call retries rather than
+      // pinning every future presign to one rejected promise.
+      refreshing ??= refresh().finally(() => {
+        refreshing = undefined;
+      });
+      return refreshing;
     };
 
     const maxPresignExpirySeconds = (): number =>

@@ -14,6 +14,7 @@
  *   node --experimental-transform-types tools/storagePool.ts set-quota <poolId> <gb|unlimited>
  *   node --experimental-transform-types tools/storagePool.ts disable <poolId>
  *   node --experimental-transform-types tools/storagePool.ts enable <poolId>
+ *   node --experimental-transform-types tools/storagePool.ts requeue <poolId> [--to <poolId|central>]
  *
  * Env-driven like tools/invite.ts: TABLE_NAME, AWS_REGION (+ credentials/
  * profile for prod), AWS_ENDPOINT_URL for LocalStack. HASHING_KEY is required
@@ -62,6 +63,7 @@ import { getDocClient } from '../src/adapters/aws/clients.ts';
 import { SystemClock } from '../src/adapters/memory/system.memory.ts';
 import { sodiumReady } from '../src/domain/tokens.ts';
 import { setInvitePool, getInvite } from '../src/domain/invites.ts';
+import { requeuePoolRows } from '../src/domain/objectSweep.ts';
 import {
   getPool,
   getPoolUsage,
@@ -87,6 +89,7 @@ const usage = (): never => {
       '  list',
       '  set-quota <poolId> <gb|unlimited>',
       '  disable <poolId> | enable <poolId>',
+      '  requeue <poolId> [--to <poolId|central>]   (drain a dead pool\'s quarantined sweep rows; default central)',
     ].join('\n'),
   );
   process.exit(2);
@@ -405,6 +408,19 @@ switch (command) {
       console.error('role mode REQUIRES --external-id — it is the confused-deputy guard (D55), not an option');
       process.exit(2);
     }
+    // The Lambda execution role's AssumeRole permission is SCOPED to the
+    // ente-pool-* naming convention (D56, modules/compute/iam.tf) — a role
+    // named anything else onboards fine here (the CLI uses YOUR credentials)
+    // and then every server-side presign/purge fails with AccessDenied.
+    if (mode === 'role' && !/^arn:aws:iam::\d{12}:role\/ente-pool-/.test(roleArn!)) {
+      console.error(
+        `role-mode pool roles must follow the ente-pool-* naming convention: ` +
+          `got ${JSON.stringify(roleArn)}, want arn:aws:iam::<account>:role/ente-pool-<name> ` +
+          `(e.g. role/ente-pool-${poolId}). The server's sts:AssumeRole permission is scoped to ` +
+          `arn:aws:iam::*:role/ente-pool-* (D56) — rename the role in the bucket owner's account and re-run.`,
+      );
+      process.exit(2);
+    }
     if (mode === 'keys' && !secretKey) usage();
     const storageGb = flags.get('storage-gb');
     const poolStorageLimitBytes =
@@ -528,6 +544,40 @@ switch (command) {
       bytes === null
         ? `pool '${poolId}': quota cleared — unlimited`
         : `pool '${poolId}': quota set to ${fmtBytes(bytes)}`,
+    );
+    break;
+  }
+  case 'requeue': {
+    // Quarantine drain (D56): the sweep quarantines queue rows whose pool is
+    // deleted/unresolvable. This re-pins them so they can drain — onto another
+    // pool, or the central bucket (the default).
+    const poolId = args[0];
+    if (!poolId || poolId.startsWith('--')) usage();
+    let target: string | null = null;
+    for (let i = 1; i < args.length; i++) {
+      if (args[i] === '--to' && i + 1 < args.length) {
+        const to = args[++i]!;
+        target = to === 'central' ? null : to;
+      } else usage();
+    }
+    if (target !== null) {
+      const pool = await getPool({ db }, target);
+      if (!pool) {
+        console.error(`no pool '${target}' to requeue onto — run make pool-create first, or use TO=central`);
+        process.exit(1);
+      }
+    }
+    const targetName = target === null ? 'the CENTRAL bucket' : `pool '${target}'`;
+    const moved = await requeuePoolRows({ db }, poolId!, target);
+    if (moved === 0) {
+      console.log(`no queued deletions pinned to pool '${poolId}' — nothing to requeue`);
+      break;
+    }
+    console.log(`re-pinned ${moved} queued deletion(s) from pool '${poolId}' to ${targetName}.`);
+    console.log(
+      `NOTE: by requeueing you ASSERT those objects' bytes actually live in ${targetName} — ` +
+        `the next sweep issues DeleteObject against that bucket. If the bytes really live ` +
+        `elsewhere, the deletes no-op there and the real bytes stay orphaned in the old bucket.`,
     );
     break;
   }

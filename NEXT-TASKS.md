@@ -73,4 +73,16 @@ its device checks ride item 4 and its cloud check is item 9.)
    `make pool-attach`, upload from the stock app, confirm the bytes land in
    the pool bucket under the user's prefix, download/thumbnail round-trip
    (presigns ≤ ~1h), then trash → purge and confirm the sweep deletes from
-   the pool bucket.
+   the pool bucket. Note the role must be named `ente-pool-*` (D56 — the
+   execution role's AssumeRole is scoped to that convention).
+10. **Filedata size-reconciliation pass (D56).** Pool counters are charged
+    for file-data only where the write path knows the size (putFileData,
+    putVideoData — net of replacement). Two drift sources remain: presigned
+    `img_preview` uploads have no commit/verify step in museum main and stay
+    UNCHARGED (deliberate — do not invent a non-museum verification step
+    without a capture), and file/fd deletion paths do not refund fd bytes to
+    the pool counter. A reconciliation pass should (a) decrement the pool
+    counter when fd rows/objects are deleted, keyed off the fd row's `size`
+    and the file's pin, and (b) decide the img_preview story once a client
+    generates it (capture-first, D8). Until then a pool's counter can read
+    slightly HIGH after fd deletions — the safe direction for a shared cap.

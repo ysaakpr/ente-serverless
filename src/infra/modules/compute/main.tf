@@ -51,6 +51,9 @@ resource "aws_lambda_function" "api" {
       MAIL_FROM               = var.mail_from
       INSTANCE_ID             = local.prefix
       FREE_PLAN_STORAGE_BYTES = tostring(var.free_plan_storage_bytes)
+      # Invite-gated signup (D54/D56): "open" leaves the surface byte-identical
+      # to pre-H1; "invite" gates account creation on an unconsumed invite row.
+      SIGNUP_MODE = var.signup_mode
       # Public album links (Phase D/F, D51/D52): where minted links point —
       # `<ALBUMS_URL>/?t=<token>` — normally the web module's distribution.
       ALBUMS_URL = var.albums_url

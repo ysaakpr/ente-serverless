@@ -38,6 +38,11 @@ region = "ap-southeast-1"
 # trailing slash: the server appends /?t=<token> itself.
 # albums_url = "https://albums.example.com"
 
+# Optional. Invite-gated signup (D54/D56): "invite" admits only emails invited
+# via `make invite`; omit for open signup (the default). Only account CREATION
+# is gated — login and existing accounts are untouched either way.
+# signup_mode = "invite"
+
 # Names everything: table ente-sl-<env>, bucket ente-sl-<env>-objects-<account>,
 # both lambdas, the IAM role, the log groups, the Env tag. The deployer policy is
 # scoped to ente-sl-* so any value works.

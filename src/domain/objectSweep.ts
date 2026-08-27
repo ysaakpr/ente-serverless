@@ -14,6 +14,7 @@
 
 import type { Deps } from '../deps.ts';
 import type { Blobs } from '../ports/blobs.ts';
+import type { Item } from '../ports/db.ts';
 import { padTime } from './model.ts';
 import { blobsForPoolId } from './storagePools.ts';
 
@@ -25,16 +26,43 @@ export interface PurgeEntry {
   poolId?: string;
 }
 
+/** One queue row, exposed so delete paths can fold the enqueue into the SAME
+ * transactWrite as their counter decrements and row deletes (D56). */
+export const purgeQueueRow = (deps: Pick<Deps, 'clock' | 'rand'>, entry: PurgeEntry): Item => ({
+  pk: QUEUE_PK,
+  sk: `${padTime(deps.clock.nowMicros())}#${deps.rand.uuid()}`,
+  objectKey: entry.objectKey,
+  ...(entry.poolId ? { poolId: entry.poolId } : {}),
+});
+
 export const enqueueObjectDeletion = async (deps: Deps, entries: PurgeEntry[]): Promise<void> => {
-  for (const { objectKey, poolId } of entries) {
-    if (!objectKey) continue;
-    await deps.db.put({
-      pk: QUEUE_PK,
-      sk: `${padTime(deps.clock.nowMicros())}#${deps.rand.uuid()}`,
-      objectKey,
-      ...(poolId ? { poolId } : {}),
-    });
+  for (const entry of entries) {
+    if (!entry.objectKey) continue;
+    await deps.db.put(purgeQueueRow(deps, entry));
   }
+};
+
+/**
+ * Operator drain for quarantined rows (D56): re-pin every queue row of one
+ * pool onto another pool (or the central bucket, toPoolId null) so the sweep
+ * can delete them. The operator is ASSERTING where the bytes actually live —
+ * the next sweep issues deletes against the TARGET bucket, and a wrong
+ * assertion leaves the real bytes orphaned in the old bucket. Surfaced as
+ * `make pool-requeue POOL=... [TO=...]` (tools/storagePool.ts).
+ */
+export const requeuePoolRows = async (
+  deps: Pick<Deps, 'db'>,
+  fromPoolId: string,
+  toPoolId: string | null,
+): Promise<number> => {
+  const rows = await deps.db.query(QUEUE_PK, {});
+  let moved = 0;
+  for (const row of rows) {
+    if ((row.poolId as string | undefined) !== fromPoolId) continue;
+    await deps.db.update(row.pk, row.sk, { poolId: toPoolId ?? undefined });
+    moved += 1;
+  }
+  return moved;
 };
 
 /** Drain the queue; failures stay queued for the next run. */
@@ -73,8 +101,15 @@ export const sweepDeletedObjects = async (deps: Deps): Promise<number> => {
         // same failure would hit every row of the pool, so quarantine it.
         console.error(`object sweep: pool ${poolId} delete failed, quarantining its rows this run`, err);
         quarantined.set(poolKey, 1);
+      } else {
+        // Default-bucket rows: leave THIS row for retry, keep sweeping — but
+        // LOUDLY (D56): these failures used to be swallowed, so a permanently
+        // stuck row was invisible in the worker's logs.
+        console.error(
+          `object sweep: default-bucket delete failed for ${row.objectKey as string}, leaving for next run`,
+          err,
+        );
       }
-      // Default-bucket rows keep the old behaviour: leave THIS row, continue.
     }
   }
   for (const [poolKey, count] of quarantined) {

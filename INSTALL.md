@@ -451,10 +451,10 @@ Signup is **open by default** (`SIGNUP_MODE` unset). To admit only invited
 users:
 
 1. **Set `SIGNUP_MODE=invite` in the API Lambda's environment.** Locally
-   that is `SIGNUP_MODE=invite make dev` (or `make lan`). On AWS there is no
-   tfvars knob yet — add `SIGNUP_MODE = "invite"` to the `environment` block
-   in `src/infra/modules/compute/main.tf` and run the plan/deploy cycle.
-   Only account *creation* is gated: login and change-email always work, and
+   that is `SIGNUP_MODE=invite make dev` (or `make lan`). On AWS, set
+   `signup_mode = "invite"` in `src/infra/dev/ente-sl.tfvars` and run the
+   plan/deploy cycle (the var validates to `open|invite` and defaults to
+   open). Only account *creation* is gated: login and change-email always work, and
    existing accounts are untouched. A non-invited signup gets a bare 403 the
    stock app renders as its generic failure dialog; the OTT is neither
    stored nor mailed.
@@ -513,10 +513,19 @@ failures:
 
 #### 2. Grant access — mode `role` (preferred on real AWS)
 
-Create an IAM role **in the bucket owner's account** whose trust policy
-admits the server's Lambda execution role — and the operator identity you
-run the CLI as, since `pool-create` validates with *your* credentials — both
-locked to a shared ExternalId (generate one: `openssl rand -hex 16`):
+Create an IAM role **in the bucket owner's account**, **named
+`ente-pool-<something>`** (e.g. `ente-pool-smith`): the server's
+`sts:AssumeRole` permission is scoped to `arn:aws:iam::*:role/ente-pool-*`
+(never `Resource: "*"`), and `pool-create` refuses role ARNs outside the
+convention. The scope matters because a pool role whose trust policy names
+the **account root** (a common shortcut) is assumable by *any* principal in
+that account that holds a broad AssumeRole grant — the naming convention
+keeps this deployment's reach to roles that explicitly opted in.
+
+The role's trust policy admits the server's Lambda execution role — and the
+operator identity you run the CLI as, since `pool-create` validates with
+*your* credentials — both locked to a shared ExternalId (generate one:
+`openssl rand -hex 16`). Name the **principals**, not the account root:
 
 ```json
 {
@@ -579,7 +588,7 @@ from `HASHING_KEY`, never stored or logged in plaintext.
 ```bash
 # role mode (preferred):
 make pool-create POOL=smith BUCKET=smith-photos REGION=eu-west-1 \
-     ROLE_ARN=arn:aws:iam::<bucket-account>:role/ente-pool EXTERNAL_ID=<external-id>
+     ROLE_ARN=arn:aws:iam::<bucket-account>:role/ente-pool-smith EXTERNAL_ID=<external-id>
 
 # keys mode (S3-compatibles) — pass the secrets as ENVIRONMENT variables:
 POOL_ACCESS_KEY=... POOL_SECRET_KEY=... \
@@ -606,7 +615,18 @@ make pools                                            # members, usage, quota, d
 make pool-set-quota POOL=smith STORAGE_GB=500         # shared cap (or STORAGE_GB=unlimited)
 make pool-disable POOL=smith                          # new uploads 426; reads/purges still work
 make pool-enable POOL=smith
+make pool-requeue POOL=smith TO=central               # drain a dead pool's quarantined sweep rows
 ```
+
+`pool-requeue` is the escape hatch for a pool that no longer resolves (row
+deleted, credentials gone for good): the object sweep *quarantines* that
+pool's queued deletions on every run — logged, counted, retried — and they
+never drain on their own. Requeueing re-pins them onto another pool (or the
+central bucket, the default) so the next sweep can delete them. **Running it
+asserts the bytes actually live in the target bucket** (e.g. after you
+migrated them out-of-band); the CLI restates this. A wrong assertion is
+harmless to the target (the deletes no-op on missing keys) but leaves the
+real bytes orphaned wherever they are.
 
 Attach/detach affect **new uploads only**: every file is pinned at commit
 time to the pool its bytes landed in, and downloads, purges and cleanup

@@ -81,3 +81,10 @@ variable "public_link_daily_devices" {
   type    = number
   default = 1000
 }
+
+# Invite-gated signup (D54/D56): "open" (default) or "invite". Same
+# pass-through rule as above — the module validates the value.
+variable "signup_mode" {
+  type    = string
+  default = "open"
+}

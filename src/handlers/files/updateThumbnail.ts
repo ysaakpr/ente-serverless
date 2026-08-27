@@ -8,7 +8,15 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { keys, padTime } from '../../domain/model.ts';
-import { getFile, loadQuotaContext, objectGuardKey, thumbPoolPin, type FileRow } from '../../domain/files.ts';
+import {
+  filePoolPin,
+  getFile,
+  loadQuotaContext,
+  objectGuardKey,
+  restampThumbPin,
+  thumbPoolPin,
+  type FileRow,
+} from '../../domain/files.ts';
 import { blobsForPoolId } from '../../domain/storagePools.ts';
 import { enqueueObjectDeletion } from '../../domain/objectSweep.ts';
 import { errBadRequestSentinel, errNotFound, errPermissionDenied } from '../../lib/errors.ts';
@@ -54,8 +62,9 @@ export const updateThumbnail = (deps: Deps) => async (c: Context) => {
     info: { ...file.info, thumbSize: head.contentLength },
     updationTime,
   };
-  delete updatedItem.thumbPoolId;
-  if (newThumbPin && newThumbPin !== file.storagePoolId) updatedItem.thumbPoolId = newThumbPin;
+  // A replacement landing CENTRAL while the original stays pooled needs the
+  // explicit sentinel — absence would fall back to storagePoolId (D56).
+  restampThumbPin(updatedItem, filePoolPin(file), newThumbPin);
   const ops: Parameters<Deps['db']['transactWrite']>[0] = [
     { kind: 'put', item: updatedItem },
     { kind: 'put', item: { ...objectGuardKey(body.thumbnail.objectKey), fileId: body.fileID, type: 'thumbnail' } },

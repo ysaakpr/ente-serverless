@@ -9,7 +9,7 @@ import { keys, gsi, padTime } from './model.ts';
 import { MICROS_PER_DAY } from '../lib/time.ts';
 import { filePoolPin, getFile, restampLink, thumbPoolPin, type FileRow, type LinkRow } from './files.ts';
 import { getCollection } from './collections.ts';
-import { enqueueObjectDeletion } from './objectSweep.ts';
+import { purgeQueueRow } from './objectSweep.ts';
 
 export const TRASH_DIFF_LIMIT = 2500;
 export const TRASH_RETENTION_MICROS = 30 * MICROS_PER_DAY;
@@ -124,14 +124,22 @@ export const markRestored = async (deps: Deps, row: TrashRow): Promise<void> => 
 /**
  * Permanent-delete: tombstone + usage decrement synchronously; the S3 objects
  * are ENQUEUED for the sweep cron, like museum (decision D6).
+ *
+ * ONE transaction since D56: the tombstone, the user + pool counter
+ * decrements, the OBJ guards, the sweep-queue rows and the file-row delete
+ * commit or fail together — a crash between steps could previously decrement
+ * a household's shared pool counter without deleting the rows (or the
+ * reverse). Op budget: 1 tombstone + 1 user counter + <=2 pool counters +
+ * <=2 guards + <=2 queue rows + 1 file row = <=9, far under MAX_TRANSACT_OPS.
  */
 export const permanentlyDelete = async (deps: Deps, userId: number, row: TrashRow): Promise<void> => {
   if (row.isDeleted || row.isRestored) return; // idempotent
   const file = await getFile(deps, row.fileID);
-  await deps.db.put(stamp(deps, { ...row, isDeleted: true }));
-  if (!file) return;
+  if (!file) {
+    await deps.db.put(stamp(deps, { ...row, isDeleted: true }));
+    return;
+  }
   const bytes = (file.info.fileSize ?? 0) + (file.info.thumbSize ?? 0);
-  await deps.db.addToCounters(keys.userUsage(userId).pk, 'USAGE', { bytes: -bytes, fileCount: -1 });
   // Mirror onto the pool counters the bytes are PINNED to (H2, D55) — the
   // file object and a replaced thumbnail can be pinned to different pools.
   const filePin = filePoolPin(file);
@@ -142,21 +150,31 @@ export const permanentlyDelete = async (deps: Deps, userId: number, row: TrashRo
     const cur = poolDeltas.get(thumbPin) ?? { bytes: 0, fileCount: 0 };
     poolDeltas.set(thumbPin, { ...cur, bytes: cur.bytes - (file.info.thumbSize ?? 0) });
   }
-  for (const [pin, deltas] of poolDeltas) {
-    await deps.db.addToCounters(keys.poolUsage(pin).pk, 'USAGE', {
-      bytes: deltas.bytes,
-      ...(deltas.fileCount ? { fileCount: deltas.fileCount } : {}),
-    });
-  }
   const entries = [
     ...(file.file.objectKey ? [{ objectKey: file.file.objectKey, poolId: filePin }] : []),
     ...(file.thumbnail.objectKey ? [{ objectKey: file.thumbnail.objectKey, poolId: thumbPin }] : []),
   ];
-  for (const { objectKey } of entries) {
-    await deps.db.delete(`OBJ#${objectKey}`, 'META');
-  }
-  await enqueueObjectDeletion(deps, entries); // sweep deletes from the pinned pool
-  await deps.db.delete(file.pk, file.sk);
+  const ops: Parameters<Deps['db']['transactWrite']>[0] = [
+    { kind: 'put', item: stamp(deps, { ...row, isDeleted: true }) },
+    {
+      kind: 'counter',
+      key: { pk: keys.userUsage(userId).pk, sk: 'USAGE' },
+      deltas: { bytes: -bytes, fileCount: -1 },
+    },
+    ...[...poolDeltas].map(([pin, deltas]) => ({
+      kind: 'counter' as const,
+      key: { pk: keys.poolUsage(pin).pk, sk: 'USAGE' },
+      deltas: { bytes: deltas.bytes, ...(deltas.fileCount ? { fileCount: deltas.fileCount } : {}) },
+    })),
+    ...entries.map(({ objectKey }) => ({
+      kind: 'delete' as const,
+      key: { pk: `OBJ#${objectKey}`, sk: 'META' },
+    })),
+    // sweep deletes from the pinned pool
+    ...entries.map((entry) => ({ kind: 'put' as const, item: purgeQueueRow(deps, entry) })),
+    { kind: 'delete', key: { pk: file.pk, sk: file.sk } },
+  ];
+  await deps.db.transactWrite(ops);
 };
 
 /**

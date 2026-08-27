@@ -9,7 +9,9 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import {
-  fileDataBlobs,
+  chargeFileDataPool,
+  fileDataBlobsForWrite,
+  getFdRow,
   getOwnedFile,
   isValidObjectId,
   metadataKey,
@@ -37,9 +39,11 @@ export const putFileData = (deps: Deps) => async (c: Context) => {
   }
   const { userId } = auth(c);
   const file = await getOwnedFile(deps, userId, body.fileID);
-  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
+  // Server-side write into the pinned pool: disabled pool -> 426 (D56).
+  const blobs = await fileDataBlobsForWrite(deps, file);
 
   const key = metadataKey(body.fileID, userId, 'mldata');
+  const existing = await getFdRow(deps, body.fileID, 'mldata');
   const size = await writeMetadataObject(blobs, key, {
     v: body.version ?? 1,
     encryptedData: body.encryptedData,
@@ -47,6 +51,9 @@ export const putFileData = (deps: Deps) => async (c: Context) => {
     client: c.req.header('X-Client-Package') ?? '',
   });
   await upsertFdRow(deps, userId, body.fileID, 'mldata', { size });
+  // Pool cap accounting (D56): the metadata object at this key was REPLACED,
+  // so the pool is charged the net delta against the previous row size.
+  await chargeFileDataPool(deps, file, size - (existing && !existing.isDeleted ? existing.size : 0));
   return c.json({});
 };
 
@@ -67,7 +74,9 @@ export const putVideoData = (deps: Deps) => async (c: Context) => {
   if (!isValidObjectId(body.objectID)) throw errBadRequestSentinel();
   const { userId } = auth(c);
   const file = await getOwnedFile(deps, userId, body.fileID);
-  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
+  // The vid_preview COMMIT step: writes the playlist into the pinned pool, so
+  // a disabled pool 426s here too (D56).
+  const blobs = await fileDataBlobsForWrite(deps, file);
 
   // The client uploaded the encrypted HLS video via preview-upload-url; verify it.
   const videoKey = objectKey(body.fileID, userId, 'vid_preview', body.objectID);
@@ -75,6 +84,7 @@ export const putVideoData = (deps: Deps) => async (c: Context) => {
   if (!head) throw new ApiError('OBJECT_SIZE_FETCH_FAILED', 503);
   if (head.contentLength !== body.objectSize) throw badRequest('mismatch in object size');
 
+  const existing = await getFdRow(deps, body.fileID, 'vid_preview');
   const playlistSize = await writeMetadataObject(
     blobs,
     metadataKey(body.fileID, userId, 'vid_preview', body.objectID),
@@ -85,10 +95,15 @@ export const putVideoData = (deps: Deps) => async (c: Context) => {
       client: c.req.header('X-Client-Package') ?? '',
     },
   );
+  const size = body.objectSize + playlistSize;
   await upsertFdRow(deps, userId, body.fileID, 'vid_preview', {
     objectID: body.objectID,
     objectSize: body.objectSize,
-    size: body.objectSize + playlistSize,
+    size,
   });
+  // Pool cap accounting (D56): this is where a vid_preview's size becomes
+  // known (the HeadObject above verified it), so the pool is charged here —
+  // net of the previous row size when a preview is regenerated.
+  await chargeFileDataPool(deps, file, size - (existing && !existing.isDeleted ? existing.size : 0));
   return c.json({});
 };

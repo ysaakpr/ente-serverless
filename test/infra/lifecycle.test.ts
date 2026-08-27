@@ -366,19 +366,22 @@ describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
  * BYO storage pools (H2, D55): the one infra change is sts:AssumeRole on the
  * shared execution role (API lambda + trash-purge worker use the same role,
  * asserted here so a future role split cannot silently drop the worker's
- * ability to purge pool objects). Resource "*" is the documented decision —
- * each pool role's trust policy + ExternalId is the real gate.
+ * ability to purge pool objects). Since D56 the resource is SCOPED to the
+ * ente-pool-* naming convention, never "*" — a pool role trusted to its
+ * account root would otherwise be assumable by anything holding AssumeRole
+ * on "*"; the trust policy + ExternalId stays the real per-pool gate.
  */
 describe('storage pool guards (H2, D55)', () => {
   const iamTf = () => readTf('modules/compute/iam.tf');
 
-  it('the execution role can assume pool roles', () => {
+  it('the execution role can assume pool roles — scoped to the naming convention, not "*"', () => {
     const iam = iamTf();
     const at = iam.indexOf('"PoolAssumeRole"');
     expect(at, 'no PoolAssumeRole statement').toBeGreaterThan(-1);
     const block = iam.slice(at, iam.indexOf('}', at));
     expect(block).toContain('"sts:AssumeRole"');
-    expect(block).toMatch(/resources\s*=\s*\["\*"\]/);
+    expect(block).toMatch(/resources\s*=\s*\["arn:aws:iam::\*:role\/ente-pool-\*"\]/);
+    expect(block).not.toMatch(/resources\s*=\s*\["\*"\]/);
   });
 
   it('both lambdas share the one role the statement lands on', () => {
@@ -410,6 +413,21 @@ describe('config/tofu default agreement (D11)', () => {
 
     expect(configDefault).toBe(TEN_TIB);
     expect(tfDefault).toBe(configDefault);
+  });
+
+  it('signup_mode: tofu default matches config.ts ("open"), validates the enum, reaches the Lambda env (D54/D56)', () => {
+    const tf = readTf('modules/compute/variables.tf');
+    const block = tf.slice(tf.indexOf('variable "signup_mode"'));
+    expect(block).toMatch(/default\s*=\s*"open"/);
+    expect(block).toMatch(/contains\(\["open", "invite"\]/);
+
+    // config.ts: anything but the literal 'invite' resolves to 'open'.
+    const config = readFileSync(join(import.meta.dirname, '../../src/config.ts'), 'utf8');
+    expect(config).toContain("process.env.SIGNUP_MODE === 'invite' ? 'invite' : 'open'");
+
+    // and the var actually lands in the API Lambda's environment + dev passthrough
+    expect(readTf('modules/compute/main.tf')).toMatch(/SIGNUP_MODE\s*=\s*var\.signup_mode/);
+    expect(readTf('dev/main.tf')).toMatch(/signup_mode\s*=\s*var\.signup_mode/);
   });
 });
 

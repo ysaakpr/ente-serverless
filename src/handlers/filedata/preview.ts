@@ -7,7 +7,15 @@
 import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
-import { fileDataBlobs, getFdRow, getOwnedFile, objectKey, upsertFdRow, type FdType } from '../../domain/fileData.ts';
+import {
+  fileDataBlobs,
+  fileDataBlobsForWrite,
+  getFdRow,
+  getOwnedFile,
+  objectKey,
+  upsertFdRow,
+  type FdType,
+} from '../../domain/fileData.ts';
 import { badRequest, errNotFound } from '../../lib/errors.ts';
 
 const PREVIEW_TYPES = ['vid_preview', 'img_preview'];
@@ -29,7 +37,9 @@ export const previewUploadUrl = (deps: Deps) => async (c: Context) => {
   }
   const { userId } = auth(c);
   const file = await getOwnedFile(deps, userId, fileId);
-  const blobs = await fileDataBlobs(deps, file); // file's pinned pool (H2, D55)
+  // WRITE mint into the pinned pool: a disabled pool 426s here like any other
+  // upload mint (D56); the GET side below stays on the read resolver.
+  const blobs = await fileDataBlobsForWrite(deps, file);
 
   const objectID = `${type === 'vid_preview' ? 'pv' : 'pi'}_${deps.rand.uuid()}`;
   const key = objectKey(fileId, userId, type, objectID);

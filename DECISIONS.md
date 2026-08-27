@@ -1343,6 +1343,73 @@ source says Y — source won).
     at unit level with a stubbed STS client (ExternalId sent, creds cached,
     presign clamped).
 
+- **D56 [FIX 2026-08-27] Review fixes on H1/H2: thumb-pin central sentinel,
+  file-data pool gates, scoped AssumeRole, ops hardening.** Second-pass review
+  findings on the Phase H work, all server/CLI-side; wire shapes unchanged.
+  - **P1 — thumb pin could not say "central" (silent 404 + object leak).**
+    `thumbPoolPin` resolved `thumbPoolId ?? storagePoolId`, and both re-stamp
+    sites (updateThumbnail / updateFileAttributes) only wrote `thumbPoolId`
+    when truthy — so a pool-detached user replacing a thumbnail put the new
+    bytes in the CENTRAL bucket while the row still resolved the thumb pin to
+    the old pool: previews presigned the wrong bucket (silent 404s) and the
+    central object survived deletion. Fixed with a SENTINEL: `thumbPoolId: ''`
+    (`CENTRAL_THUMB_PIN`, files.ts) means "diverged into the central bucket";
+    absence still means "follows storagePoolId". Both re-stamp sites now share
+    one helper (`restampThumbPin`, resolved-pin in, stored-shape out) so they
+    cannot drift; `thumbPoolPin` maps '' -> undefined. The pool-counter delta
+    math at both sites operates on RESOLVED pins (string | undefined, never
+    the sentinel) and was independently correct — left as-is, locked by tests
+    covering pool->central and central->pool divergence on BOTH update paths
+    (row shape, preview bucket, sweep bucket, counter deltas).
+  - **P2 — file-data write paths bypassed pool controls.** previewUploadUrl
+    (PUT + multipart mints), putFileData and putVideoData resolved the pinned
+    pool's client but never honoured `disabled` and never charged POOL#/USAGE.
+    Now: every file-data WRITE goes through `fileDataBlobsForWrite`
+    (fileData.ts), which 426s (museum shape) when the PIN's pool is disabled —
+    the pin's pool, not the owner's current one, because that is where the
+    bytes land; reads stay on the untouched resolver so pinned bytes remain
+    servable. **Quota decision:** the pool counter is charged only where the
+    write path KNOWS the size — putFileData (the server writes the object) and
+    putVideoData (the vid_preview commit step, size verified by HeadObject) —
+    each net of the previous fd-row size on replacement. Presigned img_preview
+    uploads have NO commit/verify step in museum main (D8 dormant tier), so
+    they stay UNCHARGED rather than invent a non-museum verification step;
+    likewise file/fd DELETION does not yet refund fd bytes. Both halves of
+    that drift are one item: the filedata size-reconciliation pass in
+    NEXT-TASKS. Per-user counters deliberately untouched (museum parity:
+    file-data never counts toward user storage).
+  - **P2 — sts:AssumeRole scoped to the ente-pool-\* naming convention.**
+    D55 shipped `Resource "*"` reasoning that each pool role's trust policy +
+    ExternalId is the real gate. The reviewer's counterpoint stands: a pool
+    role whose trust policy names its ACCOUNT ROOT (a common operator
+    shortcut) is assumable by any principal in that account holding a broad
+    AssumeRole — with "*" on our side, this deployment is such a principal
+    for every root-trusted role in every account. Now
+    `arn:aws:iam::*:role/ente-pool-*` (compute/iam.tf, guard test locks the
+    scoped form and rejects "*"), pool-create REFUSES role ARNs outside the
+    convention (clear operator error naming it), and INSTALL's trust-policy
+    section documents the convention and says to name principals, never the
+    account root.
+  - Also (one-liners): upsertInvite now preserves existing
+    storageLimitBytes/viewer across re-invites like storagePoolId (explicit
+    values win; re-arming a consumed 0-byte viewer invite keeps both) and the
+    invite CLI passes viewer only when --viewer given. trash.ts
+    permanentlyDelete is ONE transactWrite (tombstone + user/pool counters +
+    OBJ guards + queue rows + file row, <=9 ops); the account reaper folds
+    each chunk's queue rows and their pool decrements into one chunk-aware
+    transactWrite (flushes when <4 op slots remain of MAX_TRANSACT_OPS) — a
+    crash can no longer decrement a household counter without the matching
+    rows. `make pool-requeue POOL=... [TO=...]` drains a dead pool's
+    quarantined sweep rows by re-pinning them (default central); running it
+    ASSERTS the bytes' true location, restated by the CLI and INSTALL.
+    objectSweep now console.errors default-bucket delete failures with the
+    key (they were silently swallowed). blobs.pool.ts dedupes concurrent
+    AssumeRole refreshes behind one in-flight promise (N concurrent presigns
+    after idle = 1 STS call; failures clear the slot for retry). SIGNUP_MODE
+    is a tofu var (`signup_mode`, default "open", validated open|invite,
+    compute module + dev passthrough, guard-tested against the config.ts
+    default) replacing INSTALL's edit-main.tf instruction.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

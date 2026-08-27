@@ -8,8 +8,8 @@ import type { Deps } from '../deps.ts';
 import type { Blobs } from '../ports/blobs.ts';
 import { keys, padTime } from './model.ts';
 import { filePoolPin, getFile, type FileRow } from './files.ts';
-import { blobsForPoolId } from './storagePools.ts';
-import { errNotFound, errPermissionDenied } from '../lib/errors.ts';
+import { blobsForPool, blobsForPoolId, getPool } from './storagePools.ts';
+import { errNotFound, errPermissionDenied, errStorageLimitExceeded } from '../lib/errors.ts';
 
 export type FdType = 'mldata' | 'vid_preview' | 'img_preview';
 
@@ -118,6 +118,40 @@ export interface S3FileMetadata {
  */
 export const fileDataBlobs = async (deps: Deps, file: FileRow): Promise<Blobs> =>
   blobsForPoolId(deps, filePoolPin(file));
+
+/**
+ * Blobs client for a WRITE into the file's pinned pool (D56): file-data mints
+ * and server-side writes honour `disabled` exactly like upload mints — the
+ * same museum-shaped 426 — where reads (fileDataBlobs) keep resolving so
+ * pinned bytes stay servable. The gate is the PIN's pool, not the owner's
+ * current one, because that is where the bytes land (fileDataBlobs above).
+ */
+export const fileDataBlobsForWrite = async (deps: Deps, file: FileRow): Promise<Blobs> => {
+  const poolId = filePoolPin(file);
+  if (!poolId) return deps.blobs;
+  const pool = await getPool(deps, poolId);
+  if (!pool) throw new Error(`storage pool ${poolId} is not onboarded (dangling pin)`);
+  if (pool.disabled) throw errStorageLimitExceeded();
+  return blobsForPool(deps, pool);
+};
+
+/**
+ * Charge (negative: refund) file-data bytes to the pinned pool's shared
+ * USAGE counter (D56). Only the write paths that KNOW the byte size call this
+ * (putFileData / putVideoData); presigned img_preview uploads have no commit
+ * step and stay uncharged — documented exemption, see the D56 entry and the
+ * filedata size-reconciliation NEXT-TASKS item. Per-user counters deliberately
+ * untouched: museum does not count file-data toward user storage (parity).
+ */
+export const chargeFileDataPool = async (
+  deps: Deps,
+  file: FileRow,
+  deltaBytes: number,
+): Promise<void> => {
+  const poolId = filePoolPin(file);
+  if (!poolId || deltaBytes === 0) return;
+  await deps.db.addToCounters(keys.poolUsage(poolId).pk, 'USAGE', { bytes: deltaBytes });
+};
 
 export const writeMetadataObject = async (
   blobs: Blobs,

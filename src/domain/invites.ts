@@ -68,14 +68,19 @@ export const upsertInvite = async (
 ): Promise<InviteRow> => {
   const normalized = normalizeEmail(email);
   const existing = await getInvite(deps, normalized);
-  // A pool assignment made by `make pool-attach` survives a re-invite unless
-  // this upsert explicitly sets one (H2, D55).
+  // Existing overrides survive a re-invite unless this upsert explicitly sets
+  // new ones (explicit values win) — pool assignment (H2, D55) and, since
+  // D56, storageLimitBytes/viewer too: the documented re-arm path (`make
+  // invite` after account deletion) must not silently lift a 0-byte or
+  // viewer restriction.
   const storagePoolId = opts.storagePoolId ?? (existing?.storagePoolId as string | undefined);
+  const storageLimitBytes = opts.storageLimitBytes ?? existing?.storageLimitBytes;
+  const viewer = opts.viewer ?? existing?.viewer ?? false;
   const row: InviteRow = {
     ...keys.invite(normalized),
     email: normalized,
-    ...(opts.storageLimitBytes !== undefined ? { storageLimitBytes: opts.storageLimitBytes } : {}),
-    viewer: opts.viewer ?? false,
+    ...(storageLimitBytes !== undefined ? { storageLimitBytes } : {}),
+    viewer,
     home: 'local',
     ...(storagePoolId ? { storagePoolId } : {}),
     createdAt: existing?.createdAt ?? deps.clock.nowMicros(),

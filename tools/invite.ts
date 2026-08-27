@@ -89,8 +89,10 @@ switch (command) {
   case 'invite': {
     const email = args[0];
     if (!email || email.startsWith('--')) usage();
+    // undefined (flag absent) preserves an existing invite's value on
+    // re-invite; only an explicit --viewer overrides (D56).
     let storageLimitBytes: number | undefined;
-    let viewer = false;
+    let viewer: boolean | undefined;
     for (let i = 1; i < args.length; i++) {
       if (args[i] === '--viewer') viewer = true;
       else if (args[i] === '--storage-gb') {

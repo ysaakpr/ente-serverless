@@ -75,6 +75,8 @@ module "compute" {
   public_link_daily_uploads         = var.public_link_daily_uploads
   public_link_daily_devices         = var.public_link_daily_devices
 
+  signup_mode = var.signup_mode
+
   origin_secret            = random_password.origin_secret.result
   api_reserved_concurrency = var.api_reserved_concurrency
   monthly_budget_usd       = var.monthly_budget_usd

@@ -8,7 +8,7 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
 	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage \
-	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable
+	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue
 
 test:
 	npx vitest run test/unit
@@ -141,6 +141,14 @@ pool-disable:
 pool-enable:
 	@test -n "$(POOL)" || { echo "usage: make pool-enable POOL=..."; exit 1; }
 	@$(POOL_TOOL) enable "$(POOL)"
+
+# Drain a deleted/unresolvable pool's QUARANTINED sweep rows by re-pinning
+# them to another pool or the central bucket (D56). Running it ASSERTS the
+# bytes actually live in the target bucket — the CLI restates this.
+#   make pool-requeue POOL=smith [TO=<poolId>|central]   (default: central)
+pool-requeue:
+	@test -n "$(POOL)" || { echo "usage: make pool-requeue POOL=... [TO=<poolId>|central]"; exit 1; }
+	@$(POOL_TOOL) requeue "$(POOL)" $(if $(TO),--to "$(TO)")
 
 oracle-up:
 	docker compose -f docker-compose.oracle.yml up -d --wait

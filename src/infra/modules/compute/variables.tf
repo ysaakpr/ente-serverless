@@ -98,3 +98,17 @@ variable "public_link_daily_devices" {
   type    = number
   default = 1000
 }
+
+# Invite-gated signup (H1, D54; wired as a var in D56 — previously a manual
+# environment-block edit). "open" is config.ts's default (guard-tested, same
+# D11 discipline); "invite" admits only emails with an unconsumed INVITE# row.
+# Only account CREATION is gated — login and change-email never are.
+variable "signup_mode" {
+  type    = string
+  default = "open"
+
+  validation {
+    condition     = contains(["open", "invite"], var.signup_mode)
+    error_message = "signup_mode must be \"open\" or \"invite\"."
+  }
+}

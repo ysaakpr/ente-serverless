@@ -114,6 +114,26 @@ describe('invite-gated signup (D54)', () => {
     expect(rearmed!.consumedAt).toBeUndefined();
     expect(rearmed!.storageLimitBytes).toBe(5 * GIB);
   });
+
+  it('re-arming preserves existing overrides: a consumed 0-byte viewer invite stays 0-byte viewer (D56)', async () => {
+    await upsertInvite(world.deps, 'rearm@b.c', { storageLimitBytes: 0, viewer: true });
+    await signupAccount(world, 'rearm@b.c');
+    expect((await getInvite(world.deps, 'rearm@b.c'))!.consumedAt).toBeGreaterThan(0);
+
+    // the documented re-admission path (`make invite EMAIL=...`, no flags)
+    // must not silently lift the restrictions
+    await upsertInvite(world.deps, 'rearm@b.c');
+    const rearmed = (await getInvite(world.deps, 'rearm@b.c'))!;
+    expect(rearmed.consumedAt).toBeUndefined();
+    expect(rearmed.storageLimitBytes).toBe(0);
+    expect(rearmed.viewer).toBe(true);
+
+    // explicit new values still win, both directions
+    await upsertInvite(world.deps, 'rearm@b.c', { storageLimitBytes: 5 * GIB, viewer: false });
+    const updated = (await getInvite(world.deps, 'rearm@b.c'))!;
+    expect(updated.storageLimitBytes).toBe(5 * GIB);
+    expect(updated.viewer).toBe(false);
+  });
 });
 
 describe('per-user storage quota (D54: 0 means ZERO)', () => {
