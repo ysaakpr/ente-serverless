@@ -1471,6 +1471,106 @@ source says Y — source won).
     confirm gates on the four mutating targets, plan explicitly
     unconfirmed.
 
+- **D58 [COST/EDGE 2026-08-27] One CloudFront distribution per environment —
+  the API and the albums web app consolidated onto the (former) API
+  distribution; modules/web folded into modules/edge.** Motive: the CloudFront
+  flat-rate FREE plan (D47) covers one distribution + one web ACL per
+  subscription and allows **at most 3 distributions per account**; the D52
+  two-distribution layout spent 2 slots per env, so prod + test could never
+  both ride the $0 plan and the test env's albums distribution (plus its
+  future ACL) would silently run pay-as-you-go. Consolidated: prod + test = 2
+  distributions, one spare, every one subscribable. Judgment calls:
+  - **The API stays at the ROOT of the existing distribution — root-path
+    ordered behaviors, not an /api prefix.** Three reasons: the distribution's
+    domain IS the `server_url` real devices are configured with, so nothing
+    may re-point (an /api prefix or a new domain breaks every client); the
+    Lambda sees unrewritten paths, so museum 404/403 parity holds with no
+    prefix-strip anywhere; and prefix-stripping at the edge would need a
+    function on every API behavior. Every top-level prefix in src/app.ts gets
+    an ordered behavior to the Lambda origin (per-origin `x-origin-secret`
+    unchanged, WAF ACL unchanged): `/ping` exact plus 14 bare-prefix
+    wildcards (`/users*`, `/files*`, `/collections*`, `/trash*`,
+    `/user-entity*`, `/remote-store*`, `/billing*`, `/storage-bonus*`,
+    `/push*`, `/comments-reactions*`, `/collection-actions*`, `/contacts*`,
+    `/emergency-contacts*`, `/public-collection*`) — the no-slash form so
+    bare-prefix routes (POST /files, POST /collections, GET /remote-store)
+    ride the same behavior. **15 API + /index.html = 16 ordered behaviors + 1
+    default = 17, comfortably under the 25-behavior default quota.**
+  - **THE load-bearing constraint: `custom_error_response` must never exist
+    on the distribution.** Error responses are distribution-WIDE — the old
+    web module's 403/404→/index.html SPA fallback would rewrite the API's
+    museum-shaped 404/403 JSON into 200 HTML for every client. SPA fallback
+    is now a viewer-request **CloudFront function** on the DEFAULT behavior
+    only: a URI whose last segment has no dot rewrites to /index.html, asset
+    paths pass through. Consequence accepted: a deep link serves index.html
+    under the default behavior's CachingOptimized policy, so `make
+    deploy-web`'s /* invalidation stays the freshness backstop (the same
+    belt-and-braces the old error_caching_min_ttl-0 fallback relied on);
+    /index.html requested literally stays pinned to CachingDisabled.
+  - **The guard that keeps it honest** (test/infra/web.test.ts): derives the
+    top-level prefix set from src/app.ts route registrations and asserts
+    set-EQUALITY with the edge module's `api_path_patterns` (a new route
+    group without a behavior would fall through to the web bucket; a stale
+    pattern would steal web URL space), plus: no custom_error_response
+    anywhere in the infra, exactly one aws_cloudfront_distribution across all
+    modules, the SPA function associated to the default behavior only,
+    behavior count ≤ 20, API behaviors keeping CachingDisabled +
+    AllViewerExceptHostHeader + all 7 methods, and the moved-block refactor
+    below.
+  - **ALBUMS_URL = the distribution's own URL — wired via a plan-time hint,
+    because tofu cannot express the self-reference.** lambda env →
+    distribution domain → function URL → lambda is a hard resource cycle;
+    one of the three value-flows has to leave the graph. Chosen: `make plan`
+    injects `-var albums_url_hint=$(tofu output -raw server_url)` — the
+    previous apply's own output, stable because a distribution's domain
+    never changes in place — and the env roots wire
+    `coalesce(var.albums_url, var.albums_url_hint,
+    "https://albums-url-pending.invalid")`. A tfvars `albums_url` (custom
+    domain) still wins; a fresh env's FIRST apply deploys the loud .invalid
+    sentinel and the routine second plan/deploy pins the real domain (prod's
+    migration plan is correct immediately — its state already holds
+    server_url). Rejected alternatives: an operator-pinned tfvars value
+    (manual step on prod, forgettable), an SSM parameter + data source
+    (broken first-plan or unmanaged out-of-band state), and minting from a
+    CloudFront-function-injected x-forwarded-host header (app change on a
+    parity-sensitive, just-security-reviewed surface). Public links are now
+    `https://<server_url domain>/?t=<token>`; the albums app is same-origin
+    with the API it calls, and no rebuild is needed at migration because
+    build-web already baked this same origin as NEXT_PUBLIC_ENTE_ENDPOINT.
+  - **Module shape: modules/web died into modules/edge** (bucket, public
+    access block, bucket policy, OAC — policy now SourceArn-pinned to the one
+    distribution), because the bucket policy needs the distribution ARN and
+    the distribution needs the bucket/OAC: splitting them across modules
+    would mean mutually-referencing modules for no gain. `moved` blocks in
+    the env roots carry all four resources across, so the migration plan
+    MOVES them (bucket content preserved, no re-sync required) instead of
+    destroy-and-recreate. The standalone albums distribution has no
+    destination and is destroyed by the same plan. PriceClass_All (D47) now
+    simply applies — the web module's PriceClass_100 died with its
+    distribution.
+  - **Expected migration plan on an existing deployment** (verified shape;
+    could not be run against prod here): 4 moved, **1 to add** (the SPA
+    CloudFront function), **3 to change in-place** (the main distribution —
+    new web origin, default-behavior swap, 16 ordered behaviors,
+    default_root_object, comment; the bucket policy's SourceArn; the API
+    Lambda's ALBUMS_URL env), **1 to destroy** (the old albums
+    distribution). Everything on the main distribution is an in-place
+    UpdateDistribution — **any replace line touching it means STOP**, since
+    replacement mints a new domain and breaks every configured client. The
+    D47 FREE subscription survives in-place updates; verify with `make
+    pricing-plan-status` after, and run `make pricing-plan` per env (test
+    included — an unsubscribed env pays ~$6/mo of WAF fees). Links minted
+    BEFORE consolidation point at the old albums distribution's now-dead
+    domain — tokens stay valid, re-copy each link from the app (the
+    documented D52 caveat pattern).
+  - Trade-offs accepted: requests under prefixes app.ts does not register
+    now reach the web bucket and 200 as HTML instead of 404 JSON (real route
+    groups are guard-covered; clients never probe unregistered prefixes);
+    the WAF rate rule now also counts web-asset hits (cached responses
+    included — WAF runs before the cache), which only errs stricter; and a
+    brief albums-web blip during the migration apply while the bucket policy
+    re-pins (the API path is untouched throughout).
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

@@ -67,9 +67,11 @@ variable "origin_secret" {
   sensitive = true
 }
 
-# Public album links (Phase F, D52). No default: the env root must wire it —
-# normally to module.web's distribution URL — because a silently-wrong
-# fallback here would mint share links pointing at ente's own albums.ente.com.
+# Public album links (Phase F, D52; consolidated D58). No default: the env
+# root must wire it — normally the deployment's own distribution URL (the
+# albums app rides the same distribution as the API) via the make-injected
+# albums_url_hint — because a silently-wrong fallback here would mint share
+# links pointing at ente's own albums.ente.com.
 variable "albums_url" {
   type = string
 }

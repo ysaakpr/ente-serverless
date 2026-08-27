@@ -211,7 +211,7 @@ capture-diff:
 #   - web/ is an npm workspace (engines pin npm 11.x); `npm ci` then
 #     `npm run build:albums` produces a Next.js STATIC EXPORT at
 #     web/apps/albums/out/ — pure files, which is why a private S3 bucket
-#     behind CloudFront (modules/web) can serve it.
+#     behind CloudFront (modules/edge, D58) can serve it.
 #   - NEXT_PUBLIC_ENTE_ENDPOINT is baked in AT BUILD TIME (web/apps/albums/
 #     .env); changing the API URL means rebuilding, not re-syncing.
 # ---------------------------------------------------------------------------
@@ -244,14 +244,17 @@ build-web: require-profile
 	cp -R dist/ente-web-src/web/apps/albums/out/. dist/web-albums/
 	@echo "==> dist/web-albums ready ($$(du -sh dist/web-albums | cut -f1)) — 'make deploy-web' syncs it"
 
-# Syncs the local build to the web bucket and invalidates the distribution.
-# Guarded like every other state-mutating target. --delete keeps the bucket
-# an exact mirror; a viewer holding a stale index.html mid-deploy re-fetches
-# it uncached (the module pins index.html to CachingDisabled) and heals.
+# Syncs the local build to the web bucket and invalidates the ONE
+# consolidated distribution (D58 — the same distribution that serves the
+# API; the API behaviors are CachingDisabled, so the /* invalidation only
+# actually evicts web assets). Guarded like every other state-mutating
+# target. --delete keeps the bucket an exact mirror; a viewer holding a
+# stale index.html mid-deploy re-fetches it uncached (the edge module pins
+# index.html to CachingDisabled) and heals.
 deploy-web: confirm-profile guard-account
 	@test -d dist/web-albums || { echo "no dist/web-albums — run 'make build-web' first"; exit 1; }
 	@test -f dist/web-albums/index.html || { echo "dist/web-albums has no index.html — the albums build did not finish"; exit 1; }
-	@BUCKET=$$($(TF) output -raw web_bucket); DIST=$$($(TF) output -raw web_distribution_id); \
+	@BUCKET=$$($(TF) output -raw web_bucket); DIST=$$($(TF) output -raw distribution_id); \
 	aws s3 sync dist/web-albums "s3://$$BUCKET" --delete && \
 	aws cloudfront create-invalidation --distribution-id "$$DIST" --paths "/*" \
 		--query 'Invalidation.{id:Id,status:Status}' --output table
@@ -368,6 +371,16 @@ guard-account: require-profile
 
 # archive_file zips dist/ AT PLAN TIME, so the bundles are rebuilt first —
 # an absent or stale dist/ otherwise fails the plan, not the apply.
+#
+# albums_url_hint (D58): the albums app rides the SAME distribution as the
+# API, so the Lambda's ALBUMS_URL should be that distribution's own URL — a
+# self-reference tofu cannot express (lambda env -> distribution -> function
+# URL -> lambda is a cycle). The previous apply's server_url output IS that
+# value (a distribution's domain never changes in place), so plan feeds it
+# back in as a var. A fresh env's first plan has no output yet and deploys
+# the loud albums-url-pending.invalid sentinel; the routine second
+# plan/deploy pins the real domain. A tfvars albums_url (custom domain)
+# always wins over the hint.
 plan: require-profile build-lambda guard-account
 	@test -f $(TFDIR)/$(TFVARS) || { \
 		echo "missing $(TFDIR)/$(TFVARS)"; \
@@ -375,10 +388,13 @@ plan: require-profile build-lambda guard-account
 		echo "  then fill in region, mail_from, and hashing_key (openssl rand -base64 32)"; \
 		echo "  BACK UP hashing_key first — losing it orphans every email->user mapping (D4a)"; \
 		exit 1; }
-	$(TF) plan -var-file=$(TFVARS) -out=$(TFPLAN)
+	@HINT=$$($(TF) output -raw server_url 2>/dev/null || true); \
+	test -n "$$HINT" || echo ">>> no server_url in state yet — ALBUMS_URL deploys as the pending sentinel; run plan+deploy again after this apply (D58)"; \
+	set -x; \
+	$(TF) plan -var-file=$(TFVARS) $${HINT:+-var albums_url_hint=$$HINT} -out=$(TFPLAN)
 
 # Applies the SAVED plan, so what ships is exactly what you reviewed.
-# The two CloudFront distributions take 5-15 min to reach Deployed; the rest
+# The CloudFront distribution takes 5-15 min to reach Deployed; the rest
 # of the resources are quick.
 deploy: confirm-profile guard-account
 	@test -f $(TFDIR)/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
@@ -401,21 +417,28 @@ smoke: require-profile
 	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (must be 200)\n' "$$CF/ping"; \
 	echo "  point the app at: $$CF"
 
-# CloudFront flat-rate FREE plan (D47). One subscription covers exactly this
-# distribution and its web ACL, and zeroes what is otherwise the largest fixed
-# line on the bill: the WAF web ACL ($5/mo) + rate rule ($1/mo) + all
-# CloudFront/WAF request fees. The FREE-tier allowances (1M requests, 100 GB
-# transfer per month) see only the small-JSON API path — photo bytes ride
-# presigned S3 URLs and never cross the distribution — and are soft: AWS never
-# bills overage, it emails and may eventually slow delivery. FREE activates
-# immediately; no approval step.
+# CloudFront flat-rate FREE plan (D47, consolidated D58). One subscription
+# covers exactly one distribution + its web ACL, and zeroes what is otherwise
+# the largest fixed line on the bill: the WAF web ACL ($5/mo) + rate rule
+# ($1/mo) + all CloudFront/WAF request fees. RUN THIS ONCE PER ENVIRONMENT
+# (make profile <env>, then this target): each env's distribution needs its
+# own subscription, and an unsubscribed env — the test env is the one that
+# slips — silently pays the ~$6/mo WAF fees on pay-as-you-go. The FREE plan
+# allows at most 3 distributions per AWS account; consolidation (D58) keeps
+# prod + test at 2, one spare. The allowances (1M requests, 100 GB transfer
+# per month per subscription) see the small-JSON API path plus a few MB of
+# albums web assets — photo bytes ride presigned S3 URLs and never cross the
+# distribution — and are soft: AWS never bills overage, it emails and may
+# eventually slow delivery. FREE activates immediately; no approval step.
 #
 # A one-time CLI step, NOT a tofu resource: the AWS provider has no
 # pricingplanmanager support yet (hashicorp/terraform-provider-aws#49232) —
 # fold it into the edge module when that ships. The subscription survives
-# `make deploy` but dies with the distribution, so re-run this after any
-# `make destroy` + re-apply. PricingPlanManager is a single us-east-1 endpoint
-# (same story as CLOUDFRONT-scope WAF), hence the pinned --region.
+# `make deploy` — in-place distribution updates included, which is what the
+# D58 consolidation is for prod — but dies with the distribution, so re-run
+# this after any `make destroy` + re-apply. PricingPlanManager is a single
+# us-east-1 endpoint (same story as CLOUDFRONT-scope WAF), hence the pinned
+# --region.
 PPM = aws pricing-plan-manager --region us-east-1
 
 pricing-plan: confirm-profile guard-account
@@ -438,17 +461,18 @@ pricing-plan-status:
 		--output json
 
 # Tears down the STATELESS half only: both lambdas, the function URL, the cron,
-# the log groups, both distributions and the web-albums bucket (build artifacts
+# the log groups, the distribution and the web-albums bucket (build artifacts
 # only — force_destroy, rebuildable via build-web). module.data — the table and
-# the objects bucket — is deliberately out of scope; it carries prevent_destroy
-# and holds every photo. Costs a redeploy, not a memory.
-# Re-applying afterwards mints NEW CloudFront domains and a NEW function URL:
-# every client has to be re-pointed at the new server_url, and every share link
-# minted before the destroy points at the DEAD albums domain (tokens stay
-# valid — re-copy the link from the app after rebuilding, D52).
+# the objects bucket — is deliberately out of scope; it carries the D57
+# delete-protection rails and holds every photo. Costs a redeploy, not a memory.
+# Re-applying afterwards mints a NEW CloudFront domain and a NEW function URL:
+# every client has to be re-pointed at the new server_url, every share link
+# minted before the destroy points at the DEAD domain (tokens stay valid —
+# re-copy the link from the app after rebuilding, D52), and ALBUMS_URL needs
+# the routine second plan/deploy to pick the new domain up (D58 hint).
 destroy: confirm-profile guard-account
-	@echo "==> destroying module.compute + module.edge + module.web — table and objects bucket are preserved"
-	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge -target=module.web
+	@echo "==> destroying module.compute + module.edge — table and objects bucket are preserved"
+	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge
 
 # There is deliberately no target that destroys module.data.
 destroy-data: require-profile

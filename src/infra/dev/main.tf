@@ -43,13 +43,21 @@ module "data" {
   delete_protection = var.delete_protection
 }
 
-# Static hosting for the albums web viewer (Phase F, D52): private bucket +
-# OAC + its own distribution — public links need a base URL that is not the
-# API's. Stateless like compute: the bucket holds only `make build-web`
-# output, so `make destroy` may take it down (force_destroy in the module).
-module "web" {
-  source   = "../modules/web"
-  env_name = var.env_name
+# Where minted share links point (D51/D52/D58): `<albums_url>/?t=<token>`.
+# Since D58 the albums app rides the SAME distribution as the API, so the
+# right value is the distribution's own URL — which tofu cannot wire
+# declaratively (lambda env → distribution → function URL → lambda is a
+# cycle). `make plan` therefore injects albums_url_hint from the previous
+# apply's server_url output; the tfvars albums_url (a custom domain) still
+# wins, and a fresh env's FIRST apply deploys the loud .invalid sentinel
+# until the routine second plan/deploy pins the real domain (coalesce skips
+# null AND empty string, so the unset-hint case falls through).
+locals {
+  albums_url = coalesce(
+    var.albums_url,
+    var.albums_url_hint,
+    "https://albums-url-pending.invalid",
+  )
 }
 
 # The stateless half — destroying it costs a redeploy, not a photo.
@@ -69,9 +77,7 @@ module "compute" {
   # self-host. Set alarm_email in the tfvars only to split them.
   alarm_email = coalesce(var.alarm_email, var.mail_from)
 
-  # Share links are minted against the web module's distribution unless the
-  # tfvars points somewhere else (a custom domain in front of it, say).
-  albums_url = coalesce(var.albums_url, module.web.albums_url)
+  albums_url = local.albums_url
 
   presign_public_get_expiry_seconds = var.presign_public_get_expiry_seconds
   public_link_daily_downloads       = var.public_link_daily_downloads
@@ -85,7 +91,10 @@ module "compute" {
   monthly_budget_usd       = var.monthly_budget_usd
 }
 
-# CloudFront — the URL the stock ente app gets pointed at (7-tap custom endpoint).
+# CloudFront — the ONE distribution (D58): its domain is the server_url the
+# stock ente app gets pointed at (7-tap custom endpoint), the API rides
+# root-path ordered behaviors, and the default behavior serves the albums web
+# app from the module's private bucket.
 module "edge" {
   source   = "../modules/edge"
   env_name = var.env_name
@@ -97,4 +106,28 @@ module "edge" {
 
   api_function_url = module.compute.api_function_url
   origin_secret    = random_password.origin_secret.result
+}
+
+# D58 refactor: the albums bucket + OAC moved from the deleted modules/web
+# into modules/edge. These keep the deployed resources (and the bucket's
+# synced content) in place instead of destroy-and-recreate; the standalone
+# albums distribution had no destination and is destroyed by the same plan.
+moved {
+  from = module.web.aws_s3_bucket.web
+  to   = module.edge.aws_s3_bucket.web
+}
+
+moved {
+  from = module.web.aws_s3_bucket_public_access_block.web
+  to   = module.edge.aws_s3_bucket_public_access_block.web
+}
+
+moved {
+  from = module.web.aws_s3_bucket_policy.web
+  to   = module.edge.aws_s3_bucket_policy.web
+}
+
+moved {
+  from = module.web.aws_cloudfront_origin_access_control.web
+  to   = module.edge.aws_cloudfront_origin_access_control.web
 }

@@ -55,7 +55,10 @@ resource "aws_lambda_function" "api" {
       # to pre-H1; "invite" gates account creation on an unconsumed invite row.
       SIGNUP_MODE = var.signup_mode
       # Public album links (Phase D/F, D51/D52): where minted links point —
-      # `<ALBUMS_URL>/?t=<token>` — normally the web module's distribution.
+      # `<ALBUMS_URL>/?t=<token>` — since D58 the same domain as server_url
+      # (the one distribution serves both the API and the albums app; the env
+      # root wires the value via the make-injected albums_url_hint, because a
+      # direct reference to the distribution would be a dependency cycle).
       ALBUMS_URL = var.albums_url
       # Short public presign + the per-link daily ceilings (plan §4.1/§4.2).
       PRESIGN_PUBLIC_GET_EXPIRY_SECONDS = tostring(var.presign_public_get_expiry_seconds)

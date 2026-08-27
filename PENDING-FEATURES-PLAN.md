@@ -378,17 +378,19 @@ answer is "nothing", by construction:
 
 ---
 
-## 6. Web deployment (Phase F, D52)
+## 6. Web deployment (Phase F, D52; consolidated D58)
 
 The albums viewer hosting that Phase D's links point at. Full operator steps
-in INSTALL.md C13; resource detail in AWS-RESOURCES.md rows 23–27.
+in INSTALL.md C13; resource detail in AWS-RESOURCES.md rows 22–27.
 
-- **A second CloudFront distribution + OAC bucket**
-  (`src/infra/modules/web`): the albums base URL must not be the API's
-  (museum's `apps.public-albums` contract), and the API distribution + its
-  web ACL are the exact pair the D47 FREE plan subscribes — so albums rides
-  its own distribution, pay-as-you-go, no WAF, fronting a fully private
-  bucket (OAC, public-access-block ×4, SPA fallback 403/404 → index).
+- **The SAME CloudFront distribution as the API** (D58 — this section
+  originally specified a second distribution; the FREE pricing plan's
+  3-distributions-per-account cap consolidated them): the API rides
+  root-path ordered behaviors derived from src/app.ts (guard-tested), the
+  default behavior serves a fully private bucket (OAC, public-access-block
+  ×4, SPA fallback via a viewer-request CloudFront function — never
+  `custom_error_response`, which would corrupt the API's museum-shaped
+  404/403 JSON). Share links are `https://<server_url domain>/?t=<token>`.
   The bucket holds build artifacts only: `force_destroy`, no versioning,
   inside `make destroy` scope.
 - **Pinned albums build**: ente-io/ente tag `photos-v1.3.61`, recorded in
@@ -396,13 +398,13 @@ in INSTALL.md C13; resource detail in AWS-RESOURCES.md rows 23–27.
   agree). `make build-web` sparse-clones the tag and static-exports the app
   with the API URL **baked in at build time** — an API-URL change is a
   rebuild, not a re-sync; `make deploy-web` (guard-account-gated) syncs +
-  invalidates.
-- **Operator order for an existing pre-Phase-F deployment**: re-paste
-  `src/infra/deployer-policy.json` over the deployer's inline policy →
-  `make plan` (expect **+5 `module.web` resources** and the API Lambda's
-  env to roll: `ALBUMS_URL` + the D51 knobs) → `make deploy` →
-  `make build-web` → `make deploy-web` → mint a share link in the app and
-  open it in a browser (the D52 release gate).
+  invalidates the consolidated distribution.
+- **Operator order for an existing pre-D58 deployment**: re-paste
+  `src/infra/deployer-policy.json` over the deployer's inline policy (the
+  CloudFront function actions are new) → the D58 migration cycle in
+  INSTALL.md ("Migrating an existing deployment to the consolidated
+  distribution") → `make build-web` → `make deploy-web` → mint a share link
+  in the app and open it in a browser (the D52 release gate).
 
 ---
 

@@ -20,15 +20,16 @@ presigned S3 is the whole backend.
 ## Architecture
 
 ```
-CloudFront ── API Lambda (hono, Function URL auth NONE) ── DynamoDB single table
-                 │                                          (gsi1 collection diff,
-                 ├── presigned PUT/GET ─► S3 objects bucket  gsi2 collection feed,
-                 │      (clients move ALL bytes)             gsi3 tokens/trash/entity/fd)
-                 ├── SES (OTT mail)
-                 └── EventBridge cron: trash purge (30 d); OTTs expire via DynamoDB TTL
-
-CloudFront (albums) ─► S3 web bucket (OAC, private) — the pinned albums viewer;
-                       public share links are <albums_url>/?t=<token> (D52)
+CloudFront (ONE distribution, D58)
+  ├─ /ping, /users*, /files*, … (route-prefix behaviors)
+  │    └── API Lambda (hono, Function URL auth NONE) ── DynamoDB single table
+  │           │                                          (gsi1 collection diff,
+  │           ├── presigned PUT/GET ─► S3 objects bucket  gsi2 collection feed,
+  │           │      (clients move ALL bytes)             gsi3 tokens/trash/entity/fd)
+  │           ├── SES (OTT mail)
+  │           └── EventBridge cron: trash purge (30 d); OTTs expire via DynamoDB TTL
+  └─ default ─► S3 web bucket (OAC, private) — the pinned albums viewer (SPA via
+                CloudFront function); share links are <server_url>/?t=<token> (D52/D58)
 ```
 
 With BYO storage pools (D55) a presigned URL may point at a per-pool household
@@ -48,7 +49,7 @@ src/                the server: one endpoint = one handler file
   domain/           shared logic (srp math, diffs, trash, tokens, quotas, sharing)
   ports/ adapters/  db/blobs/mail/clock ports; memory (unit) + AWS (LocalStack/prod)
   workers/          trashPurge (EventBridge cron)
-  infra/            OpenTofu — data/compute/edge/web modules, dev env, deployer-policy.json
+  infra/            OpenTofu — data/compute/edge modules, dev + test envs, deployer-policy.json
 test/unit           356 scenarios incl. the M1–M4 gate scripts
 test/integration    LocalStack end-to-end (real presigned HTTP, SES, SRP)
 test/infra          plan-time lifecycle/storage-class guards

@@ -49,13 +49,29 @@ variable "monthly_budget_usd" {
   default = 25
 }
 
-# Optional override for where share links point (D51/D52). Null means "the
-# web module's own CloudFront domain", which is right until a custom domain
-# fronts the albums app. If set, it must be the ORIGIN only (https://host, no
-# path): the server appends /?t=<token>.
+# Optional override for where share links point (D51/D52/D58). Null means
+# "this deployment's own distribution domain" (the albums app rides the same
+# distribution as the API since D58 — see albums_url_hint below), which is
+# right until a custom domain fronts the stack. If set, it must be the ORIGIN
+# only (https://host, no path): the server appends /?t=<token>.
 variable "albums_url" {
   type    = string
   default = null
+}
+
+# NOT a tfvars value — injected by `make plan` as
+# `-var albums_url_hint=$(tofu output -raw server_url)`. The albums app is
+# served by the SAME distribution as the API (D58), so ALBUMS_URL should be
+# that distribution's own URL — a value tofu cannot wire declaratively
+# (lambda env → distribution → function URL → lambda is a dependency cycle).
+# The hint feeds the previous apply's server_url back in at plan time: a
+# distribution's domain never changes in place, so the value is stable from
+# the first apply on. Empty (a fresh env's first plan, or a bare `tofu plan`)
+# falls through to the loud .invalid sentinel; the routine next plan/deploy
+# pins the real domain.
+variable "albums_url_hint" {
+  type    = string
+  default = ""
 }
 
 # Optional overrides for the Phase D public-link knobs (D51); the defaults

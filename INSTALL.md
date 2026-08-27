@@ -186,8 +186,9 @@ This creates **27 resources** (full inventory in
 [AWS-RESOURCES.md](AWS-RESOURCES.md) §1): a DynamoDB table, a versioned S3
 bucket, two Lambdas, a public Function URL fronted by CloudFront, a daily
 trash-purge cron, log groups, an SNS alarm topic and two alarms — plus the
-albums web hosting (a private static bucket behind a second CloudFront
-distribution), whose content is built and synced separately in C13.
+albums web hosting (a private static bucket served by the SAME CloudFront
+distribution as the API, D58), whose content is built and synced separately
+in C13.
 
 Steps C1–C4 are one-time, out-of-band AWS work. From C5 on it is all make
 targets.
@@ -328,6 +329,13 @@ On a first deploy expect **27 to add, 0 to change, 0 to destroy**. **Read the
 plan.** Any `destroy` or `replace` line on a first deploy means wrong
 credentials or a wrong `env_name` — stop and fix it.
 
+One expected quirk of a FIRST plan (D58): the banner
+`no server_url in state yet — ALBUMS_URL deploys as the pending sentinel`.
+The Lambda's `ALBUMS_URL` should be the distribution's own URL, which does
+not exist yet — the first apply deploys a loud placeholder and the routine
+second `make plan && make deploy` (a one-line Lambda env update) pins the
+real domain. C13 reminds you.
+
 ### C7. Deploy
 
 ```bash
@@ -394,12 +402,14 @@ backup, browse, trash/restore, second-device login. Watch
 AWS_PROFILE=ente-sl make pricing-plan
 ```
 
-One-time, idempotent, and the biggest single line off the bill: the flat-rate
-FREE plan covers the WAF web ACL, its rate rule, and all CloudFront/WAF
-request fees for this distribution — otherwise ≈ $6/mo of flat WAF fees (D47).
-The plan's allowances (1M requests / 100 GB per month) only ever see small
-JSON — photo bytes go straight to S3 via presigned URLs — and exceeding them
-never bills anything.
+One-time **per environment**, idempotent, and the biggest single line off the
+bill: the flat-rate FREE plan covers the WAF web ACL, its rate rule, and all
+CloudFront/WAF request fees for this distribution — otherwise ≈ $6/mo of flat
+WAF fees (D47). Since D58 the one distribution also serves the albums web
+app, so the subscription covers that too. The plan's allowances (1M requests
+/ 100 GB per month) only ever see small JSON plus a few MB of static assets —
+photo bytes go straight to S3 via presigned URLs — and exceeding them never
+bills anything.
 
 It is a CLI step rather than a tofu resource because the AWS provider does not
 support pricing plans yet; consequently it does **not** survive `make destroy`
@@ -415,17 +425,27 @@ refuses (or warns on) the subscription while the distribution uses them. If subs
 configuration, a pre-D47 edge config is still deployed — run the C6/C7
 plan-deploy cycle first, then retry.
 
-The FREE plan covers **only** the API distribution and its web ACL. The albums
-distribution from C13 below deliberately stays on pay-as-you-go (static assets
-sit inside CloudFront's perpetual free tier) — don't try to add it.
+One subscription covers exactly one distribution + one web ACL, and the FREE
+plan allows at most **3 distributions per AWS account** — the D58
+consolidation is what keeps prod + test at 2 (one spare). Subscribe **every
+deployed env** (`make profile test && … make pricing-plan` too): an
+unsubscribed env silently pays the ~$6/mo WAF fees on pay-as-you-go.
 
 ### C13. Deploy the albums web app (public share links)
 
 Public album links minted by the server are `<albums_url>/?t=<token>` — they
-only work once ente's **albums web viewer** is being served at that URL. The
-tofu from C7 already created the hosting (a private S3 bucket behind its own
-CloudFront distribution, the `albums_url` output, wired into the Lambda's
-`ALBUMS_URL`); this step builds and uploads the app itself.
+only work once ente's **albums web viewer** is being served at that URL.
+Since D58 that URL is the **same domain as `server_url`**: the one CloudFront
+distribution serves the API on its route prefixes and the albums app on
+everything else (a private S3 bucket behind OAC). The tofu from C7 already
+created the hosting; this step builds and uploads the app itself.
+
+First, pin `ALBUMS_URL` (fresh deploys only — see the C6 note):
+
+```bash
+AWS_PROFILE=ente-sl make plan      # one in-place Lambda env change: ALBUMS_URL
+AWS_PROFILE=ente-sl make deploy    # sentinel -> the distribution's real domain
+```
 
 Prerequisites: `git`, Node ≥ 20 and a recent `npm` (the ente web workspace
 pins npm 11.x), network access to github.com and the npm registry, and disk
@@ -445,11 +465,12 @@ Three things worth knowing:
   `build-web` defaults it to the `server_url` output; building before the
   first deploy needs `make build-web ALBUMS_API_ORIGIN=https://<server_url>`.
   If `server_url` ever changes (e.g. after `make destroy` + re-apply), rebuild
-  — re-syncing the old build keeps pointing at the dead API.
+  — re-syncing the old build keeps pointing at the dead API. (Since D58 the
+  app is served from that same domain, so its API calls are same-origin.)
 - **Custom domain**: set `albums_url = "https://albums.example.com"` in the
   tfvars (origin only — the server appends `/?t=<token>`) and re-deploy so
-  minted links use it. Fronting the distribution with that domain (ACM cert +
-  alias) is out of scope here.
+  minted links use it; it wins over the D58 hint. Fronting the distribution
+  with that domain (ACM cert + alias) is out of scope here.
 - **Verify** by creating a share link in the ente app and opening it in a
   browser — the album should render and (if enabled) collect uploads should
   work. A blank page with console 401s means the app was built against the
@@ -701,6 +722,40 @@ AWS_PROFILE=ente-sl make smoke
 
 `make outputs` reprints the URLs anytime.
 
+### Migrating an existing deployment to the consolidated distribution (D58)
+
+A deployment created before D58 has two CloudFront distributions (API +
+albums). The first plan/deploy after pulling the change consolidates them —
+one ordinary cycle, no tfvars edits, in this order:
+
+1. `make profile dev` (or `test`), then `AWS_PROFILE=ente-sl make plan`.
+2. **Read the plan against this expected shape** — 4 moved, 1 to add, 3 to
+   change, 1 to destroy:
+   - *moved* (not destroyed): the web bucket, its public-access block, its
+     bucket policy and the OAC — `module.web.* -> module.edge.*`. The
+     bucket's synced content survives; no `make deploy-web` re-run needed.
+   - *update in-place*: the **main distribution** (new S3 origin, default
+     behavior now the web app, 16 ordered behaviors, `default_root_object`,
+     comment), the web **bucket policy** (`AWS:SourceArn` re-pins to the main
+     distribution), and the **API Lambda** (`ALBUMS_URL` becomes the
+     `server_url` domain — the plan-time hint reads it from state).
+   - *add*: the SPA viewer-request CloudFront function.
+   - *destroy*: the standalone albums distribution.
+   - **Any `replace` line on the main distribution or the buckets = ABORT.**
+     Replacement mints a new domain and breaks every configured client;
+     nothing in this change forces one.
+3. `AWS_PROFILE=ente-sl make deploy` (type the profile name). The
+   distribution update takes 5–15 minutes; the API keeps serving throughout
+   (the albums page may blip while the bucket policy re-pins).
+4. Verify: `make smoke` (still 403/200), then open `https://<server_url>/` in
+   a browser — the albums viewer should load from the same domain.
+5. `make pricing-plan-status` — the FREE subscription survives the in-place
+   update; it should still be ACTIVE against the same distribution + web ACL.
+   On the test env, run `make pricing-plan` if it was never subscribed.
+6. **Share links minted before the migration** point at the old albums
+   distribution's now-deleted domain. The tokens stay valid — re-copy each
+   link from the app (the same caveat as after a destroy/re-apply, D52).
+
 ---
 
 ## A second environment (test)
@@ -731,6 +786,12 @@ Notes:
   test key as sensitive as the real one.
 - The account guard is per-profile and skips a first deploy (no state yet),
   so a fresh test env is never blocked by it.
+- After the first apply, run `make plan && make deploy` once more to pin
+  `ALBUMS_URL` (C6 note, D58) — and **subscribe this env's distribution
+  too**: `AWS_PROFILE=ente-sl make pricing-plan`. The FREE plan is per
+  distribution + web ACL; an unsubscribed test env silently pays ~$6/mo of
+  WAF fees. The account-wide FREE-plan budget is 3 distributions; prod +
+  test = 2 (D58).
 - Full teardown when you are done:
 
 ```bash
@@ -753,7 +814,7 @@ AWS_PROFILE=ente-sl make destroy
 ```
 
 This removes the **stateless half only**: both Lambdas, the Function URL, the
-cron, the log groups, the alarms, both CloudFront distributions and the
+cron, the log groups, the alarms, the CloudFront distribution and the
 albums web bucket (build artifacts only — rebuildable via `make build-web`).
 The table and the objects bucket — every photo — are deliberately out of
 scope and protected by the `delete_protection` rails (D57): API-level
@@ -761,11 +822,13 @@ deletion protection on the table, no `force_destroy` on the bucket.
 
 Two things to know:
 
-- Re-applying afterwards mints **new** CloudFront domains and a new function
+- Re-applying afterwards mints a **new** CloudFront domain and a new function
   URL: every client must be re-pointed at the new `server_url`, the albums
-  app must be rebuilt against it (C13), and every share link minted before
-  the destroy points at the dead albums domain — the tokens stay valid, so
-  re-copying each link from the app recovers it.
+  app must be rebuilt against it (C13), every share link minted before
+  the destroy points at the dead domain — the tokens stay valid, so
+  re-copying each link from the app recovers it — and `ALBUMS_URL` needs the
+  routine second `make plan && make deploy` to pick the new domain up (the
+  D58 hint reads it from state).
 - There is intentionally no target that deletes the data. `make destroy-data`
   refuses and prints the manual steps, which since D57 are: set
   `delete_protection = false` in the profile's tfvars and plan/deploy **that
