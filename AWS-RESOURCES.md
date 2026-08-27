@@ -1,7 +1,8 @@
 # AWS-RESOURCES — what the first deploy creates
 
 Pre-deploy report for M7 (DECISIONS.md D4). Read alongside NEXT-TASKS.md §4.
-Derived from `src/infra` as of 2026-08-17; **no cloud deploy has happened yet**,
+Derived from `src/infra` as of 2026-08-17 (albums web hosting added
+2026-08-27, Phase F/D52); **no cloud deploy has happened yet**,
 so nothing below has been observed running — it is what `tofu apply` will
 attempt.
 
@@ -12,7 +13,7 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 `-prod-`. `<account>` is the 12-digit account ID, filled in at plan time from
 `aws_caller_identity`.
 
-## 1. The inventory — 22 managed resources
+## 1. The inventory — 27 managed resources
 
 ### Stateful (`modules/data`) — carries `prevent_destroy`
 
@@ -54,6 +55,44 @@ on `POST /users/ott` will not fire an alarm. That one is a log concern.
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
 | 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert, no OAC (deliberate — same finding as immich-serverless). Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies. All 7 methods allowed. Its domain is the `server_url` output the app gets pointed at. |
+
+### Albums web hosting (`modules/web`) — Phase F, D52
+
+Static hosting for the pinned albums viewer (`ORACLE-VERSION` "albums web"
+line; built by `make build-web`, synced by `make deploy-web`). A **second**
+distribution, deliberately: share links are `<albums_url>/?t=<token>` and that
+base URL must not be the API's (museum's `apps.public-albums` is a separate
+origin), and keeping the API distribution untouched preserves the exact
+resource pair the D47 FREE-plan subscription covers.
+
+| # | Type | Name / identifier | Notes |
+|---|---|---|---|
+| 23 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — `force_destroy = true`, **no** versioning, **no** `prevent_destroy`: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
+| 24 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. The bucket is never public. |
+| 25 | `aws_s3_bucket_policy` | ↑ | `s3:GetObject` to the `cloudfront.amazonaws.com` service principal only, condition-pinned (`AWS:SourceArn`) to distribution 27. |
+| 26 | `aws_cloudfront_origin_access_control` | `ente-sl-dev-web-albums` | sigv4, `signing_behavior = always`. The repo's "no OAC" decision applies to the **Lambda** origin (IAM auth breaks the POST body hash); an S3 origin takes OAC cleanly and must have it. |
+| 27 | `aws_cloudfront_distribution` | comment `ente-sl-dev albums web` | `PriceClass_100` (pay-as-you-go — see the WAF/pricing note below), default `*.cloudfront.net` cert. Managed **CachingOptimized** default (hashed assets), **CachingDisabled** pinned to `/index.html` (it names the current asset hashes), managed SecurityHeadersPolicy. SPA fallback: 403 **and** 404 → `/index.html` as 200, `error_caching_min_ttl = 0` (OAC without ListBucket surfaces a missing key as 403, so both codes must map). Its domain is the `albums_url` output → the Lambda's `ALBUMS_URL`. |
+
+Two pricing consequences, both deliberate (D52):
+
+- **This distribution stays on pay-as-you-go** — the D47 FREE-plan
+  subscription covers exactly the API distribution + its web ACL, and a few MB
+  of static assets at share-link traffic sits inside CloudFront's perpetual
+  free tier (1 TB / 10M requests per month) either way. Do not add it to the
+  pricing plan; do not point `make pricing-plan` at it.
+- **No WAF here.** A web ACL is $5/mo flat on pay-as-you-go and a cached
+  static origin has no per-request compute to protect. Rate limiting for the
+  anonymous **`/public-collection/*` API surface** (plan §4.1a) lives on the
+  **API** distribution, which those requests ride: the D47-reshaped
+  2000/5min/IP rate rule covers them like every other route. A *tighter,
+  path-scoped* rate rule is not possible under the FREE plan — scoping a rate
+  statement to the `/public-collection` prefix needs a byte-match scope-down,
+  exactly the feature the FREE tier gates — so the narrower bounds are
+  app-level and per-link instead (D51: token check as one `GetItem`
+  cheap-fail, verify-password attempt caps, per-link daily download/upload
+  ceilings, short public presigns), with reserved concurrency and the budget
+  alarms as the bill fuses. Restore the 300/5min scoped rule only if the plan
+  is ever cancelled back to pay-as-you-go.
 
 Everything carries default tags `Project=ente-serverless`, `Env=dev`,
 `ManagedBy=opentofu`.
@@ -317,6 +356,7 @@ For a ~500 GB library with ~10 GB of thumbnails and personal-scale traffic:
 | WAF (web ACL + D43 rate rule) | $5 + $1 flat + $0.60/1M req | $0 under D47, else ≈ $6 |
 | CloudWatch Logs | 30-day retention, $0.50/GB ingest | < $1 |
 | SES | $0.10 / 1,000 mails | ~$0 |
+| Albums web (S3 + CloudFront static, D52) | a few MB of assets, `PriceClass_100`, pay-as-you-go free tiers | ~$0 (pennies at worst) |
 | **Baseline** | | **≈ $3–5** |
 
 The WAF line is the one worth understanding: on pay-as-you-go its flat fees
@@ -359,7 +399,9 @@ Steps 1–4 are the out-of-band work; from step 5 on it is all make targets.
    dropped by the repo split.
 6. **`make plan`** — rebuilds the bundles first (so `dist/` can never be stale
    at plan time), refuses with instructions if the tfvars file is missing, and
-   saves `tfplan`. Expect **22 to add, 0 to change, 0 to destroy**. Read it.
+   saves `tfplan`. Expect **27 to add, 0 to change, 0 to destroy** on a fresh
+   deploy (an existing pre-Phase-F deployment instead adds the 5 `module.web`
+   resources and updates the API Lambda's env). Read it.
 7. **`make deploy`** — applies the *saved* plan, so what ships is what you
    reviewed, then prints the outputs. CloudFront takes 5–15 minutes to reach
    Deployed; the other 21 resources are quick. Then confirm the SNS

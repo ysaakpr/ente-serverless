@@ -7,7 +7,7 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
-	pricing-plan pricing-plan-status
+	pricing-plan pricing-plan-status build-web deploy-web
 
 test:
 	npx vitest run test/unit
@@ -88,6 +88,64 @@ capture-diff:
 	node --experimental-transform-types tools/capture-diff.ts
 
 # ---------------------------------------------------------------------------
+# Albums web viewer (Phase F, D52) — the second client in the compatibility
+# contract (plan §3 caveat 5). PINNED, same discipline as the museum image:
+# this tag must match the "albums web" line in ORACLE-VERSION (guard-tested).
+# photos-v1.3.61 = ente-io/ente release of 2026-08-11; the albums app lives
+# at web/apps/albums in that monorepo and rides the photos-v* tag family
+# (it has no tag family of its own).
+#
+# Build facts, verified against the repo at the pinned tag's era:
+#   - web/ is an npm workspace (engines pin npm 11.x); `npm ci` then
+#     `npm run build:albums` produces a Next.js STATIC EXPORT at
+#     web/apps/albums/out/ — pure files, which is why a private S3 bucket
+#     behind CloudFront (modules/web) can serve it.
+#   - NEXT_PUBLIC_ENTE_ENDPOINT is baked in AT BUILD TIME (web/apps/albums/
+#     .env); changing the API URL means rebuilding, not re-syncing.
+# ---------------------------------------------------------------------------
+ALBUMS_WEB_TAG  = photos-v1.3.61
+ALBUMS_WEB_REPO = https://github.com/ente-io/ente
+
+# Builds LOCALLY into dist/web-albums (gitignored). Deploys nothing.
+# The API origin the build bakes in: pass ALBUMS_API_ORIGIN=https://... or,
+# when the stack is already deployed, let it default to the server_url output.
+build-web:
+	@command -v git >/dev/null || { echo "git is required"; exit 1; }
+	@command -v npm >/dev/null || { echo "npm is required (the ente web workspace pins npm 11.x — a very old npm may refuse)"; exit 1; }
+	@ORIGIN="$${ALBUMS_API_ORIGIN:-$$($(TF) output -raw server_url 2>/dev/null)}"; \
+	case "$$ORIGIN" in \
+		http*) ;; \
+		*) echo "no API origin: pass ALBUMS_API_ORIGIN=https://<server_url> (or deploy first so 'tofu output server_url' resolves)"; exit 1;; \
+	esac; \
+	echo "==> building ente albums $(ALBUMS_WEB_TAG) against $$ORIGIN"; \
+	rm -rf dist/ente-web-src dist/web-albums; \
+	git clone --depth 1 --branch $(ALBUMS_WEB_TAG) --filter=blob:none --sparse $(ALBUMS_WEB_REPO) dist/ente-web-src && \
+	git -C dist/ente-web-src sparse-checkout set web && \
+	cd dist/ente-web-src/web && npm ci && \
+	NEXT_PUBLIC_ENTE_ENDPOINT="$$ORIGIN" NEXT_TELEMETRY_DISABLED=1 npm run build:albums || { \
+		echo ""; \
+		echo "build failed. Prerequisites: git, node >= 20, npm 11.x, network access to"; \
+		echo "github.com and the npm registry. The workspace install is large (~2 GB)."; \
+		echo "Nothing about the tofu depends on this build — retry after fixing the tool."; \
+		exit 1; }
+	mkdir -p dist/web-albums
+	cp -R dist/ente-web-src/web/apps/albums/out/. dist/web-albums/
+	@echo "==> dist/web-albums ready ($$(du -sh dist/web-albums | cut -f1)) — 'make deploy-web' syncs it"
+
+# Syncs the local build to the web bucket and invalidates the distribution.
+# Guarded like every other state-mutating target. --delete keeps the bucket
+# an exact mirror; a viewer holding a stale index.html mid-deploy re-fetches
+# it uncached (the module pins index.html to CachingDisabled) and heals.
+deploy-web: guard-account
+	@test -d dist/web-albums || { echo "no dist/web-albums — run 'make build-web' first"; exit 1; }
+	@test -f dist/web-albums/index.html || { echo "dist/web-albums has no index.html — the albums build did not finish"; exit 1; }
+	@BUCKET=$$($(TF) output -raw web_bucket); DIST=$$($(TF) output -raw web_distribution_id); \
+	aws s3 sync dist/web-albums "s3://$$BUCKET" --delete && \
+	aws cloudfront create-invalidation --distribution-id "$$DIST" --paths "/*" \
+		--query 'Invalidation.{id:Id,status:Status}' --output table
+	@echo "==> albums app live at $$($(TF) output -raw albums_url)"
+
+# ---------------------------------------------------------------------------
 # AWS deploy (M7, decision D4). Everything environment-specific — region,
 # hashing_key, mail_from — lives in src/infra/dev/ente-sl.tfvars (gitignored).
 # These targets pass ONLY -var-file, so plan and apply can never disagree about
@@ -145,7 +203,8 @@ plan: build-lambda guard-account
 	$(TF) plan -var-file=$(TFVARS) -out=$(TFPLAN)
 
 # Applies the SAVED plan, so what ships is exactly what you reviewed.
-# CloudFront takes 5-15 min to reach Deployed; the other 16 resources are quick.
+# The two CloudFront distributions take 5-15 min to reach Deployed; the rest
+# of the resources are quick.
 deploy: guard-account
 	@test -f src/infra/dev/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
 	$(TF) apply $(TFPLAN)
@@ -204,14 +263,17 @@ pricing-plan-status:
 		--output json
 
 # Tears down the STATELESS half only: both lambdas, the function URL, the cron,
-# the log groups and the distribution. module.data — the table and the objects
-# bucket — is deliberately out of scope; it carries prevent_destroy and holds
-# every photo. Costs a redeploy, not a memory.
-# Re-applying afterwards mints a NEW CloudFront domain and a NEW function URL,
-# so every client has to be re-pointed at the new server_url.
+# the log groups, both distributions and the web-albums bucket (build artifacts
+# only — force_destroy, rebuildable via build-web). module.data — the table and
+# the objects bucket — is deliberately out of scope; it carries prevent_destroy
+# and holds every photo. Costs a redeploy, not a memory.
+# Re-applying afterwards mints NEW CloudFront domains and a NEW function URL:
+# every client has to be re-pointed at the new server_url, and every share link
+# minted before the destroy points at the DEAD albums domain (tokens stay
+# valid — re-copy the link from the app after rebuilding, D52).
 destroy: guard-account
-	@echo "==> destroying module.compute + module.edge — table and bucket are preserved"
-	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge
+	@echo "==> destroying module.compute + module.edge + module.web — table and objects bucket are preserved"
+	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge -target=module.web
 
 # There is deliberately no target that destroys module.data.
 destroy-data:

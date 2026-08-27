@@ -51,6 +51,13 @@ resource "aws_lambda_function" "api" {
       MAIL_FROM               = var.mail_from
       INSTANCE_ID             = local.prefix
       FREE_PLAN_STORAGE_BYTES = tostring(var.free_plan_storage_bytes)
+      # Public album links (Phase D/F, D51/D52): where minted links point —
+      # `<ALBUMS_URL>/?t=<token>` — normally the web module's distribution.
+      ALBUMS_URL = var.albums_url
+      # Short public presign + the per-link daily ceilings (plan §4.1/§4.2).
+      PRESIGN_PUBLIC_GET_EXPIRY_SECONDS = tostring(var.presign_public_get_expiry_seconds)
+      PUBLIC_LINK_DAILY_DOWNLOADS       = tostring(var.public_link_daily_downloads)
+      PUBLIC_LINK_DAILY_UPLOADS         = tostring(var.public_link_daily_uploads)
       # Origin lock (finding 4): the app 403s any request not carrying this
       # value in x-origin-secret; CloudFront injects it at the origin, so the
       # public Function URL stops bypassing every edge control.

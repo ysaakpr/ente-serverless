@@ -40,6 +40,15 @@ module "data" {
   env_name = var.env_name
 }
 
+# Static hosting for the albums web viewer (Phase F, D52): private bucket +
+# OAC + its own distribution — public links need a base URL that is not the
+# API's. Stateless like compute: the bucket holds only `make build-web`
+# output, so `make destroy` may take it down (force_destroy in the module).
+module "web" {
+  source   = "../modules/web"
+  env_name = var.env_name
+}
+
 # The stateless half — destroying it costs a redeploy, not a photo.
 module "compute" {
   source   = "../modules/compute"
@@ -56,6 +65,14 @@ module "compute" {
   # One address by default: the operator and the sender are the same person on a
   # self-host. Set alarm_email in the tfvars only to split them.
   alarm_email = coalesce(var.alarm_email, var.mail_from)
+
+  # Share links are minted against the web module's distribution unless the
+  # tfvars points somewhere else (a custom domain in front of it, say).
+  albums_url = coalesce(var.albums_url, module.web.albums_url)
+
+  presign_public_get_expiry_seconds = var.presign_public_get_expiry_seconds
+  public_link_daily_downloads       = var.public_link_daily_downloads
+  public_link_daily_uploads         = var.public_link_daily_uploads
 
   origin_secret            = random_password.origin_secret.result
   api_reserved_concurrency = var.api_reserved_concurrency

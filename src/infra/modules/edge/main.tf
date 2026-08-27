@@ -67,6 +67,18 @@ resource "aws_wafv2_web_acl" "api" {
   # per-account auth caps live in the app and are atomic (D42/D45 — OTT 20
   # wrong, SRP 5 attempts, TOTP 5). Blocked requests never reach Lambda and
   # never count against the plan allowance.
+  #
+  # /public-collection/* (Phase D/F, plan §4.1a, D52): the anonymous album
+  # surface rides this SAME distribution and therefore this same rule — a
+  # scraper hammering a leaked link dies at the edge at 2000/5min/IP like any
+  # other flood. A TIGHTER path-scoped rate rule is not possible on the FREE
+  # plan: scoping a rate statement to the /public-collection prefix needs a
+  # byte-match scope-down, which is exactly the feature D47 gave up. The
+  # narrower bounds live in the app instead, where they are per-LINK rather
+  # than per-IP (D51): token check first as one GetItem (cheap fail),
+  # verify-password attempt caps, per-link daily download/upload ceilings,
+  # and short public presigns. Restore a 300/5min scoped rule here only if
+  # the pricing plan is ever cancelled back to pay-as-you-go.
   rule {
     name     = "rate-limit-per-ip"
     priority = 1

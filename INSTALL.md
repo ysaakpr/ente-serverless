@@ -178,10 +178,12 @@ after a code fix preserves your test account.
 
 ## Part C — Deploy to AWS
 
-This creates **22 resources** (full inventory in
+This creates **27 resources** (full inventory in
 [AWS-RESOURCES.md](AWS-RESOURCES.md) §1): a DynamoDB table, a versioned S3
 bucket, two Lambdas, a public Function URL fronted by CloudFront, a daily
-trash-purge cron, log groups, an SNS alarm topic and two alarms.
+trash-purge cron, log groups, an SNS alarm topic and two alarms — plus the
+albums web hosting (a private static bucket behind a second CloudFront
+distribution), whose content is built and synced separately in C13.
 
 Steps C1–C4 are one-time, out-of-band AWS work. From C5 on it is all make
 targets.
@@ -289,7 +291,7 @@ This target:
 3. refuses with instructions if `ente-sl.tfvars` is missing,
 4. saves the plan to `tfplan`.
 
-On a first deploy expect **22 to add, 0 to change, 0 to destroy**. **Read the
+On a first deploy expect **27 to add, 0 to change, 0 to destroy**. **Read the
 plan.** Any `destroy` or `replace` line on a first deploy means wrong
 credentials or a wrong `env_name` — stop and fix it.
 
@@ -377,6 +379,46 @@ refuses (or warns on) the subscription while the distribution uses them. If subs
 configuration, a pre-D47 edge config is still deployed — run the C6/C7
 plan-deploy cycle first, then retry.
 
+The FREE plan covers **only** the API distribution and its web ACL. The albums
+distribution from C13 below deliberately stays on pay-as-you-go (static assets
+sit inside CloudFront's perpetual free tier) — don't try to add it.
+
+### C13. Deploy the albums web app (public share links)
+
+Public album links minted by the server are `<albums_url>/?t=<token>` — they
+only work once ente's **albums web viewer** is being served at that URL. The
+tofu from C7 already created the hosting (a private S3 bucket behind its own
+CloudFront distribution, the `albums_url` output, wired into the Lambda's
+`ALBUMS_URL`); this step builds and uploads the app itself.
+
+Prerequisites: `git`, Node ≥ 20 and a recent `npm` (the ente web workspace
+pins npm 11.x), network access to github.com and the npm registry, and disk
+for a ~2 GB workspace install under `dist/`.
+
+```bash
+make build-web                     # clones ente at the PINNED tag (ALBUMS_WEB_TAG
+                                   # in the Makefile — must match ORACLE-VERSION,
+                                   # guard-tested), npm ci, static-exports the
+                                   # albums app into dist/web-albums
+AWS_PROFILE=ente-sl make deploy-web   # s3 sync to the web bucket + invalidation
+```
+
+Three things worth knowing:
+
+- **The API URL is baked in at build time** (`NEXT_PUBLIC_ENTE_ENDPOINT`).
+  `build-web` defaults it to the `server_url` output; building before the
+  first deploy needs `make build-web ALBUMS_API_ORIGIN=https://<server_url>`.
+  If `server_url` ever changes (e.g. after `make destroy` + re-apply), rebuild
+  — re-syncing the old build keeps pointing at the dead API.
+- **Custom domain**: set `albums_url = "https://albums.example.com"` in the
+  tfvars (origin only — the server appends `/?t=<token>`) and re-deploy so
+  minted links use it. Fronting the distribution with that domain (ACM cert +
+  alias) is out of scope here.
+- **Verify** by creating a share link in the ente app and opening it in a
+  browser — the album should render and (if enabled) collect uploads should
+  work. A blank page with console 401s means the app was built against the
+  wrong API origin.
+
 ---
 
 ## Updating a deployment
@@ -401,14 +443,18 @@ AWS_PROFILE=ente-sl make destroy
 ```
 
 This removes the **stateless half only**: both Lambdas, the Function URL, the
-cron, the log groups, the alarms and the CloudFront distribution. The table
-and the objects bucket — every photo — are deliberately out of scope and
-protected by `prevent_destroy`.
+cron, the log groups, the alarms, both CloudFront distributions and the
+albums web bucket (build artifacts only — rebuildable via `make build-web`).
+The table and the objects bucket — every photo — are deliberately out of
+scope and protected by `prevent_destroy`.
 
 Two things to know:
 
-- Re-applying afterwards mints a **new** CloudFront domain and function URL,
-  so every client must be re-pointed at the new `server_url`.
+- Re-applying afterwards mints **new** CloudFront domains and a new function
+  URL: every client must be re-pointed at the new `server_url`, the albums
+  app must be rebuilt against it (C13), and every share link minted before
+  the destroy points at the dead albums domain — the tokens stay valid, so
+  re-copying each link from the app recovers it.
 - There is intentionally no target that deletes the data. `make destroy-data`
   refuses and prints the four manual steps (empty the bucket, lift both
   `prevent_destroy` blocks, disable the table's deletion protection, then

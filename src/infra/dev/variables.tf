@@ -48,3 +48,31 @@ variable "monthly_budget_usd" {
   type    = number
   default = 25
 }
+
+# Optional override for where share links point (D51/D52). Null means "the
+# web module's own CloudFront domain", which is right until a custom domain
+# fronts the albums app. If set, it must be the ORIGIN only (https://host, no
+# path): the server appends /?t=<token>.
+variable "albums_url" {
+  type    = string
+  default = null
+}
+
+# Optional overrides for the Phase D public-link knobs (D51); the defaults
+# here must match modules/compute/variables.tf, which must match config.ts
+# (guard-tested). Same pass-through rule as the D43 knobs above: a tfvars
+# value only reaches the module through these declarations.
+variable "presign_public_get_expiry_seconds" {
+  type    = number
+  default = 3600
+}
+
+variable "public_link_daily_downloads" {
+  type    = number
+  default = 10000
+}
+
+variable "public_link_daily_uploads" {
+  type    = number
+  default = 1000
+}

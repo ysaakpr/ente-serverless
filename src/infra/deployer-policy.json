@@ -165,7 +165,11 @@
         "cloudfront:List*",
         "cloudfront:CreateResponseHeadersPolicy",
         "cloudfront:UpdateResponseHeadersPolicy",
-        "cloudfront:DeleteResponseHeadersPolicy"
+        "cloudfront:DeleteResponseHeadersPolicy",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:UpdateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:CreateInvalidation"
       ],
       "Resource": "*"
     },

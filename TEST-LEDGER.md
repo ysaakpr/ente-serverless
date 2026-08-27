@@ -47,5 +47,6 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 5 | 5 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
+| web.test.ts | infra guards: albums web hosting (D52) | P3-F | 20 | 20 | ✅ |
 
-**Total: 365/365 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 385/385 passing.** CI must fail if any implemented endpoint is below 100%.

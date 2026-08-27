@@ -1049,6 +1049,79 @@ source says Y — source won).
     Discord alerts, and the middleware's response cache are museum features
     with no meaning here (billing stubbed, photos-only, single-user scale).
 
+- **D52 [SHARING 2026-08-27] Phase F: albums web hosting infra — tofu web
+  module, build/deploy pipeline for the pinned albums viewer, and the
+  plan-§4.1a edge posture for /public-collection/*. Infra + tooling only; no
+  deploy performed (M7 discipline holds).** Judgment calls:
+  - **Module placement: a fourth module, `src/infra/modules/web`,** beside
+    data/compute/edge rather than inside edge — it shares edge's technology
+    (CloudFront) but not its lifecycle or subject (edge fronts the API and is
+    pinned to the D47 FREE-plan shape; web is an independent static site the
+    operator re-syncs at will). Stateless like compute: the bucket holds only
+    `make build-web` output, so it carries `force_destroy = true`, no
+    versioning, no prevent_destroy, and `make destroy` now targets module.web
+    too — tearing it down costs a rebuild, never a memory.
+  - **A SECOND distribution, not a new origin/behavior on the API one.**
+    Three reasons: ALBUMS_URL is a different BASE URL by museum contract
+    (apps.public-albums vs the API host — path-based routing on one domain
+    would diverge from every upstream client's URL parsing); the dev env uses
+    default *.cloudfront.net domains, and one distribution has exactly one of
+    those; and the API distribution + its web ACL are the exact resource pair
+    the D47 FREE subscription was created against — mutating it risks the
+    undocumented eligibility gates D47 already tripped over. The albums
+    distribution stays on PAY-AS-YOU-GO (PriceClass_100, no WAF): static
+    assets sit inside CloudFront's perpetual free tier, a web ACL is $5/mo
+    flat, and a cached static origin has no per-request compute to protect.
+  - **OAC on the web bucket** — the long-standing "no OAC" decision transfers
+    from immich-serverless for the LAMBDA origin only (IAM auth breaks the
+    POST body hash); an S3 origin takes OAC cleanly, so the bucket is fully
+    private (public-access-block ×4) with s3:GetObject granted only to the
+    cloudfront service principal condition-pinned to this distribution's ARN.
+    SPA fallback maps BOTH 403 and 404 → /index.html 200 (OAC without
+    ListBucket surfaces missing keys as 403), error_caching_min_ttl 0. Cache
+    split: managed CachingOptimized for the hashed assets, CachingDisabled
+    pinned to /index.html (it names the current hashes — a stale index 404s
+    every asset it references), managed SecurityHeadersPolicy on both.
+  - **§4.1a rate limiting for /public-collection/*: the FREE plan cannot
+    scope a rate rule to a path** (that needs a byte-match scope-down —
+    exactly the feature D47 traded away), so the surface rides the API
+    distribution's existing unscoped 2000/5min/IP rule and the tighter bounds
+    stay app-level and per-LINK (D51: one-GetItem token cheap-fail,
+    verify-password caps, per-link daily ceilings, short public presigns),
+    with reserved concurrency + budget alarms as bill fuses. Documented in
+    edge/main.tf and AWS-RESOURCES.md (guard-tested); restore a 300/5min
+    scoped rule only if the plan is ever cancelled to pay-as-you-go.
+  - **Albums build pinned like the oracle (plan §4.5): ente-io/ente tag
+    photos-v1.3.61** (2026-08-11; the viewer lives at web/apps/albums and
+    rides the photos-v* family — it has no tags of its own). The pin lives
+    twice on purpose — Makefile `ALBUMS_WEB_TAG` (machine-read by build-web)
+    and the ORACLE-VERSION "albums web" line (the version-of-record document)
+    — with a guard asserting they agree. Build facts verified against the
+    repo 2026-08-27: npm workspace (engines npm 11.x), `npm ci && npm run
+    build:albums`, Next.js STATIC export to web/apps/albums/out/,
+    NEXT_PUBLIC_ENTE_ENDPOINT baked in AT BUILD TIME — so `make build-web`
+    builds locally into gitignored dist/web-albums (sparse clone of web/
+    only), and a separate, guard-account-gated `make deploy-web` does the s3
+    sync + invalidation. An API-URL change is a REBUILD, not a re-sync.
+  - **ALBUMS_URL wiring**: compute takes a required `albums_url` variable (no
+    default — a silent fallback would mint links pointing at ente's own
+    albums.ente.com) and the dev env feeds it
+    `coalesce(var.albums_url, module.web.albums_url)`, so a custom domain is
+    a tfvars override away. PRESIGN_PUBLIC_GET_EXPIRY_SECONDS and the two
+    D51 ceilings became optional tofu vars → Lambda env; their tofu defaults
+    (3600 / 10000 / 1000) are guard-matched to config.ts, D11-style.
+  - **Objects-bucket CORS verified, unchanged**: browser upload/download from
+    the albums origin is already covered — origins `*`, headers `*`,
+    GET/PUT/POST/HEAD, ETag exposed (multipart part PUTs need it; D33 guards
+    keep tofu and the LocalStack bootstrap in lockstep). The
+    X-Auth-Access-Token header family is API CORS (src/middleware/cors.ts,
+    museum-shaped per D29), not bucket CORS — presigned S3 requests carry no
+    custom headers.
+  - Consciously NOT done here (Phase G / operator scope): actually deploying
+    anything, custom-domain plumbing (ACM cert + alias), CloudFront access
+    logging, and the manual open-a-real-link gate on the pinned build —
+    which stays the release gate before the README row flips to Done.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

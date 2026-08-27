@@ -66,3 +66,30 @@ variable "origin_secret" {
   type      = string
   sensitive = true
 }
+
+# Public album links (Phase F, D52). No default: the env root must wire it —
+# normally to module.web's distribution URL — because a silently-wrong
+# fallback here would mint share links pointing at ente's own albums.ente.com.
+variable "albums_url" {
+  type = string
+}
+
+# Plan §4.2: a public presigned GET is a bearer URL held by an anonymous
+# party, so its validity is minutes-to-an-hour, not the authed 7 days. The
+# default must agree with config.ts (guard-tested, same as D11).
+variable "presign_public_get_expiry_seconds" {
+  type    = number
+  default = 3600
+}
+
+# Plan §4.1d per-link daily ceilings (D51): 429 once exceeded, 0 disables.
+# Defaults must agree with config.ts (guard-tested).
+variable "public_link_daily_downloads" {
+  type    = number
+  default = 10000
+}
+
+variable "public_link_daily_uploads" {
+  type    = number
+  default = 1000
+}
