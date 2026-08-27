@@ -5,6 +5,7 @@
  */
 
 import type { Deps } from '../deps.ts';
+import type { UserRow } from './users.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { getSharee } from './sharing.ts';
 import { ConditionFailedError } from '../ports/db.ts';
@@ -121,10 +122,22 @@ export const getUsage = async (deps: Deps, userId: number): Promise<{ bytes: num
   return { bytes: (row?.bytes as number) ?? 0, fileCount: (row?.fileCount as number) ?? 0 };
 };
 
-/** museum UsageCtrl.CanUploadFile: 426 when usage (+ size) exceeds the plan. */
+/**
+ * museum UsageCtrl.CanUploadFile: 426 when usage (+ size) exceeds the plan.
+ * The limit is per-user since D54 — the user row's storageLimitBytes when set
+ * (0 means ZERO: no uploads at all, deliberately unlike the 0-disables-it
+ * ceiling knobs), falling back to config.freePlanStorageBytes. Viewer
+ * accounts are refused outright with the same 426 — self-consistent with a
+ * 0-byte plan, and the stock client already renders it ("storage limit
+ * exceeded"). One extra GetItem per quota check, shared by every upload-url
+ * mint and commit; the public collect path passes the LINK OWNER's id here,
+ * so a viewer's or 0-byte owner's links can't collect either.
+ */
 export const assertQuota = async (deps: Deps, userId: number, addBytes: number | null): Promise<void> => {
+  const user = await deps.db.get<UserRow>(keys.user(userId).pk, 'META');
+  if (user?.viewer) throw errStorageLimitExceeded();
   const { bytes } = await getUsage(deps, userId);
-  const limit = deps.config.freePlanStorageBytes;
+  const limit = user?.storageLimitBytes ?? deps.config.freePlanStorageBytes;
   if (addBytes === null) {
     if (bytes >= limit) throw errStorageLimitExceeded();
     return;

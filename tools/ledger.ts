@@ -58,6 +58,7 @@ const MILESTONES: Record<string, { milestone: string; tags: string }> = {
   'presign-expiry.test.ts': { milestone: 'SEC', tags: 'presign expiry split (finding 5, D44)' },
   'db-transact.test.ts': { milestone: 'P3-A', tags: 'transactWrite atomicity + 100-op cap (D48)' },
   'sharing.test.ts': { milestone: 'P3-A', tags: '[SHARING] dual-write + link rows (D48)' },
+  'invites.test.ts': { milestone: 'H1', tags: '[INVITES] [QUOTA] invite gating + per-user storage (D54)' },
 };
 
 const rows: string[] = [];

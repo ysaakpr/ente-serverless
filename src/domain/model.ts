@@ -91,6 +91,14 @@ export const keys = {
     pk: `PUBTOKEN#${tokenHash}`,
     sk: `CEIL#${day}`,
   }),
+
+  // --- Invite-gated signup (Phase H1, D54). Ops-provisioned rows only —
+  // written by tools/invite.ts, read at signup; no client route creates them.
+  // Keyed by the LOWERCASED email in plaintext, unlike EMAIL# guards (hashed):
+  // an operator must be able to list and revoke invites without HASHING_KEY,
+  // and an invite is operator data, not a user secret. No gsi attributes
+  // (the D48 rollback rule holds for every new row type).
+  invite: (lowercasedEmail: string) => ({ pk: `INVITE#${lowercasedEmail}`, sk: 'META' }),
 };
 
 /** sk prefixes for partition listings over the sharing rows. */

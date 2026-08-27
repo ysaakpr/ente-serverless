@@ -3,7 +3,9 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { emailHash, normalizeEmail } from './tokens.ts';
+import { getInvite, inviteConsumption } from './invites.ts';
 import { ConditionFailedError } from '../ports/db.ts';
+import { errPermissionDenied } from '../lib/errors.ts';
 
 export interface UserRow {
   pk: string;
@@ -12,6 +14,18 @@ export interface UserRow {
   email: string;
   emailHash: string;
   creationTime: number;
+  /**
+   * Per-user storage cap, bytes (D54). Absent = config.freePlanStorageBytes.
+   * 0 means ZERO — no uploads at all — unlike the 0-disables-it ceilings
+   * elsewhere in config; the explicit contrast is deliberate and tested.
+   * Copied from the invite row at signup; adjusted via `make set-storage`.
+   */
+  storageLimitBytes?: number;
+  /** Viewer account (D54): consumes shares only — uploads, upload-url mints,
+   * and non-special collection creation are refused server-side. */
+  viewer?: boolean;
+  /** Federation seam, copied from the invite row ('local' today, D54). */
+  home?: string;
   [attr: string]: unknown;
 }
 
@@ -43,8 +57,19 @@ export const getUser = async (deps: Deps, userId: number): Promise<UserRow | nul
 export const createUser = async (deps: Deps, email: string): Promise<number> => {
   const normalized = normalizeEmail(email);
   const hash = emailHash(normalized, deps.hashingKey);
+
+  // Invite-gated signup (D54). The sendOtt gate already refused the OTT, so
+  // this belt-and-braces check only fires in the revoked-between-OTT-and-verify
+  // window (or a mode flip mid-flow). Overrides apply whenever a usable invite
+  // exists, invite mode or not — an operator who pre-provisioned limits and
+  // later opened signup keeps them.
+  const invite = await getInvite(deps, normalized);
+  const usableInvite = invite && invite.consumedAt === undefined ? invite : null;
+  if (deps.config.signupMode === 'invite' && !usableInvite) throw errPermissionDenied();
+
   const userId = deps.ids.next();
   const now = deps.clock.nowMicros();
+  const consumption = usableInvite ? inviteConsumption(deps, usableInvite) : null;
   try {
     await deps.db.transactWrite([
       {
@@ -60,8 +85,12 @@ export const createUser = async (deps: Deps, email: string): Promise<number> => 
           email: normalized,
           emailHash: hash,
           creationTime: now,
+          ...(consumption?.userAttrs ?? {}),
         },
       },
+      // Single-use for signup, kept as audit trail: consumedAt lands in the
+      // same transaction that creates the account.
+      ...(consumption ? [{ kind: 'put' as const, item: consumption.consumedRow }] : []),
     ]);
   } catch (err) {
     if (err instanceof ConditionFailedError) {

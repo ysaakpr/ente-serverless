@@ -18,6 +18,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
+| invites.test.ts | [INVITES] [QUOTA] invite gating + per-user storage (D54) | H1 | 18 | 18 | ✅ |
 | join-link.test.ts | ? | ? | 4 | 4 | ✅ |
 | lifecycle.test.ts | infra guards | M7 | 37 | 37 | ✅ |
 | origin-lock.test.ts | origin lock (finding 4, D43) | SEC | 4 | 4 | ✅ |
@@ -49,4 +50,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 | web.test.ts | infra guards: albums web hosting (D52) | P3-F | 20 | 20 | ✅ |
 
-**Total: 388/388 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 406/406 passing.** CI must fail if any implemented endpoint is below 100%.

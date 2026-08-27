@@ -15,8 +15,8 @@ import {
   putCollection,
   VALID_COLLECTION_TYPES,
 } from '../../domain/collections.ts';
-import { getKeyAttributes } from '../../domain/users.ts';
-import { errNotFound, SentinelError } from '../../lib/errors.ts';
+import { getKeyAttributes, getUser } from '../../domain/users.ts';
+import { errNotFound, errPermissionDenied, SentinelError } from '../../lib/errors.ts';
 
 const magicSchema = z.object({
   version: z.number(),
@@ -51,6 +51,18 @@ export const createCollection = (deps: Deps) => async (c: Context) => {
   if (type === 'favorites' || type === 'uncategorized') {
     const existing = await findCollectionByType(deps, userId, type, app);
     if (existing) return c.json({ collection: await collectionToJson(deps, existing) });
+  } else {
+    // Viewer gate (D54, off-parity): viewer accounts don't create albums or
+    // folders — 403 {} (errPermissionDenied), museum's family for a role that
+    // may not act (a VIEWER sharee renaming gets the same). The SPECIAL types
+    // above are deliberately exempt: the stock apps auto-create favorites on
+    // the first favorite tap and uncategorized when a file leaves its last
+    // album — both metadata-only rows costing zero storage — and blocking
+    // them breaks a viewer's legitimate consume-a-share loop (favoriting a
+    // shared photo). Their duplicate-create path returns the existing row
+    // before this gate on purpose.
+    const user = await getUser(deps, userId);
+    if (user?.viewer) throw errPermissionDenied();
   }
 
   const row = await putCollection(deps, newCollectionRow(deps, userId, app, { ...body, type }));

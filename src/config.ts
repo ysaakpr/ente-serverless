@@ -73,6 +73,15 @@ export interface Config {
    * is password-whitelisted and admission fires there, so without a ceiling a
    * token holder cycling User-Agents mints unbounded rows. Same 429 family. */
   publicLinkDailyDeviceLimit: number;
+  /**
+   * Invite-gated signup (D54). 'open' (default) is today's behaviour — anyone
+   * who reaches the server can sign up. 'invite' rejects a signup OTT for any
+   * email without an unconsumed INVITE# row (provisioned via `make invite`,
+   * tools/invite.ts). Server/CLI-side only — no client-visible surface; login
+   * and change-email are NEVER gated, so flipping this on an existing
+   * deployment affects nobody already signed up.
+   */
+  signupMode: 'open' | 'invite';
 }
 
 export const configFromEnv = (): Config => ({
@@ -106,4 +115,5 @@ export const configFromEnv = (): Config => ({
   publicLinkDailyDownloadLimit: Number(process.env.PUBLIC_LINK_DAILY_DOWNLOADS ?? 10_000),
   publicLinkDailyUploadLimit: Number(process.env.PUBLIC_LINK_DAILY_UPLOADS ?? 1_000),
   publicLinkDailyDeviceLimit: Number(process.env.PUBLIC_LINK_DAILY_DEVICES ?? 1_000),
+  signupMode: process.env.SIGNUP_MODE === 'invite' ? 'invite' : 'open',
 });

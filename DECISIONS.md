@@ -1161,6 +1161,91 @@ source says Y — source won).
     the direct Function URL, which the tracked origin-lock finding (D47/D52
     ORIGIN_SECRET) already closes for edge traffic.
 
+- **D54 [OPS 2026-08-27] Phase H1: invite-gated signup + per-user storage
+  quotas — a deliberate OFF-PARITY feature, server/CLI-side only.** Museum has
+  no invite mode and no per-user storage knob; a self-host operator here wants
+  to invite users by email, let them complete the stock OTT+SRP flow
+  self-serve, and cap some of them (down to 0 bytes — "viewer accounts" that
+  only consume shares). HARD CONSTRAINT honoured: zero client-side changes —
+  every wire shape stays museum-shaped and only VALUES differ; provisioning is
+  `make invite` / tools/invite.ts, never an API route. **capture-diff must
+  skip invite-mode behaviour**: captures run against a museum that always
+  admits signups, so the harness must run this server with SIGNUP_MODE unset
+  (the default) — the gate is config'd off and the surface is byte-identical
+  to pre-H1. Judgment calls:
+  - **Config**: `SIGNUP_MODE=invite` → `config.signupMode` ('open' default —
+    existing deployments unaffected). Login and change-email are NEVER gated;
+    only account CREATION is.
+  - **Invite rows**: `INVITE#<lowercased-email>/META` (model.ts), fields
+    email, optional storageLimitBytes, viewer (default false), home,
+    createdAt, consumedAt. Keyed by PLAINTEXT lowercased email, unlike the
+    hashed EMAIL# guards, on purpose: invites are operator data, and listing/
+    revoking them must work without HASHING_KEY (only `make set-storage`
+    needs it, for the hashed user lookup). No gsi attributes — the D48
+    rollback rule holds; `main` deployed against a table with invite rows
+    behaves exactly as before. `home: 'local'` is a one-line federation seam:
+    a future multi-home deployment routes users by it without a migration;
+    nothing reads it today.
+  - **Error shape for a gated signup: 403 {} (errPermissionDenied), NOT a new
+    code.** Museum has no invite analogue, so the choice is which EXISTING
+    signup-path 4xx the stock client renders sanely: 409
+    USER_ALREADY_REGISTERED actively steers the user into the login flow
+    (wrong), 404 USER_NOT_REGISTERED means "not registered" only on login
+    paths, while /users/ott already returns a bare 403 {} on its
+    change-purpose branch — so a 403 is an in-family sendOtt refusal the
+    client shows as its generic failure dialog. Capture-gated for the LAN
+    gate (M5): if the device run shows the stock app handling it badly, pick
+    whatever the gate proves better. The gate keys on `state === 'noAccount'`
+    rather than `purpose === 'signup'` because old clients send purpose ""
+    (museum validates nothing there); login+noAccount has already 404'd
+    above it, so login flows are untouched by construction. The OTT is
+    neither stored nor mailed on rejection (tested).
+  - **Consumption is atomic with account creation** (createUser transaction:
+    email guard + user row + consumedAt stamp), copying
+    storageLimitBytes/viewer/home onto the user row. Invites are single-use
+    for signup but the consumed row is KEPT as audit trail; re-running
+    `make invite` re-arms it (the documented re-admission path, e.g. after
+    account deletion). createUser re-checks the invite as belt-and-braces —
+    covers the revoked-between-OTT-and-verify window. Overrides apply
+    whenever a usable invite exists even in open mode, so an operator can
+    pre-provision limits before flipping the mode.
+  - **Per-user quota**: user row gains optional `storageLimitBytes` (absent =
+    config.freePlanStorageBytes) and `viewer`. assertQuota resolves the limit
+    from the user row (one extra GetItem per quota check, shared by every
+    upload-url mint, eligibility probe, commit, and the public-collect path —
+    which passes the LINK OWNER, so a capped owner's links can't collect
+    either). **0 means ZERO** — no uploads at all — deliberately unlike the
+    0-disables-it ceiling knobs elsewhere in config; stated in both places
+    and locked by test. `userStorageBytes` (billing.ts) is the single
+    resolver: subscription stub, /users/details/v2 and enforcement all report
+    the same number, in the unchanged museum envelope (same fields, real
+    value). `/billing/plans/v2` keeps the global freePlan number — it is a
+    catalog, not the user's entitlement.
+  - **Viewer semantics**: viewer=true refuses every upload-URL mint, the
+    eligibility probe and file commit with the same 426 storage-limit
+    sentinel (self-consistent with a 0-byte plan, and the stock client
+    already renders it), and refuses album/folder creation with 403 {}
+    (errPermissionDenied — the same family a VIEWER sharee gets on rename).
+    Viewers still read shares, download, diff, leave collections, and appear
+    in sharees. **Special-collections decision** (the highest
+    client-breakage risk): POST /collections with type favorites or
+    uncategorized stays ALLOWED for viewers. The stock apps create these
+    lazily — favorites on the first favorite tap, uncategorized when a file
+    leaves its last album — not at boot, but a viewer favoriting a SHARED
+    photo is a legitimate consume-a-share action that must not 403 mid-loop.
+    Both are metadata-only rows (zero storage), and create.ts's
+    duplicate-create semantics already return the existing row idempotently,
+    so admitting them costs nothing. Locked by test; LAN-gate re-run with a
+    viewer account stays the release proof.
+  - **Ops CLI**: tools/invite.ts (`make invite EMAIL=... [STORAGE_GB=...]
+    [VIEWER=1]`, `make invites`, `make revoke-invite EMAIL=...`,
+    `make set-storage EMAIL=... STORAGE_GB=<n|default>`), env-driven exactly
+    like the Lambda (TABLE_NAME/AWS_* select LocalStack vs prod).
+    revoke-invite refuses consumed rows (audit); set-storage is the post-hoc
+    lever writing the user row attribute, `default` clears it. Listing is a
+    paged Scan filtered to INVITE# — the one operator-only full listing, not
+    worth an index (D48 discipline).
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

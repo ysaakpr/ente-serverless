@@ -37,14 +37,28 @@ export const plusHundredYears = (at: Micros): Micros => {
   return d.getTime() * 1000 + (at % 1000); // keep sub-millisecond precision
 };
 
+/**
+ * The user's effective storage cap, bytes (D54): the per-user override when
+ * set (0 means ZERO), else 0 for viewer accounts (they only consume shares),
+ * else the config free-plan default. Everything that reports or enforces
+ * storage — the subscription stub, /users/details/v2, assertQuota — resolves
+ * through here, so the number the client renders is the number the server
+ * enforces.
+ */
+export const userStorageBytes = (
+  deps: Deps,
+  user: Pick<UserRow, 'storageLimitBytes' | 'viewer'>,
+): number => user.storageLimitBytes ?? (user.viewer ? 0 : deps.config.freePlanStorageBytes);
+
 export const freeSubscription = (
   deps: Deps,
-  user: Pick<UserRow, 'userId' | 'creationTime'>,
+  user: Pick<UserRow, 'userId' | 'creationTime' | 'storageLimitBytes' | 'viewer'>,
 ): Subscription => ({
   id: user.userId,
   userID: user.userId,
   productID: 'free',
-  storage: deps.config.freePlanStorageBytes,
+  // Museum-shaped envelope, per-user VALUE (D54): same field, real number.
+  storage: userStorageBytes(deps, user),
   originalTransactionID: 'none',
   expiryTime: plusHundredYears(user.creationTime),
   paymentProvider: '',

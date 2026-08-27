@@ -128,6 +128,7 @@ and sharing pieces** — roughly the ~60-route core plus magic metadata,
 | User entities | 🟢 Done | key create/ensure/get, entity CRUD + diff | Tier 0 |
 | File-data | 🟢 Done | `files/data` (ML embeddings), `files/video-data` (HLS), preview upload/fetch, status-diff | Tier 1 |
 | Hardening | 🟢 Done | origin lock, attempt caps/TTLs, spend ceilings, quota checks, GIR-at-day-0 storage tiering | — |
+| Invite-gated signup / per-user quotas | 🟢 Done | ops-only, deliberately off-parity (D54): `SIGNUP_MODE=invite`, `make invite`/`invites`/`revoke-invite`/`set-storage`, viewer accounts; zero client-visible shape changes, capture-diff runs with the mode off | — |
 | Billing | 🟠 Stubbed | free plan, huge quota (`/billing/*`, D34) | Tier 0 |
 | Remote store / feature flags | 🟠 Stubbed | fixed flags; `castUrl`/`embedUrl` empty | Tier 0 |
 | Storage bonus / referrals | 🟠 Stubbed | zeros | Tier 1 |

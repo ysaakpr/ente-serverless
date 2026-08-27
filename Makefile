@@ -7,7 +7,7 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
-	pricing-plan pricing-plan-status build-web deploy-web
+	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage
 
 test:
 	npx vitest run test/unit
@@ -52,6 +52,37 @@ lan:
 
 ledger:
 	node --experimental-transform-types tools/ledger.ts
+
+# ---------------------------------------------------------------------------
+# Invite-gated signup + per-user storage (Phase H1, D54) — operator tooling,
+# never a client surface. Env-driven exactly like the Lambda: TABLE_NAME +
+# AWS credentials/region select the deployment; add the $(LOCALSTACK_ENV)
+# variables (or `env $(LOCALSTACK_ENV) make invite ...`) to hit LocalStack.
+# set-storage additionally needs HASHING_KEY (user lookup is hash-keyed);
+# invite/list/revoke deliberately do not (invite rows key on plain email).
+#   make invite EMAIL=alice@example.com [STORAGE_GB=50] [VIEWER=1]
+#   make invites
+#   make revoke-invite EMAIL=alice@example.com
+#   make set-storage EMAIL=alice@example.com STORAGE_GB=50   (or STORAGE_GB=default)
+# STORAGE_GB=0 means ZERO bytes — a viewer-style no-upload account, not "off".
+# ---------------------------------------------------------------------------
+INVITE_TOOL = node --experimental-transform-types tools/invite.ts
+
+invite:
+	@test -n "$(EMAIL)" || { echo "usage: make invite EMAIL=... [STORAGE_GB=...] [VIEWER=1]"; exit 1; }
+	@$(INVITE_TOOL) invite "$(EMAIL)" \
+		$(if $(STORAGE_GB),--storage-gb $(STORAGE_GB)) $(if $(VIEWER),--viewer)
+
+invites:
+	@$(INVITE_TOOL) list
+
+revoke-invite:
+	@test -n "$(EMAIL)" || { echo "usage: make revoke-invite EMAIL=..."; exit 1; }
+	@$(INVITE_TOOL) revoke "$(EMAIL)"
+
+set-storage:
+	@test -n "$(EMAIL)" -a -n "$(STORAGE_GB)" || { echo "usage: make set-storage EMAIL=... STORAGE_GB=<n|default>"; exit 1; }
+	@$(INVITE_TOOL) set-storage "$(EMAIL)" "$(STORAGE_GB)"
 
 oracle-up:
 	docker compose -f docker-compose.oracle.yml up -d --wait
