@@ -221,6 +221,12 @@ ALBUMS_WEB_REPO = https://github.com/ente-io/ente
 # Builds LOCALLY into dist/web-albums (gitignored). Deploys nothing.
 # The API origin the build bakes in: pass ALBUMS_API_ORIGIN=https://... or,
 # when the stack is already deployed, let it default to the server_url output.
+# basePath (D60): the app is served under /albums (the one web-facing
+# behavior on the consolidated distribution — FREE plan, 5-behavior ceiling),
+# and the pinned tag's next.config has no env-based basePath support, so the
+# patch script injects basePath/assetPrefix = /albums into the sparse clone
+# before the build. Anchor-checked: a tag bump that changes the config's
+# shape fails the build loudly instead of exporting an unprefixed app.
 build-web: require-profile
 	@command -v git >/dev/null || { echo "git is required"; exit 1; }
 	@command -v npm >/dev/null || { echo "npm is required (the ente web workspace pins npm 11.x — a very old npm may refuse)"; exit 1; }
@@ -233,6 +239,8 @@ build-web: require-profile
 	rm -rf dist/ente-web-src dist/web-albums; \
 	git clone --depth 1 --branch $(ALBUMS_WEB_TAG) --filter=blob:none --sparse $(ALBUMS_WEB_REPO) dist/ente-web-src && \
 	git -C dist/ente-web-src sparse-checkout set web && \
+	node --experimental-transform-types scripts/patch-albums-basepath.ts \
+		dist/ente-web-src/web/apps/albums/next.config.js && \
 	cd dist/ente-web-src/web && npm ci && \
 	NEXT_PUBLIC_ENTE_ENDPOINT="$$ORIGIN" NEXT_TELEMETRY_DISABLED=1 npm run build:albums || { \
 		echo ""; \
@@ -244,18 +252,31 @@ build-web: require-profile
 	cp -R dist/ente-web-src/web/apps/albums/out/. dist/web-albums/
 	@echo "==> dist/web-albums ready ($$(du -sh dist/web-albums | cut -f1)) — 'make deploy-web' syncs it"
 
-# Syncs the local build to the web bucket and invalidates the ONE
-# consolidated distribution (D58 — the same distribution that serves the
-# API; the API behaviors are CachingDisabled, so the /* invalidation only
-# actually evicts web assets). Guarded like every other state-mutating
-# target. --delete keeps the bucket an exact mirror; a viewer holding a
-# stale index.html mid-deploy re-fetches it uncached (the edge module pins
-# index.html to CachingDisabled) and heals.
+# Syncs the local build to the web bucket's albums/ KEY PREFIX (D60 — the
+# /albums* behavior's URI is the object key verbatim, no origin path) and
+# invalidates the ONE consolidated distribution (D58 — the same distribution
+# that serves the API; the API default behavior is CachingDisabled, so the
+# /* invalidation only actually evicts web assets). Guarded like every other
+# state-mutating target. --delete keeps the prefix an exact mirror.
+# index.html freshness rides ORIGIN METADATA, not a dedicated behavior (the
+# FREE plan caps the distribution at 5 behaviors, D60): index.html uploads
+# with Cache-Control: no-cache — CachingOptimized honors it — and the hashed
+# /_next assets with a 1y immutable max-age. Upload order matters: assets
+# first, index.html LAST, so a live index never names assets that are not in
+# the bucket yet; the invalidation stays the belt and braces.
 deploy-web: require-profile guard-account
 	@test -d dist/web-albums || { echo "no dist/web-albums — run 'make build-web' first"; exit 1; }
 	@test -f dist/web-albums/index.html || { echo "dist/web-albums has no index.html — the albums build did not finish"; exit 1; }
+	@grep -q '/albums/_next' dist/web-albums/index.html || { \
+		echo "dist/web-albums was built WITHOUT basePath /albums — a stale pre-D60 build."; \
+		echo "Re-run 'make build-web' (it patches the pinned next.config at build time)."; exit 1; }
 	@BUCKET=$$($(TF) output -raw web_bucket); DIST=$$($(TF) output -raw distribution_id); \
-	aws s3 sync dist/web-albums "s3://$$BUCKET" --delete && \
+	aws s3 sync dist/web-albums/_next "s3://$$BUCKET/albums/_next" --delete \
+		--cache-control "public, max-age=31536000, immutable" && \
+	aws s3 sync dist/web-albums "s3://$$BUCKET/albums" --delete \
+		--exclude "_next/*" --exclude "index.html" && \
+	aws s3 cp dist/web-albums/index.html "s3://$$BUCKET/albums/index.html" \
+		--cache-control "no-cache" && \
 	aws cloudfront create-invalidation --distribution-id "$$DIST" --paths "/*" \
 		--query 'Invalidation.{id:Id,status:Status}' --output table
 	@echo "==> albums app live at $$($(TF) output -raw albums_url)"
@@ -383,11 +404,23 @@ plan: require-profile build-lambda guard-account
 # Applies the SAVED plan, so what ships is exactly what you reviewed.
 # The CloudFront distribution takes 5-15 min to reach Deployed; the rest
 # of the resources are quick.
+# Post-apply, the FREE pricing-plan subscription is chained in (D60):
+# pricing-plan is idempotent (already-subscribed is a one-line no-op), and a
+# FAILURE must never fail the deploy — IAM propagation or the account's
+# 3-distribution FREE budget can transiently refuse — so it warns loudly and
+# leaves `make pricing-plan` (the standalone target stays) to the operator.
 deploy: require-profile guard-account
 	@test -f $(TFDIR)/$(TFPLAN) || { echo "no saved plan — run 'make plan' and read it first"; exit 1; }
 	$(TF) apply $(TFPLAN)
 	@rm -f $(TFDIR)/$(TFPLAN)
 	@$(MAKE) --no-print-directory outputs
+	@$(MAKE) --no-print-directory pricing-plan || { \
+		echo ""; \
+		echo "*** WARNING: the CloudFront FREE pricing-plan subscription DID NOT complete."; \
+		echo "*** The deploy itself succeeded. Transient causes (IAM propagation, the"; \
+		echo "*** 3-distribution FREE budget, a distribution still deploying) clear on"; \
+		echo "*** their own — re-run it by hand:  make pricing-plan"; \
+		echo "*** An unsubscribed env silently pays ~\$$6/mo of WAF fees (D47/D58)."; }
 
 outputs: require-profile
 	@$(TF) output
@@ -404,13 +437,15 @@ smoke: require-profile
 	printf '  cloudfront   /ping -> '; curl -sS -o /dev/null -w '%{http_code}  (must be 200)\n' "$$CF/ping"; \
 	echo "  point the app at: $$CF"
 
-# CloudFront flat-rate FREE plan (D47, consolidated D58). One subscription
-# covers exactly one distribution + its web ACL, and zeroes what is otherwise
-# the largest fixed line on the bill: the WAF web ACL ($5/mo) + rate rule
-# ($1/mo) + all CloudFront/WAF request fees. RUN THIS ONCE PER ENVIRONMENT
-# (make profile <env>, then this target): each env's distribution needs its
-# own subscription, and an unsubscribed env — the test env is the one that
-# slips — silently pays the ~$6/mo WAF fees on pay-as-you-go. The FREE plan
+# CloudFront flat-rate FREE plan (D47, consolidated D58, layout shaped to
+# the tier's 5-behavior ceiling D60). One subscription covers exactly one
+# distribution + its web ACL, and zeroes what is otherwise the largest fixed
+# line on the bill: the WAF web ACL ($5/mo) + rate rule ($1/mo) + all
+# CloudFront/WAF request fees. ONE SUBSCRIPTION PER ENVIRONMENT — `make
+# deploy` chains this target post-apply (D60; idempotent, non-fatal on
+# failure), and it stays runnable standalone (make profile <env>, then this
+# target): an unsubscribed env — the test env is the one that slips —
+# silently pays the ~$6/mo WAF fees on pay-as-you-go. The FREE plan
 # allows at most 3 distributions per AWS account; consolidation (D58) keeps
 # prod + test at 2, one spare. The allowances (1M requests, 100 GB transfer
 # per month per subscription) see the small-JSON API path plus a few MB of

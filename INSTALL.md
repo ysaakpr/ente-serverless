@@ -394,13 +394,19 @@ Replay the gate flows from Part B against the cloud `server_url`: signup,
 backup, browse, trash/restore, second-device login. Watch
 `/aws/lambda/ente-sl-<env>-api` logs in CloudWatch for surprises.
 
-### C12. Subscribe to the CloudFront FREE pricing plan
+### C12. The CloudFront FREE pricing plan (automatic since D60)
+
+`make deploy` runs the subscription for you as a post-apply step: it is
+idempotent (already subscribed → a one-line no-op) and **never fails the
+deploy** — on a transient refusal (IAM propagation, a distribution still
+deploying, the account's 3-distribution FREE budget) it prints a loud WARNING
+and leaves the manual re-run to you:
 
 ```bash
 AWS_PROFILE=ente-sl make pricing-plan
 ```
 
-One-time **per environment**, idempotent, and the biggest single line off the
+One subscription **per environment**, and the biggest single line off the
 bill: the flat-rate FREE plan covers the WAF web ACL, its rate rule, and all
 CloudFront/WAF request fees for this distribution — otherwise ≈ $6/mo of flat
 WAF fees (D47). Since D58 the one distribution also serves the albums web
@@ -411,32 +417,41 @@ bills anything.
 
 It is a CLI step rather than a tofu resource because the AWS provider does not
 support pricing plans yet; consequently it does **not** survive `make destroy`
-— re-run it after any re-apply that mints a new distribution.
-`make pricing-plan-status` shows the current subscription. If the deployer
-user predates D47, re-paste `src/infra/deployer-policy.json` over its inline
-policy first (C3) — the `PricingPlanFreeTier` statement is new.
+— the deploy chain re-subscribes on the re-apply that mints the new
+distribution. `make pricing-plan-status` shows the current subscription. If
+the deployer user predates D47, re-paste `src/infra/deployer-policy.json`
+over its inline policy first (C3) — the `PricingPlanFreeTier` statement is
+new.
 
-The edge module is deliberately FREE-tier-shaped (D47): AWS-managed policies
-only, no byte-match statements in the WAF, and `PriceClass_All` — the FREE
-tier gates those features (the price-class gate is undocumented), and AWS
-refuses (or warns on) the subscription while the distribution uses them. If subscribing complains about incompatible
-configuration, a pre-D47 edge config is still deployed — run the C6/C7
-plan-deploy cycle first, then retry.
+The edge module is deliberately FREE-tier-shaped (D47/D60): AWS-managed
+policies only, no byte-match statements in the WAF, `PriceClass_All`, and —
+the D60 lesson — **at most 5 cache behaviors** (this layout uses 2: API on
+the default behavior, `/albums*` for the web app). The FREE tier gates all
+of those (the price-class and behavior-count gates are undocumented; the
+latter refuses with "You're using configuration not available in this tier:
+17 cache behaviors (limit 5)"), and AWS refuses (or warns on) the
+subscription while the distribution uses them. If subscribing complains
+about incompatible configuration, a pre-D47/pre-D60 edge config is still
+deployed — run the C6/C7 plan-deploy cycle first, then retry.
 
 One subscription covers exactly one distribution + one web ACL, and the FREE
 plan allows at most **3 distributions per AWS account** — the D58
-consolidation is what keeps prod + test at 2 (one spare). Subscribe **every
-deployed env** (`make profile test && … make pricing-plan` too): an
-unsubscribed env silently pays the ~$6/mo WAF fees on pay-as-you-go.
+consolidation is what keeps prod + test at 2 (one spare). Every deployed
+env's own `make deploy` chain subscribes it; if the WARNING ever fires,
+re-run by hand (`make profile test && AWS_PROFILE=ente-sl make
+pricing-plan`): an unsubscribed env silently pays the ~$6/mo WAF fees on
+pay-as-you-go.
 
 ### C13. Deploy the albums web app (public share links)
 
 Public album links minted by the server are `<albums_url>/?t=<token>` — they
 only work once ente's **albums web viewer** is being served at that URL.
-Since D58 that URL is the **same domain as `server_url`**: the one CloudFront
-distribution serves the API on its route prefixes and the albums app on
-everything else (a private S3 bucket behind OAC). The tofu from C7 already
-created the hosting; this step builds and uploads the app itself.
+Since D58/D60 that URL is **`https://<server_url domain>/albums`**: the one
+CloudFront distribution serves the API on its default behavior and the
+albums app on the `/albums*` path (a private S3 bucket behind OAC, assets
+under the `albums/` key prefix — the FREE plan caps cache behaviors at 5,
+D60). The tofu from C7 already created the hosting; this step builds and
+uploads the app itself.
 
 First, pin `ALBUMS_URL` (fresh deploys only — see the C6 note):
 
@@ -452,12 +467,15 @@ for a ~2 GB workspace install under `dist/`.
 ```bash
 make build-web                     # clones ente at the PINNED tag (ALBUMS_WEB_TAG
                                    # in the Makefile — must match ORACLE-VERSION,
-                                   # guard-tested), npm ci, static-exports the
-                                   # albums app into dist/web-albums
-AWS_PROFILE=ente-sl make deploy-web   # s3 sync to the web bucket + invalidation
+                                   # guard-tested), patches basePath=/albums into
+                                   # the pinned next.config (D60), npm ci,
+                                   # static-exports into dist/web-albums
+AWS_PROFILE=ente-sl make deploy-web   # s3 sync to the bucket's albums/ prefix
+                                      # (index.html no-cache, hashed assets
+                                      # immutable) + invalidation
 ```
 
-Three things worth knowing:
+Four things worth knowing:
 
 - **The API URL is baked in at build time** (`NEXT_PUBLIC_ENTE_ENDPOINT`).
   `build-web` defaults it to the `server_url` output; building before the
@@ -465,10 +483,19 @@ Three things worth knowing:
   If `server_url` ever changes (e.g. after `make destroy` + re-apply), rebuild
   — re-syncing the old build keeps pointing at the dead API. (Since D58 the
   app is served from that same domain, so its API calls are same-origin.)
+- **The `/albums` base path is patched in at build time too** (D60): the
+  pinned tag has no env-based basePath support, so `build-web` runs
+  `scripts/patch-albums-basepath.ts` against the fresh clone before
+  building. If a future tag bump changes the config's shape, that script
+  fails the build loudly — reconcile it with the new config rather than
+  building an unprefixed app (it would 404 behind `/albums*`; `deploy-web`
+  also refuses to sync such a build).
 - **Custom domain**: set `albums_url = "https://albums.example.com"` in the
-  tfvars (origin only — the server appends `/?t=<token>`) and re-deploy so
-  minted links use it; it wins over the D58 hint. Fronting the distribution
-  with that domain (ACM cert + alias) is out of scope here.
+  tfvars (the full base URL the viewer is served at, no trailing slash — the
+  server appends `/?t=<token>`; used verbatim, no `/albums` suffix is added)
+  and re-deploy so minted links use it; it wins over the D58/D60 hint.
+  Fronting the distribution with that domain (ACM cert + alias) is out of
+  scope here.
 - **Verify** by creating a share link in the ente app and opening it in a
   browser — the album should render and (if enabled) collect uploads should
   work. A blank page with console 401s means the app was built against the
@@ -724,39 +751,70 @@ AWS_PROFILE=ente-sl make smoke
 
 `make outputs` reprints the URLs anytime.
 
-### Migrating an existing deployment to the consolidated distribution (D58)
+### Migrating an existing deployment to the FREE-tier edge layout (D58 → D60)
 
-A deployment created before D58 has two CloudFront distributions (API +
-albums). The first plan/deploy after pulling the change consolidates them —
-one ordinary cycle, no tfvars edits, in this order:
+Two starting points exist, and one plan/deploy cycle handles either — no
+tfvars edits. **The operator order is the same for both**: plan → read the
+plan against the expected shape below → deploy → rebuild + re-sync the web
+app → verify.
+
+**Starting point A — the D58 single-distribution layout** (17 behaviors: web
+default + `/index.html` + 15 API prefixes; the test env deployed this — the
+shape the pricing plan refused):
 
 1. `make profile dev` (or `test`), then `AWS_PROFILE=ente-sl make plan`.
-2. **Read the plan against this expected shape** — 4 moved, 1 to add, 3 to
-   change, 1 to destroy:
+2. **Expected plan — everything in-place, nothing moved or destroyed**:
+   - *update in-place*: the **one distribution** (the 16 ordered behaviors
+     collapse to the single `/albums*`, the default behavior swaps back to
+     the Lambda origin, `default_root_object` drops), the **SPA CloudFront
+     function** (code update: rewrite target `/albums/index.html`), and the
+     **API Lambda** (`ALBUMS_URL` gains the `/albums` suffix).
+   - **Any `replace` line on the distribution = ABORT.** Replacement mints a
+     new domain and breaks every configured client; nothing in this change
+     forces one.
+
+**Starting point B — the pre-D58 two-distribution layout** (API distribution
++ standalone albums distribution): the D58 consolidation and the D60
+inversion land as ONE plan:
+
+1. Same commands.
+2. **Expected plan — 4 moved, 1 to add, 3 to change, 1 to destroy**:
    - *moved* (not destroyed): the web bucket, its public-access block, its
-     bucket policy and the OAC — `module.web.* -> module.edge.*`. The
-     bucket's synced content survives; no `make deploy-web` re-run needed.
-   - *update in-place*: the **main distribution** (new S3 origin, default
-     behavior now the web app, 16 ordered behaviors, `default_root_object`,
-     comment), the web **bucket policy** (`AWS:SourceArn` re-pins to the main
-     distribution), and the **API Lambda** (`ALBUMS_URL` becomes the
-     `server_url` domain — the plan-time hint reads it from state).
+     bucket policy and the OAC — `module.web.* -> module.edge.*`.
    - *add*: the SPA viewer-request CloudFront function.
-   - *destroy*: the standalone albums distribution.
-   - **Any `replace` line on the main distribution or the buckets = ABORT.**
-     Replacement mints a new domain and breaks every configured client;
-     nothing in this change forces one.
-3. `AWS_PROFILE=ente-sl make deploy`. The
-   distribution update takes 5–15 minutes; the API keeps serving throughout
-   (the albums page may blip while the bucket policy re-pins).
-4. Verify: `make smoke` (still 403/200), then open `https://<server_url>/` in
-   a browser — the albums viewer should load from the same domain.
-5. `make pricing-plan-status` — the FREE subscription survives the in-place
-   update; it should still be ACTIVE against the same distribution + web ACL.
-   On the test env, run `make pricing-plan` if it was never subscribed.
-6. **Share links minted before the migration** point at the old albums
-   distribution's now-deleted domain. The tokens stay valid — re-copy each
-   link from the app (the same caveat as after a destroy/re-apply, D52).
+   - *update in-place*: the **main distribution** (new S3 origin + the one
+     `/albums*` behavior; the default behavior keeps its API settings), the
+     web **bucket policy** (`AWS:SourceArn` re-pins to the main
+     distribution), and the **API Lambda** (`ALBUMS_URL` becomes
+     `https://<server_url domain>/albums` — the plan-time hint reads the
+     domain from state).
+   - *destroy*: the standalone albums distribution — the ONLY acceptable
+     destroy line.
+   - **Any `replace` on the main distribution or the buckets = ABORT.**
+
+Then, for both starting points:
+
+3. `AWS_PROFILE=ente-sl make deploy`. The distribution update takes 5–15
+   minutes; the API keeps serving throughout. The deploy chain runs
+   `make pricing-plan` at the end — on a D58-layout env this is the moment
+   the FREE subscription finally succeeds (≤ 5 behaviors); heed the WARNING
+   if it fires and re-run by hand.
+4. **`make build-web && AWS_PROFILE=ente-sl make deploy-web` is REQUIRED**
+   (unlike the D58 migration): the assets change — the app must be rebuilt
+   with the `/albums` base path, and the sync now targets the bucket's
+   `albums/` key prefix. Old root-level objects from a D58-era sync become
+   unreachable cruft; optionally clean them with
+   `aws s3 rm s3://$(tofu -chdir=src/infra/<profile> output -raw web_bucket) --recursive --exclude "albums/*"`.
+5. Verify: `make smoke` (still 403/200), then open
+   `https://<server_url domain>/albums` in a browser — the albums viewer
+   should load; `https://<server_url domain>/` should return the API's JSON
+   404 again (pre-D58 behavior).
+6. `make pricing-plan-status` — the subscription should be ACTIVE against
+   the distribution + web ACL.
+7. **Share links minted before the migration break** and must be re-copied
+   from the app (tokens stay valid — the standing D52 caveat): links from
+   the D58 window (`https://<domain>/?t=...`) now hit the API and 404;
+   pre-D58 links point at the destroyed albums distribution's dead domain.
 
 ---
 
@@ -789,10 +847,11 @@ Notes:
 - The account guard is per-profile and skips a first deploy (no state yet),
   so a fresh test env is never blocked by it.
 - After the first apply, run `make plan && make deploy` once more to pin
-  `ALBUMS_URL` (C6 note, D58) — and **subscribe this env's distribution
-  too**: `AWS_PROFILE=ente-sl make pricing-plan`. The FREE plan is per
-  distribution + web ACL; an unsubscribed test env silently pays ~$6/mo of
-  WAF fees. The account-wide FREE-plan budget is 3 distributions; prod +
+  `ALBUMS_URL` (C6 note, D58/D60). The deploy chain subscribes this env's
+  distribution to the FREE plan automatically (D60) — if its WARNING fires,
+  re-run `AWS_PROFILE=ente-sl make pricing-plan` by hand: the plan is per
+  distribution + web ACL, and an unsubscribed test env silently pays ~$6/mo
+  of WAF fees. The account-wide FREE-plan budget is 3 distributions; prod +
   test = 2 (D58).
 - Full teardown when you are done:
 

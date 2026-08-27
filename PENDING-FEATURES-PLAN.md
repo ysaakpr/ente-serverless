@@ -385,14 +385,17 @@ in INSTALL.md C13; resource detail in AWS-RESOURCES.md rows 22–27.
 
 - **The SAME CloudFront distribution as the API** (D58 — this section
   originally specified a second distribution; the FREE pricing plan's
-  3-distributions-per-account cap consolidated them): the API rides
-  root-path ordered behaviors derived from src/app.ts (guard-tested), the
-  default behavior serves a fully private bucket (OAC, public-access-block
-  ×4, SPA fallback via a viewer-request CloudFront function — never
-  `custom_error_response`, which would corrupt the API's museum-shaped
-  404/403 JSON). Share links are `https://<server_url domain>/?t=<token>`.
-  The bucket holds build artifacts only: `force_destroy`, no versioning,
-  inside `make destroy` scope.
+  3-distributions-per-account cap consolidated them — layout per D60: the
+  FREE tier also caps cache behaviors at 5, so the API keeps the DEFAULT
+  behavior and the web app rides the single `/albums*` behavior): the
+  ordered behavior serves a fully private bucket (OAC, public-access-block
+  ×4, assets under the `albums/` key prefix, the app built with
+  basePath=/albums, SPA fallback via a viewer-request CloudFront function —
+  never `custom_error_response`, which would corrupt the API's museum-shaped
+  404/403 JSON). Share links are
+  `https://<server_url domain>/albums/?t=<token>`. The bucket holds build
+  artifacts only: `force_destroy`, no versioning, inside `make destroy`
+  scope.
 - **Pinned albums build**: ente-io/ente tag `photos-v1.3.61`, recorded in
   ORACLE-VERSION and the Makefile's `ALBUMS_WEB_TAG` (guard asserts both
   agree). `make build-web` sparse-clones the tag and static-exports the app

@@ -7,6 +7,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 |---|---|---|---|---|---|
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
+| albums-basepath-patch.test.ts | ? | ? | 5 | 5 | ✅ |
 | auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
 | collection-share.test.ts | ? | ? | 11 | 11 | ✅ |
 | collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
@@ -20,7 +21,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
 | invites.test.ts | [INVITES] [QUOTA] invite gating + per-user storage (D54) | H1 | 19 | 19 | ✅ |
 | join-link.test.ts | ? | ? | 4 | 4 | ✅ |
-| lifecycle.test.ts | infra guards | M7 | 40 | 40 | ✅ |
+| lifecycle.test.ts | infra guards | M7 | 45 | 45 | ✅ |
 | origin-lock.test.ts | origin lock (finding 4, D43) | SEC | 4 | 4 | ✅ |
 | ping.test.ts | [HEALTH] | M1 | 2 | 2 | ✅ |
 | pools.int.test.ts | ? | ? | 2 | 2 | ✅ |
@@ -50,6 +51,6 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 5 | 5 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
-| web.test.ts | infra guards: albums web hosting (D52) | P3-F | 20 | 20 | ✅ |
+| web.test.ts | infra guards: albums web hosting (D52) | P3-F | 31 | 31 | ✅ |
 
-**Total: 440/440 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 461/461 passing.** CI must fail if any implemented endpoint is below 100%.

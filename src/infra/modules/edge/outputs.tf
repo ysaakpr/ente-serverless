@@ -2,15 +2,17 @@ output "server_url" {
   value = "https://${aws_cloudfront_distribution.api.domain_name}"
 }
 
-# Same domain as server_url since D58 — the one distribution serves both the
-# API (root-path behaviors) and the albums web app (default behavior), so
-# public links are `https://<this domain>/?t=<token>`. NOTE: this output can
-# never feed the compute module's ALBUMS_URL directly — the lambda's env →
-# this distribution → the function URL → the lambda is a dependency cycle —
-# which is why `make plan` injects the value as albums_url_hint from the
-# previous apply's server_url output instead (see the env roots).
+# server_url + /albums since D60 — the one distribution serves the API on
+# its DEFAULT behavior and the albums web app on /albums* (D58 consolidated;
+# D60 inverted the layout to fit the FREE plan's 5-behavior ceiling), so
+# public links are `https://<this domain>/albums/?t=<token>`. NOTE: this
+# output can never feed the compute module's ALBUMS_URL directly — the
+# lambda's env → this distribution → the function URL → the lambda is a
+# dependency cycle — which is why `make plan` injects the value as
+# albums_url_hint from the previous apply's server_url output instead (the
+# env roots append the /albums suffix).
 output "albums_url" {
-  value = "https://${aws_cloudfront_distribution.api.domain_name}"
+  value = "https://${aws_cloudfront_distribution.api.domain_name}/albums"
 }
 
 # Consumed by `make pricing-plan` (D47): the AWS provider has no

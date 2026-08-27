@@ -15,11 +15,11 @@ output "objects_bucket" {
   value = module.data.objects_bucket
 }
 
-# What minted share links actually point at (D52/D58) — the value the Lambda's
-# ALBUMS_URL was deployed with: the custom-domain tfvars override if set, else
-# this distribution's own URL (same domain as server_url), else the .invalid
-# sentinel a fresh env carries until its second plan/deploy (see
-# albums_url_hint in variables.tf).
+# What minted share links actually point at (D52/D58/D60) — the value the
+# Lambda's ALBUMS_URL was deployed with: the custom-domain tfvars override if
+# set, else this distribution's own URL + /albums (server_url domain, the
+# /albums* behavior), else the .invalid sentinel a fresh env carries until
+# its second plan/deploy (see albums_url_hint in variables.tf).
 output "albums_url" {
   value = local.albums_url
 }

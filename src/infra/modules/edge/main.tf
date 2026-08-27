@@ -8,28 +8,45 @@
  * one distribution per env is what lets prod AND test both ride the $0 plan
  * (2 of 3 used, one spare).
  *
- * Layout of the one distribution:
- *   - The API stays at the ROOT — no /api prefix, no domain change. The
- *     distribution's domain IS the server_url real devices are configured
- *     with (7-tap custom endpoint), so the API behaviors are per-prefix
- *     ordered behaviors over the app's actual route table and the Lambda
- *     never sees a rewritten path. Zero client re-pointing, zero
- *     prefix-stripping, byte-identical museum shapes.
- *   - Every top-level path prefix registered in src/app.ts has an ordered
- *     behavior below (local.api_path_patterns) pointing at the Lambda
- *     origin. A route group that is added to app.ts WITHOUT a matching
- *     pattern here would silently fall through to the web bucket — a guard
- *     test (test/infra/web.test.ts) derives the prefix set from app.ts and
- *     fails the build on any drift, in either direction.
- *   - The DEFAULT behavior serves the albums web app from the private S3
- *     bucket (OAC). SPA fallback is a viewer-request CloudFront FUNCTION
- *     that rewrites extensionless URIs to /index.html.
- *   - LOAD-BEARING CONSTRAINT: custom_error_response must NEVER appear on
- *     this distribution. Error responses are DISTRIBUTION-WIDE — a
- *     403/404→/index.html mapping (the old modules/web SPA fallback) would
- *     rewrite the API's museum-shaped 404/403 JSON bodies into HTML for
- *     every client. The CloudFront function replaces it scoped to the web
- *     behaviors only. Guard-tested.
+ * Layout of the one distribution (D60 — INVERTED from the first D58 cut):
+ *   - The DEFAULT behavior is the API, exactly as it was before D58:
+ *     CachingDisabled + AllViewerExceptHostHeader, all 7 methods, https-only,
+ *     x-origin-secret injected at the origin. The distribution's domain IS
+ *     the server_url real devices are configured with (7-tap custom
+ *     endpoint), the Lambda sees unrewritten paths (byte-identical museum
+ *     shapes), unknown paths get museum-shaped 404 JSON from the app, and a
+ *     new route group in src/app.ts needs NO infra change, ever.
+ *   - ONE ordered behavior, `/albums*`, serves the albums web app from the
+ *     private S3 bucket (OAC). The web assets live under the `albums/` KEY
+ *     PREFIX in the bucket (`make deploy-web` syncs them there) and the app
+ *     is built with Next's basePath=/albums (`make build-web` patches the
+ *     pinned config), so the request URI maps 1:1 onto the object key — no
+ *     origin path, no prefix rewrite. SPA fallback is a viewer-request
+ *     CloudFront FUNCTION on THIS behavior only, rewriting extensionless
+ *     URIs (bare /albums and /albums/ included) to /albums/index.html.
+ *   - WHY inverted: the first D58 cut put the web app on the default
+ *     behavior and gave every app.ts route prefix its own ordered behavior —
+ *     17 behaviors total — and the FREE pricing plan refused the
+ *     subscription with "You're using configuration not available in this
+ *     tier: 17 cache behaviors (limit 5)". The FREE tier caps a distribution
+ *     at 5 cache behaviors (default + ordered); this layout uses 2. The
+ *     ceiling is guard-tested (test/infra/web.test.ts) with the error quoted.
+ *   - index.html freshness WITHOUT a dedicated behavior: `make deploy-web`
+ *     uploads albums/index.html with `Cache-Control: no-cache` metadata
+ *     (and the hashed /_next assets with a 1y immutable max-age) —
+ *     CachingOptimized honors origin Cache-Control, so a stale index (which
+ *     names the current hashed assets) can outlive a redeploy by at most
+ *     CachingOptimized's 1s min TTL. deploy-web's /* invalidation stays the
+ *     belt and braces.
+ *   - The app.ts namespace must never grow an /albums route group — it would
+ *     be shadowed by the ordered behavior. Museum has none today;
+ *     guard-tested so it stays that way.
+ *   - LOAD-BEARING CONSTRAINT (unchanged from D58): custom_error_response
+ *     must NEVER appear on this distribution. Error responses are
+ *     DISTRIBUTION-WIDE — a 403/404→index.html mapping (the old modules/web
+ *     SPA fallback) would rewrite the API's museum-shaped 404/403 JSON
+ *     bodies into HTML for every client. The CloudFront function replaces it
+ *     scoped to the /albums* behavior only. Guard-tested.
  *
  * No OAC on the Lambda origin — that finding transfers as-is from
  * immich-serverless: with IAM auth the POST body hash breaks; the Function
@@ -160,33 +177,6 @@ locals {
   managed_caching_optimized             = "658327ea-f89d-4fab-a63d-7e88639e58f6"
   managed_all_viewer_except_host_header = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
   managed_security_headers_policy_id    = "67f7725c-6f97-4210-82d7-5512b31e9d03"
-
-  # Every top-level path prefix in src/app.ts's route table, as CloudFront
-  # path patterns → the Lambda origin. `/ping` is the one exact match; the
-  # rest use the no-slash wildcard `<prefix>*` so a bare-prefix route (POST
-  # /files, POST /collections, GET /remote-store all exist) is covered by the
-  # same pattern as its subpaths. 15 patterns + /index.html = 16 ordered
-  # behaviors — comfortably under the 25-behavior default quota.
-  # Guard-tested against app.ts in BOTH directions (test/infra/web.test.ts):
-  # a new route group missing here fails the build (it would fall through to
-  # the web bucket), and a stale pattern here fails it too.
-  api_path_patterns = [
-    "/ping",
-    "/users*",
-    "/files*",
-    "/collections*",
-    "/trash*",
-    "/user-entity*",
-    "/remote-store*",
-    "/billing*",
-    "/storage-bonus*",
-    "/push*",
-    "/comments-reactions*",
-    "/collection-actions*",
-    "/contacts*",
-    "/emergency-contacts*",
-    "/public-collection*",
-  ]
 }
 
 /**
@@ -196,6 +186,10 @@ locals {
  * destroyable (force_destroy, no prevent_destroy, no versioning):
  * `make destroy` tears it down with the rest of the stateless half at the
  * cost of a rebuild, never a memory.
+ *
+ * Since D60 the assets live under the `albums/` KEY PREFIX (deploy-web syncs
+ * there): the /albums* viewer URI is the object key, verbatim, so the
+ * behavior needs no origin path and the function no asset rewrites.
  */
 resource "aws_s3_bucket" "web" {
   bucket        = "${local.prefix}-web-albums-${local.suffix}"
@@ -245,41 +239,56 @@ resource "aws_s3_bucket_policy" "web" {
 }
 
 /**
- * SPA fallback for the albums app, scoped to the web behaviors ONLY — the
- * replacement for the old distribution-wide custom_error_response mapping,
- * which the consolidated distribution can never carry (it would rewrite the
- * API's museum-shaped 404/403 JSON into HTML — see the header). A URI whose
- * last segment has no extension is a client-router path and rewrites to
- * /index.html; asset paths (anything with a dot) pass through. The rewrite
- * happens inside the default behavior, so a deep link serves index.html
- * under the CachingOptimized policy — `make deploy-web` invalidates /* on
- * every sync, which is the same belt-and-braces the old error-response
- * fallback relied on (error_caching_min_ttl 0 + invalidation).
+ * SPA fallback for the albums app, scoped to the /albums* behavior ONLY —
+ * the replacement for the old distribution-wide custom_error_response
+ * mapping, which the consolidated distribution can never carry (it would
+ * rewrite the API's museum-shaped 404/403 JSON into HTML — see the header).
+ * A URI whose last segment has no extension is a client-router path (bare
+ * /albums has last segment "albums", /albums/ has "": both extensionless,
+ * both covered) and rewrites to /albums/index.html — the app shell's object
+ * key, since the assets live under the albums/ prefix; asset paths (anything
+ * with a dot) pass through. The rewrite happens inside the /albums*
+ * behavior, so a deep link serves index.html under the CachingOptimized
+ * policy — deploy-web uploads index.html with Cache-Control: no-cache (D60),
+ * which CachingOptimized honors, and its /* invalidation on every sync stays
+ * the belt and braces.
  */
 resource "aws_cloudfront_function" "spa_rewrite" {
   name    = "${local.prefix}-spa-rewrite"
   runtime = "cloudfront-js-2.0"
-  comment = "albums SPA fallback: extensionless URIs -> /index.html (D58)"
+  comment = "albums SPA fallback: extensionless /albums* URIs -> /albums/index.html (D60)"
   publish = true
   code    = <<-EOT
     function handler(event) {
       var uri = event.request.uri;
       var last = uri.split('/').pop();
       if (last.indexOf('.') === -1) {
-        event.request.uri = '/index.html';
+        event.request.uri = '/albums/index.html';
       }
       return event.request;
     }
   EOT
 }
 
+/**
+ * FREE-TIER BEHAVIOR CEILING (D60): the CloudFront flat-rate FREE pricing
+ * plan allows AT MOST 5 cache behaviors per distribution (default + ordered
+ * combined) — the first D58 cut's 17-behavior layout was refused at
+ * subscription time with the exact error: "You're using configuration not
+ * available in this tier: 17 cache behaviors (limit 5)". This distribution
+ * uses 2 (default → API, /albums* → web bucket); the guard test
+ * (test/infra/web.test.ts) fails the build past 5.
+ */
 resource "aws_cloudfront_distribution" "api" {
-  enabled             = true
-  comment             = "ente-sl-${var.env_name} api + albums web"
-  price_class         = "PriceClass_All"
-  is_ipv6_enabled     = true
-  web_acl_id          = aws_wafv2_web_acl.api.arn
-  default_root_object = "index.html"
+  enabled         = true
+  comment         = "ente-sl-${var.env_name} api + albums web"
+  price_class     = "PriceClass_All"
+  is_ipv6_enabled = true
+  web_acl_id      = aws_wafv2_web_acl.api.arn
+
+  # Deliberately NO default_root_object: the default behavior is the API, so
+  # `/` belongs to the Lambda (museum-shaped 404, exactly as pre-D58) — a
+  # root object would silently turn `/` into a web-bucket fetch.
 
   origin {
     domain_name = local.origin_domain
@@ -306,12 +315,32 @@ resource "aws_cloudfront_distribution" "api" {
     origin_access_control_id = aws_cloudfront_origin_access_control.web.id
   }
 
-  # DEFAULT → the albums web app: everything that is not a registered API
-  # prefix is a static asset or a client-router path. Hashed/immutable
-  # assets cache long; the SPA function rewrites router paths to
-  # /index.html. redirect-to-https (not https-only): the default behavior
-  # faces browsers following pasted links, and a redirect beats an error.
+  # DEFAULT → the API, byte-identical to the pre-D58 default behavior:
+  # Managed-CachingDisabled + Managed-AllViewerExceptHostHeader (a Function
+  # URL origin must not receive the viewer Host) + the managed security
+  # headers, all 7 methods, https-only, no compression — small JSON either
+  # way. Unknown paths reach the Lambda and 404 museum-shaped; new app.ts
+  # route groups need no edge change.
   default_cache_behavior {
+    target_origin_id       = "api"
+    viewer_protocol_policy = "https-only"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+    cached_methods         = ["GET", "HEAD"]
+
+    cache_policy_id            = local.managed_caching_disabled
+    origin_request_policy_id   = local.managed_all_viewer_except_host_header
+    response_headers_policy_id = local.managed_security_headers_policy_id
+  }
+
+  # /albums* → the albums web app (the ONLY web-facing pattern; src/app.ts
+  # must never register an /albums route group — guard-tested). Hashed
+  # assets cache long under CachingOptimized; index.html rides the same
+  # policy but is uploaded with Cache-Control: no-cache (deploy-web, D60),
+  # which the policy honors. redirect-to-https (not https-only): this
+  # behavior faces browsers following pasted links, and a redirect beats an
+  # error.
+  ordered_cache_behavior {
+    path_pattern           = "/albums*"
     target_origin_id       = "web-albums"
     viewer_protocol_policy = "redirect-to-https"
     allowed_methods        = ["GET", "HEAD"]
@@ -324,42 +353,6 @@ resource "aws_cloudfront_distribution" "api" {
     function_association {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.spa_rewrite.arn
-    }
-  }
-
-  # index.html must never be cached long: it names the current hashed asset
-  # files, so a stale index after a redeploy 404s every asset it references.
-  # (deploy-web still invalidates, belt and braces.)
-  ordered_cache_behavior {
-    path_pattern           = "/index.html"
-    target_origin_id       = "web-albums"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    compress               = true
-
-    cache_policy_id            = local.managed_caching_disabled
-    response_headers_policy_id = local.managed_security_headers_policy_id
-  }
-
-  # The API behaviors — one per top-level route prefix (see
-  # local.api_path_patterns and the guard test). Settings are byte-identical
-  # to the pre-D58 default behavior: Managed-CachingDisabled +
-  # Managed-AllViewerExceptHostHeader (a Function URL origin must not
-  # receive the viewer Host) + Managed-SecurityHeadersPolicy, all 7 methods,
-  # https-only, no compression — small JSON either way.
-  dynamic "ordered_cache_behavior" {
-    for_each = local.api_path_patterns
-    content {
-      path_pattern           = ordered_cache_behavior.value
-      target_origin_id       = "api"
-      viewer_protocol_policy = "https-only"
-      allowed_methods        = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
-      cached_methods         = ["GET", "HEAD"]
-
-      cache_policy_id            = local.managed_caching_disabled
-      origin_request_policy_id   = local.managed_all_viewer_except_host_header
-      response_headers_policy_id = local.managed_security_headers_policy_id
     }
   }
 

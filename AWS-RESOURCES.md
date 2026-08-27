@@ -51,7 +51,7 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 It does *not* count application errors hono handles and returns, so the SES-500
 on `POST /users/ott` will not fire an alarm. That one is a log concern.
 
-### Edge (`modules/edge`) — the ONE distribution (D58) + albums web hosting (Phase F, D52)
+### Edge (`modules/edge`) — the ONE distribution (D58, layout D60) + albums web hosting (Phase F, D52)
 
 One CloudFront distribution per environment serves **both** the API and the
 pinned albums viewer (`ORACLE-VERSION` "albums web" line; built by
@@ -59,13 +59,18 @@ pinned albums viewer (`ORACLE-VERSION` "albums web" line; built by
 former two-distribution layout: the FREE pricing plan allows at most **3
 distributions per account** and covers one distribution + one web ACL per
 subscription, so one per env is what lets prod AND test both ride the $0
-plan (2 of 3 used). Share links are `https://<server_url domain>/?t=<token>`
-— `albums_url` and `server_url` are the same domain now.
+plan (2 of 3 used). The behavior layout is D60's: the FREE tier also caps a
+distribution at **5 cache behaviors** (subscribing the first D58 cut's 17
+was refused with "You're using configuration not available in this tier: 17
+cache behaviors (limit 5)"), so the API owns the DEFAULT behavior and the
+web app the single `/albums*` behavior — 2 of 5. Share links are
+`https://<server_url domain>/albums/?t=<token>` — `albums_url` is
+`server_url` + `/albums` now.
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api + albums web` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert. **API at the ROOT**: 15 ordered behaviors — `/ping` exact + 14 bare-prefix wildcards (`/users*`, `/files*`, …, `/public-collection*`), one per top-level prefix in `src/app.ts` (guard-tested set-equality) — to the Lambda Function URL origin (no OAC there, deliberate — same finding as immich-serverless; `x-origin-secret` injected per-origin), managed **CachingDisabled** + **AllViewerExceptHostHeader**, all 7 methods. **Default behavior** → the web bucket via OAC: managed **CachingOptimized** (hashed assets), the row-23 SPA function, GET/HEAD only; `/index.html` pinned to **CachingDisabled** (it names the current asset hashes). **NO `custom_error_response`** — error responses are distribution-wide and would rewrite the API's museum-shaped 404/403 JSON into HTML (the D58 load-bearing constraint, guard-tested). Its domain is the `server_url` output the app gets pointed at AND the Lambda's `ALBUMS_URL`. |
-| 23 | `aws_cloudfront_function` | `ente-sl-dev-spa-rewrite` | Viewer-request, cloudfront-js-2.0, attached to the **default behavior only**: URIs whose last segment has no extension rewrite to `/index.html` (the SPA fallback that replaced `custom_error_response`); asset paths pass through. |
+| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api + albums web` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert. **2 cache behaviors — the FREE plan caps them at 5 (D60, guard-tested)**. **DEFAULT behavior = the API**: the Lambda Function URL origin (no OAC there, deliberate — same finding as immich-serverless; `x-origin-secret` injected per-origin), managed **CachingDisabled** + **AllViewerExceptHostHeader**, all 7 methods, https-only — unknown paths 404 museum-shaped from the app, and new route groups need no edge change. **`/albums*`** → the web bucket via OAC (assets under the `albums/` key prefix, URI = object key): managed **CachingOptimized**, the row-23 SPA function, GET/HEAD only, compressed; index.html freshness is origin metadata (`Cache-Control: no-cache`, set by `make deploy-web` — no dedicated behavior). No `default_root_object` (`/` belongs to the API). **NO `custom_error_response`** — error responses are distribution-wide and would rewrite the API's museum-shaped 404/403 JSON into HTML (the D58 load-bearing constraint, guard-tested). Its domain is the `server_url` output the app gets pointed at; the Lambda's `ALBUMS_URL` is that domain + `/albums`. |
+| 23 | `aws_cloudfront_function` | `ente-sl-dev-spa-rewrite` | Viewer-request, cloudfront-js-2.0, attached to the **`/albums*` behavior only**: URIs whose last segment has no extension (bare `/albums` and `/albums/` included) rewrite to `/albums/index.html` (the SPA fallback that replaced `custom_error_response`); asset paths pass through. |
 | 24 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — unconditionally `force_destroy = true` (not tied to `delete_protection`), **no** versioning: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
 | 25 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. The bucket is never public. |
 | 26 | `aws_s3_bucket_policy` | ↑ | `s3:GetObject` to the `cloudfront.amazonaws.com` service principal only, condition-pinned (`AWS:SourceArn`) to distribution 22. |
@@ -74,9 +79,10 @@ plan (2 of 3 used). Share links are `https://<server_url domain>/?t=<token>`
 Pricing consequences of the consolidation, all deliberate (D47/D58):
 
 - **Everything — API and albums assets — rides the one FREE-plan
-  subscription** (per environment: `make pricing-plan` once per env, test
-  included; an unsubscribed env silently pays ~$6/mo of flat WAF fees on
-  pay-as-you-go). The plan's soft allowances (1M requests / 100 GB per
+  subscription** (per environment; `make deploy` chains the idempotent
+  subscribe post-apply since D60, with `make pricing-plan` as the manual
+  fallback its WARNING names — an unsubscribed env silently pays ~$6/mo of
+  flat WAF fees on pay-as-you-go). The plan's soft allowances (1M requests / 100 GB per
   month) see small JSON plus a few MB of static assets; photo bytes ride
   presigned S3 and never cross the distribution. Account-wide FREE-plan
   budget: **3 distributions max — prod + test = 2, one spare.**
@@ -387,8 +393,9 @@ For a ~500 GB library with ~10 GB of thumbnails and personal-scale traffic:
 
 The WAF line is the one worth understanding: on pay-as-you-go its flat fees
 dwarf every other line, so the distribution subscribes to the CloudFront
-flat-rate **FREE** pricing plan (`make pricing-plan` — once **per
-environment**, D47/D58), which covers the web ACL, the rule, and all
+flat-rate **FREE** pricing plan (once **per environment** — `make deploy`
+chains the idempotent subscribe post-apply, `make pricing-plan` is the
+manual fallback; D47/D58/D60), which covers the web ACL, the rule, and all
 CloudFront/WAF request fees for this distribution.
 Its 1M-request / 100 GB monthly allowances see only the small-JSON API path —
 photo bytes ride presigned S3 URLs straight to the bucket and never touch the

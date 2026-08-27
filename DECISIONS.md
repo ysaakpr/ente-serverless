@@ -1583,6 +1583,14 @@ source says Y — source won).
     included — WAF runs before the cache), which only errs stricter; and a
     brief albums-web blip during the migration apply while the bucket policy
     re-pins (the API path is untouched throughout).
+  - **Amended same day → see D60**: the 17-behavior layout above was refused
+    at pricing-plan subscription time — the FREE tier caps a distribution at
+    **5 cache behaviors** — so D60 inverts it (API on the DEFAULT behavior,
+    albums under the one `/albums*` ordered behavior). The consolidation
+    itself — one distribution, modules/web folded into modules/edge, the
+    no-custom_error_response constraint, the albums_url_hint mechanism, the
+    moved-block refactor — all stands; only the behavior layout, the SPA
+    function target, and the ALBUMS_URL path changed.
 
 - **D59 [COST 2026-08-27] Originals move to GLACIER_IR after 7 days
   (configurable), not day 0 — revises the 2026-08-16 GIR-only decision's
@@ -1610,6 +1618,118 @@ source says Y — source won).
   grace. No data movement, no restore, no cost spike; the only billing
   change is ~$0.006/GB of prorated Standard per new object's first week,
   traded against $0.03/GB retrieval on its early views.
+
+- **D60 [COST/EDGE 2026-08-27] FREE-tier behavior ceiling: the D58 layout
+  inverted — API on the DEFAULT behavior, albums web under the single
+  `/albums*` ordered behavior (2 cache behaviors total, hard ceiling 5).**
+  Motive: subscribing the D58-shaped distribution to the flat-rate FREE
+  pricing plan was refused with the exact error *"You're using configuration
+  not available in this tier: 17 cache behaviors (limit 5)"* — an
+  undocumented gate of the same family as D47's price-class and byte-match
+  gates. Per-route-prefix behaviors can never fit 15+ prefixes under 5, so
+  the design inverts rather than trims. Judgment calls:
+  - **DEFAULT behavior → the Lambda origin, byte-identical to the pre-D58
+    API edge settings** (CachingDisabled + AllViewerExceptHostHeader +
+    managed SecurityHeadersPolicy, all 7 methods, https-only, x-origin-secret
+    on the origin). Unknown paths reach the Lambda and 404 museum-shaped —
+    the pre-D58 posture, strictly better than D58's fall-through-to-HTML —
+    and a new app.ts route group needs NO infra change, ever. No
+    `default_root_object` (`/` belongs to the API).
+  - **`/albums*` → the web bucket (OAC)**: GET/HEAD, compress,
+    CachingOptimized + SecurityHeadersPolicy, and the SPA viewer-request
+    function moved to THIS behavior, rewriting extensionless URIs to
+    `/albums/index.html` (bare `/albums` and `/albums/` are extensionless —
+    last segment `albums` resp. `` — so the one rule covers them). The
+    assets live under the **`albums/` key prefix** in the bucket
+    (`make deploy-web` syncs there), so the viewer URI is the object key
+    verbatim — no origin_path, no prefix rewrite to drift. The
+    SourceArn-pinned bucket policy grants on `arn/*` and needed no change.
+  - **index.html freshness WITHOUT a dedicated behavior**: deploy-web
+    uploads `albums/index.html` with `Cache-Control: no-cache` metadata and
+    the hashed `/_next` assets with `public, max-age=31536000, immutable` —
+    CachingOptimized honors origin Cache-Control (no-cache pins a stale
+    index to the policy's 1s min TTL), so the D58 `/index.html` behavior's
+    job moved into object metadata and freed a behavior slot. Upload order:
+    assets first, index.html LAST; the `/*` invalidation stays the belt and
+    braces. A rejected third behavior (`/albums/index.html` →
+    CachingDisabled) remains available under the ceiling if the metadata
+    approach ever proves insufficient.
+  - **basePath: the pinned albums app is patched at build time.** Served
+    under /albums, the Next.js static export needs `basePath`/`assetPrefix`
+    = `/albums`; the pinned tag (photos-v1.3.61,
+    `web/apps/albums/next.config.js`) has **no env-based basePath support**
+    (checked: it spreads `ente-base/next.config.base.js`, which sets
+    neither). `make build-web` therefore runs
+    `scripts/patch-albums-basepath.ts` against the sparse clone before the
+    build: it anchors on the `...baseConfig,` spread (stable — the tag is
+    pinned), injects the two keys, is idempotent, and FAILS LOUDLY when the
+    anchor is missing or a foreign basePath appears (a tag bump that changes
+    the shape must break the build, never export an unprefixed app that
+    404s behind `/albums*`). Anchor logic unit-tested against the pinned
+    config's verbatim shape (test/unit/albums-basepath-patch.test.ts);
+    deploy-web additionally refuses to sync a build whose index.html lacks
+    `/albums/_next` (stale pre-D60 build tripwire).
+  - **ALBUMS_URL = `<server_url>/albums`** — the D58 albums_url_hint
+    mechanism unchanged, with the `/albums` suffix appended where the value
+    is composed (the env roots' coalesce; the edge module's `albums_url`
+    output too). Minted links are now
+    `https://<domain>/albums/?t=<token>`. A tfvars `albums_url` (custom
+    domain) still wins and passes through VERBATIM — no suffix; the fresh-env
+    sentinel is `https://albums-url-pending.invalid/albums`.
+  - **Guards inverted with the design** (test/infra/web.test.ts): the D58
+    app.ts↔api_path_patterns set-equality guard is obsolete (there are no
+    per-prefix behaviors) and is REPLACED by: total behaviors ≤ 5 with the
+    subscription error quoted (target shape pinned at 2, and
+    `api_path_patterns` must not reappear), default behavior → Lambda with
+    the faithful pre-D58 settings, `/albums*` the only ordered/web-facing
+    pattern, SPA function attached to `/albums*` only with the
+    `/albums/index.html` target, **no app.ts route under `/albums`** (the
+    namespace-collision guard — museum has none today; the behavior would
+    shadow it), no `default_root_object`, still exactly one distribution and
+    no `custom_error_response` anywhere, deploy-web's prefix + cache
+    metadata + ordering, build-web's patch step, and the deploy→pricing-plan
+    chain below.
+  - **`make deploy` now chains `make pricing-plan` post-apply** (user
+    request): the target is idempotent (already-subscribed → one-line
+    no-op), and a subscribe failure must NOT fail the deploy — IAM
+    propagation or the account's 3-distribution FREE budget can transiently
+    refuse — so it prints a loud multi-line WARNING telling the operator to
+    re-run `make pricing-plan` (the standalone target stays). Guard-tested
+    (non-fatal `|| {` + WARNING + standalone target present).
+  - **Expected migration plan, per starting point** (verified shape; not run
+    against the live envs from here):
+    - *from the D58 single-distribution layout* (test is here; prod may be):
+      **in-place update** of the one distribution (default behavior swaps
+      back to the Lambda origin, the 16 ordered behaviors collapse to
+      `/albums*`, default_root_object drops), the SPA **function code**
+      update, and the API Lambda's ALBUMS_URL env (`https://<domain>` →
+      `https://<domain>/albums`). Nothing else.
+    - *from the pre-D58 two-distribution layout*: the D58 migration and this
+      one land as ONE plan — 4 moved (module.web → module.edge), 1 add (SPA
+      function), in-place updates (main distribution to the D60 shape,
+      bucket policy SourceArn, Lambda ALBUMS_URL), 1 destroy (the standalone
+      albums distribution).
+    - Either way: **any `replace` on the distribution = ABORT** (a
+      replacement mints a new domain and breaks every configured client);
+      after deploy, `make build-web && make deploy-web` is REQUIRED (the
+      assets change — basePath rebuild + the new `albums/` prefix; the old
+      root-level objects become unreachable cruft, optionally cleaned with
+      `aws s3 rm` minus the `albums/` prefix), and `make pricing-plan` now
+      succeeds (≤ 5 behaviors) — the deploy chain runs it automatically.
+  - **Share-link caveat**: links minted while a D58-layout deploy was live
+    (root-path ALBUMS_URL) point at `https://<domain>/?t=...`, which now
+    reaches the API and 404s — tokens stay valid, re-copy each link from the
+    app (the standing D52 caveat pattern). Pre-D58 links already carried the
+    dead-domain caveat.
+  - Trade-offs accepted: `/albums` is carved out of the API's URL namespace
+    forever (guard-enforced; museum has no such group); D58's
+    fall-through-to-HTML trade-off is reverted (strictly better); deep-link
+    index.html responses ride CachingOptimized keyed per-URI with only
+    no-cache metadata + invalidation for freshness (same belt-and-braces as
+    D58 accepted); and the albums app now lives under a subpath, so any
+    upstream absolute-path asset reference that ignores basePath would 404 —
+    none known at the pinned tag; the D52 browser gate (NEXT-TASKS item 6,
+    now against `https://<domain>/albums/?t=...`) is where that proves out.
 
 ## Environment facts discovered while building
 

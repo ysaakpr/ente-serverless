@@ -20,16 +20,16 @@ presigned S3 is the whole backend.
 ## Architecture
 
 ```
-CloudFront (ONE distribution, D58)
-  ├─ /ping, /users*, /files*, … (route-prefix behaviors)
-  │    └── API Lambda (hono, Function URL auth NONE) ── DynamoDB single table
-  │           │                                          (gsi1 collection diff,
-  │           ├── presigned PUT/GET ─► S3 objects bucket  gsi2 collection feed,
+CloudFront (ONE distribution, 2 behaviors — FREE-plan limit is 5, D58/D60)
+  ├─ default ─► API Lambda (hono, Function URL auth NONE) ── DynamoDB single table
+  │  (all API │                                          (gsi1 collection diff,
+  │   routes) ├── presigned PUT/GET ─► S3 objects bucket  gsi2 collection feed,
   │           │      (clients move ALL bytes)             gsi3 tokens/trash/entity/fd)
   │           ├── SES (OTT mail)
   │           └── EventBridge cron: trash purge (30 d); OTTs expire via DynamoDB TTL
-  └─ default ─► S3 web bucket (OAC, private) — the pinned albums viewer (SPA via
-                CloudFront function); share links are <server_url>/?t=<token> (D52/D58)
+  └─ /albums* ─► S3 web bucket (OAC, private, albums/ prefix) — the pinned albums
+                 viewer built with basePath=/albums (SPA via CloudFront function);
+                 share links are <server_url>/albums/?t=<token> (D52/D58/D60)
 ```
 
 With BYO storage pools (D55) a presigned URL may point at a per-pool household

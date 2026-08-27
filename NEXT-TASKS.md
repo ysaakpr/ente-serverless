@@ -48,13 +48,18 @@ its device checks ride item 4 and its cloud check is item 9.)
 5. **M7 deploy (D4):** `make build-lambda`, fill `src/infra/dev/ente-sl.tfvars`
    from the example (BACK UP hashing_key), `tofu apply`, replay gates against
    the real URL, then the app over the internet. Still open: account/region +
-   SES-verified mail_from. Post-apply: `make pricing-plan` (C12) and the
-   albums web deploy (C13: `make build-web` + `make deploy-web`).
-6. **Manual albums-link browser gate (D52, release gate; needs item 5).**
+   SES-verified mail_from. Post-apply: the FREE pricing-plan subscription is
+   chained into `make deploy` (D60; C12 — re-run `make pricing-plan` by hand
+   if its WARNING fires) and the albums web deploy (C13: `make build-web` +
+   `make deploy-web`).
+6. **Manual albums-link browser gate (D52/D60, release gate; needs item 5).**
    Mint a real share link in the app and open it in the pinned albums build
-   (photos-v1.3.61, guard-matched to ORACLE-VERSION): album renders, plain +
-   passworded + collect variants work, device limit trips, disabled link
-   shows "broken", not "empty" (RUNBOOK-M5-style checklist; record findings).
+   (photos-v1.3.61, guard-matched to ORACLE-VERSION) at its D60 address —
+   `https://<server_url domain>/albums/?t=<token>`: album renders (basePath
+   /albums assets load — this is also where the build-time basePath patch
+   proves out), plain + passworded + collect variants work, device limit
+   trips, disabled link shows "broken", not "empty" (RUNBOOK-M5-style
+   checklist; record findings).
 7. **Hardening follow-ups:** account-deletion data cleanup in the sweep cron
    (rows/objects of deleted users); CI (unit + infra every push; integration
    behind a LocalStack service).

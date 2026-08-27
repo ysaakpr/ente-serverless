@@ -1,20 +1,28 @@
 /**
  * Plan-time guards for the consolidated distribution (Phase F D52,
- * consolidated D58): ONE CloudFront distribution serves both the API (at the
- * ROOT — its domain is the server_url real devices are configured with) and
- * the albums web app (default behavior, private bucket behind OAC).
+ * consolidated D58, layout inverted D60): ONE CloudFront distribution serves
+ * both the API (the DEFAULT behavior — its domain is the server_url real
+ * devices are configured with) and the albums web app (the single /albums*
+ * ordered behavior, private bucket behind OAC, assets under the albums/ key
+ * prefix).
  *
- * The two guards that carry the design:
- *   1. ROUTE COVERAGE — every top-level path prefix registered in src/app.ts
- *      must have a matching ordered behavior pointing at the Lambda origin,
- *      and no stale pattern may linger. A new route group added without a
- *      behavior would silently fall through to the web bucket and 200 as
- *      HTML.
- *   2. NO custom_error_response — error responses are DISTRIBUTION-WIDE, so
+ * The guards that carry the design:
+ *   1. FREE-TIER BEHAVIOR CEILING — the CloudFront flat-rate FREE pricing
+ *      plan allows AT MOST 5 cache behaviors per distribution. The first
+ *      D58 cut (17 behaviors: web default + /index.html + 15 API prefixes)
+ *      was refused at subscription time with the exact error:
+ *      "You're using configuration not available in this tier:
+ *       17 cache behaviors (limit 5)".
+ *      Hence the inversion: API on the default behavior (new route groups
+ *      need NO edge change, unknown paths 404 museum-shaped from the app),
+ *      /albums* as the one web-facing pattern. Total here: 2.
+ *   2. NAMESPACE — /albums* is the only pattern the web bucket owns, so
+ *      src/app.ts must never register an /albums route group (museum has
+ *      none): the ordered behavior would shadow it.
+ *   3. NO custom_error_response — error responses are DISTRIBUTION-WIDE, so
  *      the old SPA 403/404→index.html mapping would rewrite the API's
  *      museum-shaped 404/403 JSON into HTML for every client. SPA fallback
- *      must stay a viewer-request CloudFront function on the web behaviors
- *      only.
+ *      must stay a viewer-request CloudFront function on /albums* only.
  *
  * Same conventions as lifecycle.test.ts: structure, never comments.
  */
@@ -50,88 +58,102 @@ const allTfFiles = (dir: string): string[] => {
   return out;
 };
 
-/** Top-level path prefixes actually registered in src/app.ts. */
-const appPrefixes = (): Set<string> => {
+/** Every route path registered in src/app.ts. */
+const appRoutes = (): string[] => {
   const app = readFileSync(join(ROOT, 'src/app.ts'), 'utf8');
   const routes = [...app.matchAll(/app\.(?:get|post|put|delete|patch|options)\(\s*'([^']+)'/g)];
   expect(routes.length, 'route regex matched nothing — app.ts changed shape').toBeGreaterThan(30);
-  return new Set(routes.map((m) => m[1]!.split('/')[1]!));
+  return routes.map((m) => m[1]!);
 };
 
-/** The api_path_patterns list from the edge module. */
-const edgePatterns = (): string[] => {
+/** The default_cache_behavior block of the one distribution. */
+const defaultBehavior = (): string => {
   const text = edgeTf();
-  const at = text.indexOf('api_path_patterns');
-  expect(at, 'edge module has no api_path_patterns local').toBeGreaterThan(-1);
-  const open = text.indexOf('[', at);
-  const close = text.indexOf(']', open);
-  return text
-    .slice(open + 1, close)
-    .split(',')
-    .map((s) => s.trim().replace(/^"|"$/g, ''))
-    .filter(Boolean);
+  const at = text.indexOf('default_cache_behavior');
+  expect(at, 'no default_cache_behavior').toBeGreaterThan(-1);
+  return text.slice(at, text.indexOf('\n  }', at));
 };
 
-describe('route -> behavior coverage (THE consolidation drift guard, D58)', () => {
-  it('every top-level app.ts prefix has an ordered behavior pattern, and none is stale', () => {
-    const prefixes = appPrefixes();
-    const patterns = new Set(edgePatterns());
-    for (const prefix of prefixes) {
-      const want = prefix === 'ping' ? '/ping' : `/${prefix}*`;
-      expect(
-        patterns.has(want),
-        `app.ts serves /${prefix}/* but the edge module has no "${want}" behavior — those requests would fall through to the WEB BUCKET`,
-      ).toBe(true);
-    }
-    // The other direction: a pattern with no app.ts routes steals a slice of
-    // the web app's URL space and masks the mistake as API 404s.
-    for (const pattern of patterns) {
-      const prefix = pattern.replace(/^\//, '').replace(/\*$/, '');
-      expect(
-        prefixes.has(prefix),
-        `edge pattern "${pattern}" matches no app.ts route group — remove it or add the routes`,
-      ).toBe(true);
-    }
-  });
+/** Every ordered_cache_behavior block (there should be exactly one). */
+const orderedBehaviors = (): string[] => {
+  const text = edgeTf();
+  const out: string[] = [];
+  let at = text.indexOf('ordered_cache_behavior');
+  while (at !== -1) {
+    out.push(text.slice(at, text.indexOf('\n  }\n', at)));
+    at = text.indexOf('ordered_cache_behavior', at + 1);
+  }
+  return out;
+};
 
-  it('/ping is the exact match; every other pattern is the bare-prefix wildcard', () => {
-    // `<prefix>*` (no slash before the star) so bare-prefix routes — POST
-    // /files, POST /collections, GET /remote-store — ride the same behavior
-    // as their subpaths. `/<prefix>/*` would send them to the web bucket.
-    for (const pattern of edgePatterns()) {
-      if (pattern === '/ping') continue;
-      expect(pattern, `${pattern} must end in * (bare-prefix wildcard)`).toMatch(/^\/[a-z-]+\*$/);
-    }
-    expect(edgePatterns()).toContain('/ping');
-  });
-
-  it('behavior count stays comfortably under the 25-behavior default quota', () => {
-    // api patterns + /index.html = all ordered behaviors; +1 default.
-    expect(edgePatterns().length + 1).toBeLessThanOrEqual(20);
-  });
-
-  it('the API behaviors keep the pre-D58 API edge settings, via the one dynamic block', () => {
+describe('FREE-tier behavior ceiling (THE D60 constraint)', () => {
+  it('total cache behaviors (default + ordered) stay at or under the FREE-plan limit of 5', () => {
+    // The pricing-plan subscription refuses more, verbatim: "You're using
+    // configuration not available in this tier: 17 cache behaviors
+    // (limit 5)". This is a HARD ceiling for the $0 plan (D47/D60), not the
+    // 25-behavior soft quota.
     const text = edgeTf();
-    const dyn = text.slice(text.indexOf('dynamic "ordered_cache_behavior"'));
-    expect(dyn, 'no dynamic ordered_cache_behavior block').not.toBe('');
-    expect(dyn).toMatch(/for_each\s*=\s*local\.api_path_patterns/);
-    const block = dyn.slice(0, dyn.indexOf('\n  }'));
-    expect(block).toMatch(/target_origin_id\s*=\s*"api"/);
-    expect(block).toMatch(/viewer_protocol_policy\s*=\s*"https-only"/);
-    // All 7 methods — the API takes writes; the web behaviors never do.
-    expect(block).toContain('"GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"');
+    const ordered = (text.match(/ordered_cache_behavior/g) ?? []).length;
+    const defaults = (text.match(/default_cache_behavior/g) ?? []).length;
+    expect(defaults, 'exactly one default behavior').toBe(1);
+    expect(
+      ordered + defaults,
+      'behavior count exceeds the FREE pricing-plan ceiling of 5 — the subscription will refuse',
+    ).toBeLessThanOrEqual(5);
+    // Target shape is 2 (default → API, /albums* → web); growing past that
+    // should be a conscious decision, not drift.
+    expect(ordered + defaults).toBe(2);
+    // The route table must stay decoupled from the edge: no dynamic
+    // per-prefix behaviors may reappear (that is what hit the ceiling).
+    expect(text).not.toContain('api_path_patterns');
+  });
+
+  it('the DEFAULT behavior is the API, byte-identical to the pre-D58 API edge settings', () => {
+    const def = defaultBehavior();
+    expect(def).toMatch(/target_origin_id\s*=\s*"api"/);
+    expect(def).toMatch(/viewer_protocol_policy\s*=\s*"https-only"/);
+    // All 7 methods — the API takes writes; the web behavior never does.
+    expect(def).toContain('"GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"');
     // CachingDisabled + AllViewerExceptHostHeader (a Function URL origin
     // must not receive the viewer Host) + managed security headers.
-    expect(block).toMatch(/cache_policy_id\s*=\s*local\.managed_caching_disabled/);
-    expect(block).toMatch(
-      /origin_request_policy_id\s*=\s*local\.managed_all_viewer_except_host_header/,
-    );
-    expect(block).toMatch(
-      /response_headers_policy_id\s*=\s*local\.managed_security_headers_policy_id/,
-    );
-    const edge = text;
+    expect(def).toMatch(/cache_policy_id\s*=\s*local\.managed_caching_disabled/);
+    expect(def).toMatch(/origin_request_policy_id\s*=\s*local\.managed_all_viewer_except_host_header/);
+    expect(def).toMatch(/response_headers_policy_id\s*=\s*local\.managed_security_headers_policy_id/);
+    const edge = edgeTf();
     expect(edge).toContain('"4135ea2d-6df8-44a3-9df3-4b5a84be39ad"');
     expect(edge).toContain('"b689b0a8-53d0-40ab-baf2-68738e2966ac"');
+    // The API must sit on the DEFAULT behavior so unknown paths reach the
+    // Lambda and 404 museum-shaped — never the web bucket.
+    expect(def).not.toContain('function_association');
+  });
+
+  it('/albums* is the ONLY web-facing pattern, GET/HEAD, CachingOptimized, compressed', () => {
+    const ordered = orderedBehaviors();
+    expect(ordered, 'exactly one ordered behavior — /albums*').toHaveLength(1);
+    const web = ordered[0]!;
+    expect(web).toMatch(/path_pattern\s*=\s*"\/albums\*"/);
+    expect(web).toMatch(/target_origin_id\s*=\s*"web-albums"/);
+    expect(web).toMatch(/cache_policy_id\s*=\s*local\.managed_caching_optimized/);
+    expect(web).toMatch(/response_headers_policy_id\s*=\s*local\.managed_security_headers_policy_id/);
+    expect(web).toMatch(/compress\s*=\s*true/);
+    expect(web).not.toMatch(/"(POST|PUT|PATCH|DELETE)"/);
+    expect(edgeTf()).toContain('"658327ea-f89d-4fab-a63d-7e88639e58f6"');
+  });
+
+  it('src/app.ts registers NO route under /albums — the ordered behavior would shadow it', () => {
+    // Museum has no /albums route group today; this keeps it that way. If
+    // one ever appears upstream, the web app needs a different base path —
+    // an explicit decision, not a silent shadowing.
+    for (const route of appRoutes()) {
+      expect(
+        route === '/albums' || route.startsWith('/albums/'),
+        `app.ts route ${route} collides with the /albums* web behavior — CloudFront would never send it to the Lambda`,
+      ).toBe(false);
+    }
+  });
+
+  it('no default_root_object — `/` belongs to the API (museum-shaped 404), not the web bucket', () => {
+    expect(edgeTf()).not.toContain('default_root_object');
   });
 });
 
@@ -150,7 +172,7 @@ describe('one-distribution invariants (D58)', () => {
 
   it('NO custom_error_response anywhere — it is distribution-wide and corrupts API 404/403 JSON', () => {
     // The load-bearing constraint of the whole consolidation: a 403/404 ->
-    // /index.html mapping applies to EVERY behavior, so museum-shaped API
+    // index.html mapping applies to EVERY behavior, so museum-shaped API
     // errors would come back as 200 HTML. SPA fallback must stay in the
     // viewer-request function instead.
     for (const file of allTfFiles(INFRA)) {
@@ -161,7 +183,7 @@ describe('one-distribution invariants (D58)', () => {
     }
   });
 
-  it('the SPA rewrite function exists, rewrites extensionless URIs to /index.html, and is published', () => {
+  it('the SPA rewrite function exists, rewrites extensionless URIs to /albums/index.html, and is published', () => {
     const text = edgeTf();
     const fn = text.slice(text.indexOf('resource "aws_cloudfront_function"'));
     expect(fn, 'no aws_cloudfront_function').not.toBe('');
@@ -169,51 +191,22 @@ describe('one-distribution invariants (D58)', () => {
     expect(block).toMatch(/runtime\s*=\s*"cloudfront-js-2\.0"/);
     expect(block).toMatch(/publish\s*=\s*true/);
     expect(block).toContain("indexOf('.')");
-    expect(block).toContain("event.request.uri = '/index.html'");
+    // The rewrite target carries the albums/ key prefix (bare /albums and
+    // /albums/ are extensionless too, so both land on the app shell).
+    expect(block).toContain("event.request.uri = '/albums/index.html'");
+    expect(block).not.toContain("= '/index.html'");
   });
 
-  it('the SPA function is attached to the DEFAULT behavior only, as viewer-request', () => {
+  it('the SPA function is attached to the /albums* behavior ONLY, as viewer-request', () => {
     const text = edgeTf();
     const associations = text.match(/function_association/g) ?? [];
     expect(associations, 'the SPA function must associate exactly once').toHaveLength(1);
-    const def = text.slice(
-      text.indexOf('default_cache_behavior'),
-      text.indexOf('ordered_cache_behavior'),
-    );
-    expect(def, 'the association must live in default_cache_behavior').toContain(
+    const web = orderedBehaviors()[0]!;
+    expect(web, 'the association must live in the /albums* ordered behavior').toContain(
       'function_association',
     );
-    expect(def).toMatch(/event_type\s*=\s*"viewer-request"/);
-    expect(def).toMatch(/function_arn\s*=\s*aws_cloudfront_function\.spa_rewrite\.arn/);
-  });
-
-  it('default behavior serves the web origin with CachingOptimized; /index.html is CachingDisabled', () => {
-    const text = edgeTf();
-    expect(text).toMatch(/default_root_object\s*=\s*"index\.html"/);
-    const def = text.slice(
-      text.indexOf('default_cache_behavior'),
-      text.indexOf('ordered_cache_behavior'),
-    );
-    expect(def).toMatch(/target_origin_id\s*=\s*"web-albums"/);
-    expect(def).toMatch(/cache_policy_id\s*=\s*local\.managed_caching_optimized/);
-    expect(text).toContain('"658327ea-f89d-4fab-a63d-7e88639e58f6"');
-    // index.html names the current hashed assets — a stale copy 404s every
-    // asset it references, so it must never cache long.
-    const idx = text.slice(text.indexOf('path_pattern           = "/index.html"'));
-    const idxBlock = idx.slice(0, idx.indexOf('\n  }'));
-    expect(idxBlock).toMatch(/target_origin_id\s*=\s*"web-albums"/);
-    expect(idxBlock).toMatch(/cache_policy_id\s*=\s*local\.managed_caching_disabled/);
-  });
-
-  it('web behaviors never expose write methods', () => {
-    const text = edgeTf();
-    const def = text.slice(
-      text.indexOf('default_cache_behavior'),
-      text.indexOf('ordered_cache_behavior'),
-    );
-    expect(def).not.toMatch(/"(POST|PUT|PATCH|DELETE)"/);
-    const idx = text.slice(text.indexOf('path_pattern           = "/index.html"'));
-    expect(idx.slice(0, idx.indexOf('\n  }'))).not.toMatch(/"(POST|PUT|PATCH|DELETE)"/);
+    expect(web).toMatch(/event_type\s*=\s*"viewer-request"/);
+    expect(web).toMatch(/function_arn\s*=\s*aws_cloudfront_function\.spa_rewrite\.arn/);
   });
 });
 
@@ -251,7 +244,8 @@ describe('web bucket privacy guards (D52, folded into edge by D58)', () => {
     expect(policy).toContain('cloudfront.amazonaws.com');
     expect(policy).toContain('"AWS:SourceArn"');
     expect(policy).toContain('aws_cloudfront_distribution.api.arn');
-    // Read-only: GetObject and nothing else.
+    // Read-only: GetObject and nothing else. The grant covers the whole
+    // bucket, so the albums/ key prefix (D60) needs no policy change.
     expect(policy).toContain('"s3:GetObject"');
     expect(policy).not.toMatch(/"s3:(Put|Delete|List)[A-Za-z]*"/);
   });
@@ -265,14 +259,16 @@ describe('web bucket privacy guards (D52, folded into edge by D58)', () => {
     expect(oacBlock).toMatch(/signing_behavior\s*=\s*"always"/);
     expect(oacBlock).toMatch(/signing_protocol\s*=\s*"sigv4"/);
 
-    // The web origin: OAC, no custom_origin_config. The api origin keeps the
-    // documented no-OAC posture (IAM auth breaks the POST body hash).
+    // The web origin: OAC, no custom_origin_config, and no origin_path — the
+    // /albums* URI maps onto the albums/ KEY PREFIX verbatim (deploy-web
+    // syncs there), so a path rewrite has nowhere to drift.
     const web = text.slice(text.indexOf('origin_id                = "web-albums"'));
     const webBlock = web.slice(0, web.indexOf('\n  }'));
     expect(webBlock).toMatch(
       /origin_access_control_id\s*=\s*aws_cloudfront_origin_access_control\.web\.id/,
     );
     expect(webBlock).not.toContain('custom_origin_config');
+    expect(webBlock).not.toContain('origin_path');
   });
 
   it('the web bucket is the destroyable kind — never the objects bucket pattern', () => {
@@ -288,7 +284,7 @@ describe('web bucket privacy guards (D52, folded into edge by D58)', () => {
   });
 });
 
-describe('ALBUMS_URL wiring (D51/D52, consolidated D58)', () => {
+describe('ALBUMS_URL wiring (D51/D52, consolidated D58, /albums suffix D60)', () => {
   it('ALBUMS_URL reaches the API lambda from a required variable', () => {
     expect(computeTf()).toMatch(/ALBUMS_URL\s*=\s*var\.albums_url/);
     const vars = readTf('modules/compute/variables.tf');
@@ -299,17 +295,20 @@ describe('ALBUMS_URL wiring (D51/D52, consolidated D58)', () => {
     expect(decl.slice(0, decl.indexOf('\n}'))).not.toContain('default');
   });
 
-  it('both envs wire ALBUMS_URL as tfvars-override -> make-injected hint -> loud sentinel', () => {
-    // The albums app rides the SAME distribution as the API, so the right
-    // value is the distribution's own URL — which tofu cannot reference from
-    // the lambda env (lambda -> distribution -> function URL -> lambda is a
-    // cycle). `make plan` injects the previous apply's server_url as
-    // albums_url_hint; the fallback must be LOUDLY broken (.invalid), never
-    // a silently-wrong host.
+  it('both envs wire ALBUMS_URL as tfvars-override -> hint + /albums -> loud sentinel', () => {
+    // The albums app rides the SAME distribution as the API under /albums*
+    // (D60), so the right value is the distribution's own URL + /albums —
+    // tofu cannot reference the domain from the lambda env (lambda ->
+    // distribution -> function URL -> lambda is a cycle), so `make plan`
+    // injects the previous apply's server_url as albums_url_hint and the
+    // /albums suffix is appended HERE, where the value is composed. The
+    // fallback must be LOUDLY broken (.invalid), never a silently-wrong
+    // host; the tfvars albums_url (custom domain) passes through VERBATIM —
+    // no suffix.
     for (const env of ['dev', 'test']) {
       const main = readTf(`${env}/main.tf`);
       expect(main, `${env} lost the albums_url coalesce`).toMatch(
-        /albums_url\s*=\s*coalesce\(\s*var\.albums_url,\s*var\.albums_url_hint,\s*"https:\/\/albums-url-pending\.invalid",?\s*\)/,
+        /albums_url\s*=\s*coalesce\(\s*var\.albums_url,\s*var\.albums_url_hint != "" \? "\$\{var\.albums_url_hint\}\/albums" : "",\s*"https:\/\/albums-url-pending\.invalid\/albums",?\s*\)/,
       );
       expect(main).toMatch(/albums_url\s*=\s*local\.albums_url/);
       const vars = readTf(`${env}/variables.tf`);
@@ -318,6 +317,13 @@ describe('ALBUMS_URL wiring (D51/D52, consolidated D58)', () => {
       expect(hint.slice(0, hint.indexOf('\n}'))).toMatch(/default\s*=\s*""/);
       expect(vars).toContain('variable "albums_url"');
     }
+  });
+
+  it("the edge module's albums_url output carries the /albums suffix too", () => {
+    const outputs = readFileSync(join(INFRA, 'modules/edge/outputs.tf'), 'utf8');
+    expect(outputs).toContain(
+      '"https://${aws_cloudfront_distribution.api.domain_name}/albums"',
+    );
   });
 
   it('make plan injects the hint from the profile state server_url output', () => {
@@ -338,9 +344,9 @@ describe('ALBUMS_URL wiring (D51/D52, consolidated D58)', () => {
 
   it('the module-move is a moved-block refactor, never destroy-and-recreate', () => {
     // The bucket (and its synced content), its policy/access block, and the
-    // OAC moved from the deleted modules/web into modules/edge. Without the
-    // moved blocks the plan destroys and recreates them — same-name bucket
-    // churn and an albums outage for nothing.
+    // OAC moved from the deleted modules/web into modules/edge (D58).
+    // Without the moved blocks the plan destroys and recreates them —
+    // same-name bucket churn and an albums outage for nothing.
     const main = readFileSync(join(INFRA, 'dev/main.tf'), 'utf8');
     for (const res of [
       'aws_s3_bucket.web',
@@ -400,18 +406,20 @@ describe('ALBUMS_URL wiring (D51/D52, consolidated D58)', () => {
   });
 });
 
-describe('/public-collection edge posture (plan §4.1a, D52)', () => {
+describe('/public-collection edge posture (plan §4.1a, D52/D60)', () => {
   it('the anonymous surface sits behind the (unscoped, FREE-tier) WAF rate rule', () => {
     // A path-scoped rate rule needs a byte-match scope-down, which the D47
     // FREE pricing plan gates — so the guarantee is: ONE distribution, ONE
     // web ACL, rate rule present, nothing byte-matched, and the
-    // /public-collection prefix riding an API behavior of THAT distribution.
-    // The per-link bounds live in the app (D51 ceilings), not here.
+    // /public-collection routes riding the DEFAULT (API) behavior of THAT
+    // distribution (D60 — no per-prefix behaviors anymore). The per-link
+    // bounds live in the app (D51 ceilings), not here.
     const edge = edgeTf();
     expect(edge).toContain('rate_based_statement');
     expect(edge).not.toContain('byte_match_statement');
     expect(edge).toMatch(/web_acl_id\s*=\s*aws_wafv2_web_acl\.api\.arn/);
-    expect(edgePatterns()).toContain('/public-collection*');
+    expect(appRoutes().some((r) => r.startsWith('/public-collection'))).toBe(true);
+    expect(defaultBehavior()).toMatch(/target_origin_id\s*=\s*"api"/);
   });
 
   it('the FREE-plan constraint is documented where the operator reads costs', () => {
@@ -420,7 +428,7 @@ describe('/public-collection edge posture (plan §4.1a, D52)', () => {
   });
 });
 
-describe('albums build pin + deploy target guards (D52/D58)', () => {
+describe('albums build pin + deploy target guards (D52/D58/D60)', () => {
   const target = (name: string) => {
     const text = makefile().replace(/\\\n\s*/g, ' ');
     const at = text.indexOf(`\n${name}:`);
@@ -440,15 +448,21 @@ describe('albums build pin + deploy target guards (D52/D58)', () => {
     expect(oracle, `ORACLE-VERSION does not record ${tag!}`).toContain(tag!);
   });
 
-  it('build-web builds AT the pin and bakes the endpoint in at build time', () => {
+  it('build-web builds AT the pin, bakes the endpoint in, and patches basePath=/albums (D60)', () => {
     const body = target('build-web');
     expect(body).toContain('--branch $(ALBUMS_WEB_TAG)');
     expect(body).toContain('NEXT_PUBLIC_ENTE_ENDPOINT');
     expect(body).toContain('build:albums');
     expect(body).toContain('dist/web-albums');
+    // The pinned tag has no env-based basePath support, so the patch script
+    // must run against the sparse clone BEFORE the build — and it anchors on
+    // the pinned config's shape, failing loudly on a tag bump that changes
+    // it (an unpatched export 404s behind /albums*).
+    expect(body).toContain('scripts/patch-albums-basepath.ts');
+    expect(body.indexOf('patch-albums-basepath.ts')).toBeLessThan(body.indexOf('npm ci'));
   });
 
-  it('deploy-web is guarded and invalidates the ONE consolidated distribution', () => {
+  it('deploy-web syncs to the albums/ prefix with the D60 cache metadata and invalidates the ONE distribution', () => {
     const body = target('deploy-web');
     expect(body).toMatch(/^deploy-web:.*guard-account/);
     expect(body).toContain('s3 sync');
@@ -458,6 +472,34 @@ describe('albums build pin + deploy target guards (D52/D58)', () => {
     expect(body).toContain('output -raw web_bucket');
     expect(body).toContain('output -raw distribution_id');
     expect(body).not.toContain('web_distribution_id');
+    // D60: assets live under the albums/ KEY PREFIX (the /albums* URI is the
+    // object key), index.html freshness is ORIGIN METADATA (no-cache; there
+    // is no /index.html behavior — the FREE plan's 5-behavior ceiling), and
+    // the hashed /_next assets pin a 1y immutable max-age. index.html
+    // uploads LAST so a live index never names not-yet-uploaded assets.
+    expect(body).toContain('s3://$$BUCKET/albums/_next');
+    expect(body).toContain('s3://$$BUCKET/albums"');
+    expect(body).toContain('max-age=31536000, immutable');
+    expect(body).toContain('"no-cache"');
+    expect(body.indexOf('no-cache')).toBeGreaterThan(body.indexOf('immutable'));
+    expect(body.indexOf('create-invalidation')).toBeGreaterThan(body.indexOf('no-cache'));
+    // The stale-build tripwire: a pre-D60 (unprefixed) build must refuse to
+    // sync — its assets would 404 behind /albums*.
+    expect(body).toContain('/albums/_next');
+  });
+
+  it('deploy chains the pricing-plan subscription post-apply, non-fatally (D60)', () => {
+    const body = target('deploy');
+    // Idempotent subscribe-if-needed after every apply, so a fresh env (or a
+    // post-destroy re-apply) cannot forget the $0 plan. A failure must WARN,
+    // never fail the deploy: IAM propagation and the account's
+    // 3-distribution FREE budget can transiently refuse.
+    expect(body).toContain('pricing-plan');
+    expect(body).toMatch(/pricing-plan\s*\|\|\s*\{/);
+    expect(body).toContain('WARNING');
+    expect(body).toContain('make pricing-plan');
+    // The standalone target stays for the manual re-run the warning names.
+    expect(target('pricing-plan')).toContain('create-subscription');
   });
 
   it('destroy covers the consolidated stateless modules and still never module.data', () => {

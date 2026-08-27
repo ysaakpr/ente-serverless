@@ -44,20 +44,23 @@ module "data" {
   gir_transition_days = var.gir_transition_days
 }
 
-# Where minted share links point (D51/D52/D58): `<albums_url>/?t=<token>`.
-# Since D58 the albums app rides the SAME distribution as the API, so the
-# right value is the distribution's own URL — which tofu cannot wire
-# declaratively (lambda env → distribution → function URL → lambda is a
-# cycle). `make plan` therefore injects albums_url_hint from the previous
-# apply's server_url output; the tfvars albums_url (a custom domain) still
-# wins, and a fresh env's FIRST apply deploys the loud .invalid sentinel
-# until the routine second plan/deploy pins the real domain (coalesce skips
-# null AND empty string, so the unset-hint case falls through).
+# Where minted share links point (D51/D52/D58/D60): `<albums_url>/?t=<token>`.
+# Since D58 the albums app rides the SAME distribution as the API — under the
+# /albums* behavior since D60, so the right value is the distribution's own
+# URL PLUS the /albums path. Tofu cannot wire the domain declaratively
+# (lambda env → distribution → function URL → lambda is a cycle), so
+# `make plan` injects albums_url_hint from the previous apply's server_url
+# output and the /albums suffix is appended HERE, where the value is
+# composed; the tfvars albums_url (a custom domain, full base URL, no suffix
+# appended) still wins, and a fresh env's FIRST apply deploys the loud
+# .invalid sentinel until the routine second plan/deploy pins the real
+# domain (coalesce skips null AND empty string, so the unset-hint ternary's
+# "" falls through).
 locals {
   albums_url = coalesce(
     var.albums_url,
-    var.albums_url_hint,
-    "https://albums-url-pending.invalid",
+    var.albums_url_hint != "" ? "${var.albums_url_hint}/albums" : "",
+    "https://albums-url-pending.invalid/albums",
   )
 }
 
