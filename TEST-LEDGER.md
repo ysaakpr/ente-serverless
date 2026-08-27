@@ -10,7 +10,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | albums-basepath-patch.test.ts | ? | ? | 5 | 5 | ✅ |
 | auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
 | collection-share.test.ts | ? | ? | 11 | 11 | ✅ |
-| collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
+| collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 11 | 11 | ✅ |
 | cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
 | db-counters.test.ts | F0 race-free capped counter (security review) | SEC | 4 | 4 | ✅ |
 | db-transact.test.ts | transactWrite atomicity + 100-op cap (D48) | P3-A | 4 | 4 | ✅ |
@@ -53,4 +53,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 | web.test.ts | infra guards: albums web hosting (D52) | P3-F | 31 | 31 | ✅ |
 
-**Total: 461/461 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 462/462 passing.** CI must fail if any implemented endpoint is below 100%.

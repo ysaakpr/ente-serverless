@@ -22,6 +22,7 @@ import {
   listUserCollections,
   sharedCollectionToJson,
   shareesJson,
+  unsharedTombstoneToJson,
 } from '../../domain/collections.ts';
 import { listSharedTombstones, listUserShareRows } from '../../domain/sharing.ts';
 import { filterPublicURLsForRole, publicURLsForCollection } from '../../domain/publicLinks.ts';
@@ -70,14 +71,13 @@ export const getCollectionsV2 = (deps: Deps) => async (c: Context) => {
 
   // Unshares: per-user tombstones (plan §3 caveat 4 — the collection row is
   // untouched, so the owner and other sharees never see this entry). Museum's
-  // equivalent rows keep the collection's fields and an is_deleted flag; this
-  // reuses the blanked tombstone shape clients already handle (D50).
+  // flipped share rows keep the collection's fields AND the share's wrapped
+  // key, blanking only owner email/sharees/publicURLs — matched since D61
+  // (rows written before D61 lack the stored key and emit encryptedKey: '').
   for (const tomb of await listSharedTombstones(deps, userId, sinceTime)) {
     const col = await getCollection(deps, tomb.collectionID);
     if (!col || col.app !== app) continue;
-    collections.push(
-      await collectionToJson(deps, { ...col, isDeleted: true, updationTime: tomb.updationTime }),
-    );
+    collections.push(unsharedTombstoneToJson(col, tomb));
   }
 
   return c.json({ collections });

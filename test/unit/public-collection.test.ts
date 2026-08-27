@@ -101,7 +101,10 @@ describe('GET /public-collection/diff', () => {
     expect(kept.encryptedKey).toBeTruthy();
     const tomb = body.diff.find((f) => f.id === gone.fileId)!;
     expect(tomb.isDeleted).toBe(true);
-    expect(tomb.encryptedKey).toBe('');
+    // Tombstones keep their stored fields — museum's diff SELECT never blanks
+    // deleted links; only the isDeleted flag flips (D61).
+    expect(tomb.encryptedKey).toBeTruthy();
+    expect(tomb.keyDecryptionNonce).toBeTruthy();
   });
 
   it('missing/garbage sinceTime is a 400 BAD_REQUEST ApiError (museum ParseInt, unlike the authed diff)', async () => {

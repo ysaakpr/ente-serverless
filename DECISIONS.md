@@ -1731,6 +1731,67 @@ source says Y — source won).
     none known at the pinned tag; the D52 browser gate (NEXT-TASKS item 6,
     now against `https://<domain>/albums/?t=...`) is where that proves out.
 
+- **D61 [SHARING/SYNC 2026-08-27] Museum-faithful tombstones: deleted
+  collections (and deleted diff links) keep their stored key material on the
+  wire — the D50 blanked-tombstone guess is REVERSED, confirmed by a live
+  client failure.** Evidence: the desktop ente-photos-web build (web commit
+  91cab1b) against the live test server wedged every sync with `Remote pull
+  failed: TypeError: ciphertext is too short at crypto_secretbox_open_easy`,
+  looping forever while uploads succeeded. Mechanism, verified in the
+  client source at that exact commit: `pullTrash`
+  (web/packages/new/photos/services/trash.ts) resolves a trashed file's
+  collection key via `getCollectionByID` → `decryptRemoteKeyAndCollection`
+  with **no isDeleted guard** (web/packages/new/photos/services/
+  collection.ts), so our blanked `encryptedKey: ''` on the deleted
+  collection's GET /collections/:id response fed a 0-byte ciphertext to
+  crypto_secretbox_open_easy; the pull aborts before saving its cursor and
+  retries the same tombstone on every sync. (The /collections/v2 path IS
+  guarded — `c.isDeleted ? undefined : decrypt` — which is why the feed
+  tombstone alone never crashed; the guard also prunes the collection
+  locally, guaranteeing the fatal getCollectionByID refetch.)
+  Museum shapes, verified 2026-08-27 from ente-io/ente main
+  (server/pkg/repo/collection.go, server/ente/collection.go,
+  server/pkg/controller/collections/collection.go + files_diff.go):
+  - **Owned feed + getById never blank deleted collections.** repo `Get` and
+    `GetCollectionsOwnedByUserV2` SELECT the stored row with no is_deleted
+    filter or scrub — encryptedKey, keyDecryptionNonce, encryptedName,
+    nameDecryptionNonce, type, attributes, magicMetadata, pubMagicMetadata
+    all emit with `isDeleted: true` (omitempty — live rows carry no flag);
+    sharees/publicURLs come back `[]` because their joins filter
+    cs.is_deleted/pct.is_disabled and the delete cascade flipped those.
+    `collectionToJson` now emits exactly that (single shape, tombstone branch
+    deleted; sharees/publicURLs default to [] on deleted rows, null on the
+    create response as before).
+  - **Sharee unshare/delete tombstones carry the share row's wrapped key.**
+    Museum has no tombstone row: `UnShareContext` only flips is_deleted +
+    updation_time on collection_shares, and `GetCollectionsSharedWithUser`
+    scans flipped rows like live ones — collection's stored name fields/type/
+    app/pubMagicMetadata, `encryptedKey` = the sharee's own sealed-box key,
+    keyDecryptionNonce ABSENT, attributes zero struct, sharedAt kept; only
+    owner.email, sharees and publicURLs are emptied. Our SHAREDTOMB rows now
+    store `encryptedKey` + `sharedAt` copied from the share row (removeSharee
+    re-reads a prior tombstone on repeated removes; removeAllSharees copies
+    per sharee) and `unsharedTombstoneToJson` emits the museum shape.
+  - **File diff tombstones are not blanked either.** repo `GetDiff` SELECTs
+    the stored collection_files + files columns for deleted links exactly
+    like live ones; museum's only "blank" flavour is the stale-entry patch
+    (files row kept with metadata "-"). `fileToDiffJson` merged to one shape
+    with `isDeleted: link.isDeleted`; the permanently-deleted-file fallback
+    (our files row is hard-deleted, museum's isn't) keeps blank file-side
+    fields — unrecoverable, and clients never read past isDeleted there.
+  - **Healing story for the live test env**: `deleteV3` has ALWAYS tombstoned
+    via `bumpCollection({ isDeleted: true })` — a spread that keeps every
+    stored field — so no owned-collection data was ever lost; existing
+    tombstones emit correctly on the next pull after deploy and the stuck
+    account recovers with NO data fix. The one backfill gap: SHAREDTOMB rows
+    written before D61 never stored the wrapped key and their pair rows are
+    deleted — those emit `encryptedKey: ''` forever (feed-only entries behind
+    the client's isDeleted guard; a re-share resurrects with a fresh key).
+  - Regression test: collections.test.ts "a deleted collection's feed +
+    getById entries carry DECRYPTABLE ciphertext" round-trips real libsodium
+    secretbox material through delete → feed/getById → the exact
+    crypto_secretbox_open_easy call that crashed the client.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

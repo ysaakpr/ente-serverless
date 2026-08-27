@@ -290,42 +290,30 @@ export const assertSizesMatch = (
   if (claimed.thumb && claimed.thumb !== actual.thumbSize) throw errBadRequestSentinel();
 };
 
-/** The stored File row projected into museum's File JSON for one collection link. */
-export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: number): Record<string, unknown> => {
-  if (link.isDeleted) {
-    // Tombstone: museum diff emits the id + isDeleted with empty attributes.
-    return {
-      id: file.fileId,
-      ownerID: file.ownerID,
-      collectionID: link.collectionID,
-      collectionOwnerID,
-      encryptedKey: '',
-      keyDecryptionNonce: '',
-      file: { decryptionHeader: '', size: 0 },
-      thumbnail: { decryptionHeader: '', size: 0 },
-      metadata: { decryptionHeader: '', size: 0 },
-      isDeleted: true,
-      updationTime: link.updationTime,
-    };
-  }
-  return {
-    id: file.fileId,
-    ownerID: file.ownerID,
-    collectionID: link.collectionID,
-    collectionOwnerID,
-    collectionAddedAt: link.createdAt,
-    encryptedKey: link.encryptedKey,
-    keyDecryptionNonce: link.keyDecryptionNonce,
-    file: { ...file.file, size: file.info.fileSize },
-    thumbnail: { ...file.thumbnail, size: file.info.thumbSize },
-    metadata: { size: 0, ...file.metadata },
-    isDeleted: false,
-    updationTime: link.updationTime,
-    ...(file.magicMetadata ? { magicMetadata: file.magicMetadata } : {}),
-    ...(file.pubMagicMetadata ? { pubMagicMetadata: file.pubMagicMetadata } : {}),
-    info: { fileSize: file.info.fileSize, thumbSize: file.info.thumbSize },
-  };
-};
+/** The stored File row projected into museum's File JSON for one collection
+ * link. Tombstones (link.isDeleted) are NOT blanked: museum's diff SELECT
+ * reads the stored collection_files + files columns for deleted links exactly
+ * like live ones (repo/collection.go GetDiff) — only the isDeleted flag
+ * distinguishes them (D61; the old blanked tombstone was this repo's
+ * invention). Clients guard on isDeleted before decrypting diff entries, but
+ * the wire shape matches museum field for field either way. */
+export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: number): Record<string, unknown> => ({
+  id: file.fileId,
+  ownerID: file.ownerID,
+  collectionID: link.collectionID,
+  collectionOwnerID,
+  collectionAddedAt: link.createdAt,
+  encryptedKey: link.encryptedKey,
+  keyDecryptionNonce: link.keyDecryptionNonce,
+  file: { ...file.file, size: file.info.fileSize },
+  thumbnail: { ...file.thumbnail, size: file.info.thumbSize },
+  metadata: { size: 0, ...file.metadata },
+  isDeleted: link.isDeleted,
+  updationTime: link.updationTime,
+  ...(file.magicMetadata ? { magicMetadata: file.magicMetadata } : {}),
+  ...(file.pubMagicMetadata ? { pubMagicMetadata: file.pubMagicMetadata } : {}),
+  info: { fileSize: file.info.fileSize, thumbSize: file.info.thumbSize },
+});
 
 /** One page of a collection's diff feed — the shared spine of
  * GET /collections/v2/diff and GET /public-collection/diff (museum
@@ -362,7 +350,11 @@ export const collectionDiffPage = async (
 
 /** Link -> museum File JSON, with the permanently-deleted-file fallback: the
  * file row is gone but the link still tombstones in the feed (museum's
- * stale-entry isDeleted patch in files_diff.go). */
+ * stale-entry isDeleted patch in files_diff.go; there the files row survives
+ * with metadata "-", here it is deleted outright, so the file-side fields of
+ * this one tombstone flavour are blank — unrecoverable, and clients never
+ * read past isDeleted on it). The link-side fields (encryptedKey,
+ * keyDecryptionNonce, collectionAddedAt) are stored and emit real values. */
 export const diffJsonForLink = async (
   deps: Deps,
   link: LinkRow,

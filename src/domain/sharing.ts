@@ -42,21 +42,35 @@ export interface ShareeRow {
 /** Per-user unshare tombstone (plan §3 caveat 4): surfaces the removal in the
  * SHAREE's /collections/v2 feed only — the collection row itself is never
  * touched. Museum's equivalent is the collection_shares row flipping
- * is_deleted=TRUE while keeping its updation_time (repo UnShareContext). */
+ * is_deleted=TRUE while keeping every other column (repo UnShareContext), so
+ * the sharee's wrapped key + sharedAt are copied onto the tombstone here —
+ * the feed emits them on deleted entries just like museum's scan does (D61).
+ * Rows written before D61 lack both fields (backfill gap: the pair rows are
+ * already deleted, the key is unrecoverable — those emit encryptedKey:''). */
 export interface SharedTombstoneRow {
   pk: string;
   sk: string;
   collectionID: number;
   userID: number;
   updationTime: number;
+  /** The share row's crypto_box_seal wrapped key (museum keeps it on flip). */
+  encryptedKey?: string;
+  sharedAt?: number;
   [attr: string]: unknown;
 }
 
-const tombstoneRow = (userID: number, collectionID: number, updationTime: number): SharedTombstoneRow => ({
+const tombstoneRow = (
+  userID: number,
+  collectionID: number,
+  updationTime: number,
+  share?: { encryptedKey?: string; sharedAt?: number },
+): SharedTombstoneRow => ({
   ...keys.sharedTombstone(userID, collectionID),
   collectionID,
   userID,
   updationTime,
+  ...(share?.encryptedKey ? { encryptedKey: share.encryptedKey } : {}),
+  ...(share?.sharedAt ? { sharedAt: share.sharedAt } : {}),
 });
 
 /** Pointer from a collection to its ACTIVE link; the data lives on PUBTOKEN#. */
@@ -171,16 +185,24 @@ export const addSharee = async (
 /** Delete both participant rows AND write the per-user unshare tombstone,
  * atomically. Idempotent (deletes are no-ops on missing keys, matching
  * DynamoDB; a repeated remove re-stamps the tombstone, which museum also does
- * — UnShareContext bumps updation_time on every call). */
+ * — UnShareContext bumps updation_time on every call). The wrapped key +
+ * sharedAt move from the share row onto the tombstone; on a repeated remove
+ * the share row is gone, so they carry over from the prior tombstone
+ * (museum re-flips the same row — key intact either way). */
 export const removeSharee = async (
   deps: Deps,
   collectionID: number,
   userID: number,
 ): Promise<void> => {
+  const tombKey = keys.sharedTombstone(userID, collectionID);
+  const share =
+    (await getSharee(deps, collectionID, userID)) ??
+    (await deps.db.get<SharedTombstoneRow>(tombKey.pk, tombKey.sk)) ??
+    undefined;
   await deps.db.transactWrite([
     { kind: 'delete', key: keys.collectionSharee(collectionID, userID) },
     { kind: 'delete', key: keys.userSharedCollection(userID, collectionID) },
-    { kind: 'put', item: tombstoneRow(userID, collectionID, deps.ids.nextUpdationTime()) },
+    { kind: 'put', item: tombstoneRow(userID, collectionID, deps.ids.nextUpdationTime(), share) },
   ]);
 };
 
@@ -199,7 +221,7 @@ export const removeAllSharees = async (deps: Deps, collectionID: number): Promis
   const ops = sharees.flatMap((s) => [
     { kind: 'delete' as const, key: keys.collectionSharee(collectionID, s.userID) },
     { kind: 'delete' as const, key: keys.userSharedCollection(s.userID, collectionID) },
-    { kind: 'put' as const, item: tombstoneRow(s.userID, collectionID, updationTime) },
+    { kind: 'put' as const, item: tombstoneRow(s.userID, collectionID, updationTime, s) },
   ]);
   for (let i = 0; i < ops.length; i += 99) {
     await deps.db.transactWrite(ops.slice(i, i + 99));

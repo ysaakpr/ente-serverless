@@ -9,7 +9,8 @@ import { randomBytes } from 'node:crypto';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { signupAccount, type Account } from '../helpers/client.ts';
 import { createAlbum, uploadAndCommit } from '../helpers/upload.ts';
-import { b64 } from '../../src/lib/b64.ts';
+import { b64, fromB64 } from '../../src/lib/b64.ts';
+import sodium from '../../src/lib/sodium.ts';
 
 let world: TestWorld;
 let account: Account;
@@ -291,6 +292,65 @@ describe('add-files / remove-files / delete', () => {
       token: account.token,
     });
     expect(favDel.status).toBe(400);
+  });
+
+  it('a deleted collection\'s feed + getById entries carry DECRYPTABLE ciphertext (client "ciphertext is too short" pull loop, D61)', async () => {
+    // Museum never blanks deleted collections — the web client's pullTrash
+    // resolves a trashed file's collection via GET /collections/:id and calls
+    // decryptCollectionKey with no isDeleted guard, so blanked key material
+    // wedged every remote pull with "TypeError: ciphertext is too short" at
+    // crypto_secretbox_open_easy. Real secretbox round-trip, like the client.
+    await sodium.ready;
+    const collectionKey = sodium.crypto_secretbox_keygen();
+    const keyNonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+    const nameNonce = sodium.randombytes_buf(sodium.crypto_secretbox_NONCEBYTES);
+    const create = await world.request('POST', '/collections', {
+      token: account.token,
+      body: {
+        encryptedKey: b64(sodium.crypto_secretbox_easy(collectionKey, keyNonce, account.keys.masterKey)),
+        keyDecryptionNonce: b64(keyNonce),
+        encryptedName: b64(sodium.crypto_secretbox_easy(new TextEncoder().encode('doomed'), nameNonce, collectionKey)),
+        nameDecryptionNonce: b64(nameNonce),
+        type: 'album',
+        attributes: { version: 0 },
+      },
+    });
+    expect(create.status).toBe(200);
+    const id = ((await create.json()) as { collection: { id: number } }).collection.id;
+
+    const del = await world.request('DELETE', `/collections/v3/${id}?collectionID=${id}&keepFiles=false`, {
+      token: account.token,
+    });
+    expect(del.status).toBe(200);
+
+    const feedTomb = (await getCollections()).find((c) => c.id === id)!;
+    const byId = await world.request('GET', `/collections/${id}`, { token: account.token });
+    expect(byId.status).toBe(200);
+    const byIdTomb = ((await byId.json()) as { collection: Record<string, unknown> }).collection;
+
+    for (const entry of [feedTomb, byIdTomb]) {
+      expect(entry.isDeleted).toBe(true);
+      expect(entry.type).toBe('album');
+      expect(entry.attributes).toEqual({ version: 0 });
+      expect(entry.sharees).toEqual([]);
+      expect(entry.publicURLs).toEqual([]);
+      // nonce + key lengths > 0, and the ciphertext OPENS — the exact call
+      // that crashed the desktop client.
+      expect((entry.encryptedKey as string).length).toBeGreaterThan(0);
+      expect((entry.keyDecryptionNonce as string).length).toBeGreaterThan(0);
+      const openedKey = sodium.crypto_secretbox_open_easy(
+        fromB64(entry.encryptedKey as string),
+        fromB64(entry.keyDecryptionNonce as string),
+        account.keys.masterKey,
+      );
+      expect(b64(openedKey)).toBe(b64(collectionKey));
+      const openedName = sodium.crypto_secretbox_open_easy(
+        fromB64(entry.encryptedName as string),
+        fromB64(entry.nameDecryptionNonce as string),
+        openedKey,
+      );
+      expect(new TextDecoder().decode(openedName)).toBe('doomed');
+    }
   });
 
   it('collection rename + magic-metadata: stale version accepted (museum skips the check)', async () => {

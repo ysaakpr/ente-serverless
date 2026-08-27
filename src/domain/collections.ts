@@ -7,7 +7,14 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { getUser } from './users.ts';
-import { getSharee, listSharees, removeSharee, type ShareeRole, type ShareeRow } from './sharing.ts';
+import {
+  getSharee,
+  listSharees,
+  removeSharee,
+  type SharedTombstoneRow,
+  type ShareeRole,
+  type ShareeRow,
+} from './sharing.ts';
 import { getFile, restampLink, type LinkRow } from './files.ts';
 import { ConditionFailedError } from '../ports/db.ts';
 import {
@@ -202,28 +209,17 @@ export const collectionToJson = async (
   opts: { sharees?: CollectionUserJson[]; publicURLs?: Record<string, unknown>[] } = {},
 ): Promise<Record<string, unknown>> => {
   const owner = await getUser(deps, row.ownerID);
-  if (row.isDeleted) {
-    // Tombstone: id + isDeleted + updationTime; key material blanked. Serves
-    // both the owner's global tombstone and the sharee's per-user unshare
-    // tombstone (museum keeps the share row's encryptedKey and emits
-    // sharees/publicURLs as [] there — this blanked shape is the pre-sharing
-    // behaviour, kept consistent; capture-gated, D50).
-    return {
-      id: row.collectionId,
-      owner: { id: row.ownerID, email: '', name: '', role: '' },
-      encryptedKey: '',
-      name: '',
-      encryptedName: '',
-      nameDecryptionNonce: '',
-      type: row.type,
-      attributes: {},
-      sharees: null,
-      publicURLs: null,
-      updationTime: row.updationTime,
-      isDeleted: true,
-      app: row.app,
-    };
-  }
+  // Deleted rows are NOT blanked: museum's owned feed and getById read the
+  // stored row unconditionally (repo/collection.go Get and
+  // GetCollectionsOwnedByUserV2 — no is_deleted filter, no field scrub), so a
+  // tombstone differs from a live entry only by isDeleted:true (omitempty —
+  // live rows carry no flag) and by sharees/publicURLs defaulting to [] (the
+  // joins come back empty once the delete cascade ran). Clients DECRYPT the
+  // key material of deleted collections — web pullTrash resolves trashed
+  // files' collections via getCollectionByID and calls decryptCollectionKey
+  // with no isDeleted guard — so blanking it wedged the remote pull with
+  // "ciphertext is too short" (D61; the old blanked shape was D50's
+  // capture-gated guess).
   return {
     id: row.collectionId,
     owner: { id: row.ownerID, email: owner?.email ?? '', name: '', role: '' },
@@ -234,12 +230,13 @@ export const collectionToJson = async (
     nameDecryptionNonce: row.nameDecryptionNonce,
     type: row.type,
     attributes: row.attributes,
-    sharees: opts.sharees ?? null,
+    sharees: opts.sharees ?? (row.isDeleted ? [] : null),
     // Phase D: [] or the active link's PublicURL on feeds/getById (filtered
     // per role by the caller — museum FilterPublicURLsForRole); null only on
     // the create response, museum's fresh-struct shape (D50 seam closed, D51).
-    publicURLs: opts.publicURLs ?? null,
+    publicURLs: opts.publicURLs ?? (row.isDeleted ? [] : null),
     updationTime: row.updationTime,
+    ...(row.isDeleted ? { isDeleted: true } : {}),
     ...(row.magicMetadata ? { magicMetadata: row.magicMetadata } : {}),
     ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),
     app: row.app,
@@ -285,6 +282,40 @@ export const sharedCollectionToJson = async (
     app: row.app,
   };
 };
+
+/**
+ * The SHAREE's unshare/delete tombstone as their /collections/v2 feed emits
+ * it — museum GetCollectionsSharedWithUser scans flipped (is_deleted=TRUE)
+ * collection_shares rows exactly like live ones: the collection's stored name
+ * fields/type/app/pubMagicMetadata ride along, encryptedKey is the share
+ * row's own wrapped key (UnShareContext only flips the flag — the key stays),
+ * and only the former owner's email, sharees and publicURLs are emptied
+ * (repo/collection.go). keyDecryptionNonce stays ABSENT, as on live sharee
+ * entries (sealed boxes need no nonce), and attributes is the zero struct.
+ * Pre-D61 SHAREDTOMB rows never stored the wrapped key — those emit
+ * encryptedKey:'' (clients act on id+isDeleted before touching tombstone key
+ * material; backfill gap noted in D61).
+ */
+export const unsharedTombstoneToJson = (
+  row: CollectionRow,
+  tomb: SharedTombstoneRow,
+): Record<string, unknown> => ({
+  id: row.collectionId,
+  owner: { id: row.ownerID, email: '', name: '', role: '' },
+  encryptedKey: tomb.encryptedKey ?? '',
+  name: '',
+  encryptedName: row.encryptedName,
+  nameDecryptionNonce: row.nameDecryptionNonce,
+  type: row.type,
+  attributes: { version: 0 },
+  sharees: [],
+  publicURLs: [],
+  updationTime: tomb.updationTime,
+  isDeleted: true,
+  ...(tomb.sharedAt ? { sharedAt: tomb.sharedAt } : {}),
+  ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),
+  app: row.app,
+});
 
 /**
  * Revoke one sharee's access — museum UnShareContext (repo/collection.go),
