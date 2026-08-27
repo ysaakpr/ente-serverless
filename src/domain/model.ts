@@ -69,6 +69,28 @@ export const keys = {
     pk: `USER#${userId}`,
     sk: `SHAREDTOMB#${collectionId}`,
   }),
+
+  // --- Public-link serving rows (Phase D, D51). All live under the link's
+  // PUBTOKEN# partition so disabling a link can purge them with one Query, and
+  // none set gsi attributes (the D48 rollback rule).
+  /** One admitted device per (ip, ua) — museum public_collection_access_history
+   * (unique_access_sid_ip_ua). Existence = admitted. */
+  publicLinkDevice: (tokenHash: string, deviceHash: string) => ({
+    pk: `PUBTOKEN#${tokenHash}`,
+    sk: `DEVICE#${deviceHash}`,
+  }),
+  /** Atomic unique-device counter (museum counts the history rows instead). */
+  publicLinkDeviceCount: (tokenHash: string) => ({ pk: `PUBTOKEN#${tokenHash}`, sk: 'DEVICES' }),
+  /** verify-password wrong-attempt cap per (link, ip) — OTT-cap pattern. */
+  publicLinkPwAttempts: (tokenHash: string, ipHash: string) => ({
+    pk: `PUBTOKEN#${tokenHash}`,
+    sk: `PWATTEMPTS#${ipHash}`,
+  }),
+  /** Per-link daily download/upload ceilings (plan §4.1d), one row per UTC day. */
+  publicLinkCeiling: (tokenHash: string, day: string) => ({
+    pk: `PUBTOKEN#${tokenHash}`,
+    sk: `CEIL#${day}`,
+  }),
 };
 
 /** sk prefixes for partition listings over the sharing rows. */

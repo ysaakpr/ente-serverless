@@ -15,6 +15,7 @@
 import type { Deps } from '../deps.ts';
 import { keys, skPrefixes } from './model.ts';
 import { tokenHash } from './tokens.ts';
+import { SentinelError } from '../lib/errors.ts';
 
 /** museum ente.ShareeRole (VIEWER can read; COLLABORATOR can also add files). */
 export type ShareeRole = 'VIEWER' | 'COLLABORATOR';
@@ -68,15 +69,24 @@ export interface CollectionLinkPointerRow {
   [attr: string]: unknown;
 }
 
-/** museum ente.PublicCollectionToken, keyed by token hash. */
+/** museum ente.CollectionLinkRow (public_collection_tokens), keyed by token
+ * hash. `token` is the PLAINTEXT access token — stored since Phase D because
+ * museum re-emits the full share URL (`<albums>/?t=<token>`) in publicURLs on
+ * every owned/shared feed and getById (repo/collection.go
+ * GetCollectionToActivePublicURLMap), which falsified D48's "no route returns
+ * the plaintext" premise. Same discipline as session tokens (tokens.ts): row
+ * keyed by hash, plaintext attribute alongside — museum stores plaintext too.
+ * Corrected in D51. */
 export interface PublicLinkRow {
   pk: string;
   sk: string;
   collectionID: number;
   tokenHash: string;
+  token: string;
   /** Epoch micros; 0 = never expires (museum semantics). */
   validTill: number;
-  /** 0 = unlimited devices. */
+  /** 0 = unlimited devices. Museum quirk: exactly 50 is enforced as 500
+   * (DeviceLimitThreshold * multiplier, pkg/middleware/collection_link.go). */
   deviceLimit: number;
   /** Password gate: client-side argon2id params + the derived hash. */
   passHash?: string;
@@ -85,12 +95,44 @@ export interface PublicLinkRow {
   memLimit?: number;
   enableDownload: boolean;
   enableCollect: boolean;
+  enableComment: boolean;
   enableJoin: boolean;
+  /** museum min_role: minimum sharee role that may see this URL in feeds
+   * (FilterPublicURLsForRole). Unset = visible to every member. */
+  minRole?: string;
   isDisabled: boolean;
   createdBy: number;
   createdAt: number;
+  /** DynamoDB TTL BACKSTOP only (epoch seconds) — set to 90 days past
+   * validTill on expiring links, absent otherwise. The middleware's validTill
+   * check is the enforcement; TTL just reclaims long-dead rows (same pattern
+   * as OTT rows). Never set on disabled rows: dead tokens stay dead at rest. */
+  ttl?: number;
   [attr: string]: unknown;
 }
+
+/** TTL backstop for an expiring link: 90 days past expiry, so a recently
+ * expired link still shows in the owner's publicURLs and can be extended via
+ * PUT /collections/share-url (museum keeps them forever; "active" in its repo
+ * only means not disabled). */
+const linkTtl = (validTill: number): number | undefined =>
+  validTill > 0 ? Math.ceil(validTill / 1_000_000) + 90 * 24 * 3600 : undefined;
+
+/** museum validateSealedCollectionKey (pkg/controller/collections/
+ * key_validation.go): the sealed collection key is exactly 32 (key) + 48
+ * (crypto_box_seal overhead) bytes; a plain Go error there maps to a bare 500
+ * (handler.go). Shared by /collections/share and /collections/join-link. */
+export const assertSealedCollectionKey = (encryptedKey: string): void => {
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(encryptedKey, 'base64');
+  } catch {
+    throw new SentinelError(500, 'encryptedKey must be valid base64');
+  }
+  if (decoded.length !== 80) {
+    throw new SentinelError(500, 'encryptedKey must decode to 80 bytes');
+  }
+};
 
 /**
  * Upsert a participant, both sides in one transaction. A plain (unconditioned)
@@ -225,16 +267,20 @@ export const createPublicLink = async (
     memLimit?: number;
     enableDownload?: boolean;
     enableCollect?: boolean;
+    enableComment?: boolean;
     enableJoin?: boolean;
   },
 ): Promise<PublicLinkRow> => {
   const hash = tokenHash(params.token);
   const createdAt = deps.ids.nextUpdationTime();
+  const validTill = params.validTill ?? 0;
+  const ttl = linkTtl(validTill);
   const link: PublicLinkRow = {
     ...keys.publicLinkToken(hash),
     collectionID: params.collectionID,
     tokenHash: hash,
-    validTill: params.validTill ?? 0,
+    token: params.token,
+    validTill,
     deviceLimit: params.deviceLimit ?? 0,
     ...(params.passHash !== undefined ? { passHash: params.passHash } : {}),
     ...(params.nonce !== undefined ? { nonce: params.nonce } : {}),
@@ -242,10 +288,12 @@ export const createPublicLink = async (
     ...(params.memLimit !== undefined ? { memLimit: params.memLimit } : {}),
     enableDownload: params.enableDownload ?? true,
     enableCollect: params.enableCollect ?? false,
+    enableComment: params.enableComment ?? false,
     enableJoin: params.enableJoin ?? true,
     isDisabled: false,
     createdBy: params.createdBy,
     createdAt,
+    ...(ttl !== undefined ? { ttl } : {}),
   };
   const pointer: CollectionLinkPointerRow = {
     ...keys.collectionLink(params.collectionID),
@@ -281,11 +329,32 @@ export const getLinkForCollection = async (
 };
 
 /**
+ * Overwrite the link row after a PUT /collections/share-url mutation (museum
+ * repo UpdatePublicCollectionToken). Recomputes the TTL backstop from the new
+ * validTill; `undefined` on optional fields REMOVES them (disablePassword
+ * NULLs all four password columns upstream).
+ */
+export const updatePublicLink = async (deps: Deps, link: PublicLinkRow): Promise<void> => {
+  const next: PublicLinkRow = { ...link };
+  const ttl = linkTtl(next.validTill);
+  for (const attr of ['passHash', 'nonce', 'opsLimit', 'memLimit', 'minRole'] as const) {
+    if (next[attr] === undefined) delete next[attr];
+  }
+  if (ttl === undefined) delete next.ttl;
+  else next.ttl = ttl;
+  await deps.db.put(next);
+};
+
+/**
  * Disable the collection's active link: flag the PUBTOKEN row disabled (dead
- * tokens stay dead at rest — the middleware's isDisabled check) and drop the
- * pointer, atomically. Re-enabling always mints a NEW token via
- * createPublicLink — an old token is never resurrected (plan §4.3). Returns
- * the disabled row, or null when no active link existed.
+ * tokens stay dead at rest — the middleware's isDisabled check, and the TTL
+ * backstop is stripped so the dead row never gets reaped into a 401) and drop
+ * the pointer, atomically. Re-enabling always mints a NEW token via
+ * createPublicLink — an old token is never resurrected (plan §4.3). The
+ * serving-side rows under the PUBTOKEN partition (admitted devices, attempt
+ * caps, daily ceilings) are purged best-effort afterwards — they are useless
+ * once the token is dead, and orphans would only cost storage, never access.
+ * Returns the disabled row, or null when no active link existed.
  */
 export const disableLink = async (
   deps: Deps,
@@ -294,9 +363,19 @@ export const disableLink = async (
   const link = await getLinkForCollection(deps, collectionID);
   if (!link) return null;
   const disabled: PublicLinkRow = { ...link, isDisabled: true };
+  delete disabled.ttl;
   await deps.db.transactWrite([
     { kind: 'put', item: disabled },
     { kind: 'delete', key: keys.collectionLink(collectionID) },
   ]);
+  try {
+    const rows = await deps.db.query(link.pk, {});
+    for (const row of rows) {
+      if (row.sk === 'META') continue;
+      await deps.db.delete(row.pk, row.sk);
+    }
+  } catch {
+    // best-effort — see docstring
+  }
   return disabled;
 };

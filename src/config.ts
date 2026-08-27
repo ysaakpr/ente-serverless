@@ -47,6 +47,28 @@ export interface Config {
    * deliberate divergence that WILL log real devices out once they idle past it.
    */
   sessionIdleExpirySeconds: number;
+  /**
+   * Public-albums web app origin — museum `apps.public-albums`
+   * (cmd/museum/main.go viper.SetDefault), used to compose share links as
+   * `<albumsUrl>/?t=<token>` (pkg/repo/public/collection_link.go GetAlbumUrl).
+   * Self-hosters point this at wherever their albums build is served.
+   */
+  albumsUrl: string;
+  /**
+   * Presign validity for /public-collection/* GETs, seconds. Deliberately much
+   * shorter than the authed presignGetExpirySeconds: a public presigned URL is
+   * a bearer credential held by an anonymous party, and a short tail is the
+   * only revocation margin the protocol allows (plan §4.2/§4.3, D51).
+   */
+  presignPublicGetExpirySeconds: number;
+  /**
+   * Per-link daily ceilings (plan §4.1d, D51) — hand-rolled counter rows in
+   * the OTT-cap style, 429 once exceeded, 0 disables the ceiling. Museum has
+   * no equivalent (it rate-limits per IP at the edge); on a pay-per-request
+   * stack a leaked link must not be an unbounded bill.
+   */
+  publicLinkDailyDownloadLimit: number;
+  publicLinkDailyUploadLimit: number;
 }
 
 export const configFromEnv = (): Config => ({
@@ -74,4 +96,9 @@ export const configFromEnv = (): Config => ({
   logRequests: process.env.LOG_REQUESTS === '1',
   originSecret: process.env.ORIGIN_SECRET || undefined,
   sessionIdleExpirySeconds: Number(process.env.SESSION_IDLE_EXPIRY_SECONDS ?? 0),
+  // museum default (cmd/museum/main.go): https://albums.ente.com
+  albumsUrl: process.env.ALBUMS_URL ?? 'https://albums.ente.com',
+  presignPublicGetExpirySeconds: Number(process.env.PRESIGN_PUBLIC_GET_EXPIRY_SECONDS ?? 3600),
+  publicLinkDailyDownloadLimit: Number(process.env.PUBLIC_LINK_DAILY_DOWNLOADS ?? 10_000),
+  publicLinkDailyUploadLimit: Number(process.env.PUBLIC_LINK_DAILY_UPLOADS ?? 1_000),
 });

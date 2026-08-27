@@ -99,12 +99,25 @@ describe('participant rows (dual-write)', () => {
 });
 
 describe('public link rows', () => {
-  it('stores only the token hash — the plaintext appears nowhere at rest', async () => {
+  it('keys the row by token hash, plaintext alongside (the session-token discipline)', async () => {
+    // Phase D reversed D48's hash-only storage: museum re-emits the full
+    // token-bearing URL in publicURLs on every owner feed, so the plaintext
+    // must be retrievable — stored on the hash-keyed row exactly like session
+    // tokens (tokens.ts), never derivable from the key itself. D51.
     const token = generateToken(world.deps.rand);
     const link = await createPublicLink(world.deps, { collectionID: 100, token, createdBy: 1 });
     expect(link.pk).toBe(`PUBTOKEN#${tokenHash(token)}`);
-    expect(JSON.stringify(world.deps.db.dump())).not.toContain(token);
+    const rows = world.deps.db.dump();
+    // The plaintext lives ONLY as an attribute of the hash-keyed link row —
+    // no key (pk/sk/gsi) anywhere embeds it.
+    for (const row of rows) {
+      for (const attr of Object.keys(row)) {
+        if (attr === 'token') continue;
+        expect(String(row[attr])).not.toContain(token);
+      }
+    }
     expect(await getLinkByTokenHash(world.deps, tokenHash(token))).toMatchObject({
+      token,
       collectionID: 100,
       isDisabled: false,
       // museum defaults: download + join on, collect off, no expiry/limit

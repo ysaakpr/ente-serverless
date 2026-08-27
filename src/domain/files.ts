@@ -220,6 +220,65 @@ export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: 
   };
 };
 
+/** One page of a collection's diff feed — the shared spine of
+ * GET /collections/v2/diff and GET /public-collection/diff (museum
+ * collections/files_diff.go getDiff, CollectionDiffLimit): page limit 2500,
+ * and a same-updationTime cluster is never split across pages. */
+export const collectionDiffPage = async (
+  deps: Deps,
+  collectionId: number,
+  sinceTime: number,
+  limit: number,
+): Promise<{ links: LinkRow[]; hasMore: boolean }> => {
+  const page = await deps.db.query<LinkRow>(gsi.collectionDiff(collectionId), {
+    index: 'gsi1',
+    skFrom: padTime(sinceTime + 1),
+    limit: limit + 1,
+  });
+  let links = page;
+  let hasMore = false;
+  if (page.length > limit) {
+    hasMore = true;
+    const boundary = page[limit]!.updationTime;
+    links = page.filter((l) => l.updationTime !== boundary);
+    if (links.length === 0) {
+      // Whole page shares one version: return the entire cluster (never split).
+      links = await deps.db.query<LinkRow>(gsi.collectionDiff(collectionId), {
+        index: 'gsi1',
+        skFrom: padTime(boundary),
+        skTo: `${padTime(boundary)}#\u{ffff}`,
+      });
+    }
+  }
+  return { links, hasMore };
+};
+
+/** Link -> museum File JSON, with the permanently-deleted-file fallback: the
+ * file row is gone but the link still tombstones in the feed (museum's
+ * stale-entry isDeleted patch in files_diff.go). */
+export const diffJsonForLink = async (
+  deps: Deps,
+  link: LinkRow,
+  collectionOwnerID: number,
+): Promise<Record<string, unknown>> => {
+  const file = await getFile(deps, link.fileID);
+  if (!file) {
+    return fileToDiffJson(
+      {
+        fileId: link.fileID,
+        ownerID: collectionOwnerID,
+        info: { fileSize: 0, thumbSize: 0 },
+        file: { decryptionHeader: '' },
+        thumbnail: { decryptionHeader: '' },
+        metadata: { decryptionHeader: '' },
+      } as never,
+      { ...link, isDeleted: true },
+      collectionOwnerID,
+    );
+  }
+  return fileToDiffJson(file, link, collectionOwnerID);
+};
+
 /**
  * Download/preview authz (ObjectRepo.GetAccessibleObjectWithDCs,
  * pkg/repo/object.go): accessible to the file's owner, or to anyone who is

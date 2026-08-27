@@ -16,7 +16,7 @@ import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { bumpCollection, getOwnedCollection } from '../../domain/collections.ts';
 import { getFile, restampLink, type LinkRow } from '../../domain/files.ts';
-import { removeAllSharees } from '../../domain/sharing.ts';
+import { disableLink, removeAllSharees } from '../../domain/sharing.ts';
 import { gsi } from '../../domain/model.ts';
 import { trashFile } from '../../domain/trash.ts';
 import { collectionNotEmpty, errBadRequestSentinel } from '../../lib/errors.ts';
@@ -41,6 +41,11 @@ export const deleteCollectionV3 = (deps: Deps) => async (c: Context) => {
   const live = links.filter((l) => !l.isDeleted);
 
   if (keepFiles && live.length > 0) throw collectionNotEmpty();
+
+  // museum TrashV3: CollectionLinkCtrl.Disable BEFORE ScheduleDelete — the
+  // public link dies (410, and its device/attempt/ceiling rows are purged)
+  // ahead of the tombstone, so no anonymous viewer outlives the album.
+  await disableLink(deps, collectionId);
 
   if (!keepFiles) {
     for (const link of live) {

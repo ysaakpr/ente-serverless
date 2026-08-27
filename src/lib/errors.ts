@@ -75,3 +75,9 @@ export const conflictError = (message: string) => new ApiError('CONFLICT', 409, 
 export const srpUserIdTaken = () => new SentinelError(500, 'srpUserID already registered');
 /** Museum: /users/srp/complete is first-time-only; a configured account gets this. */
 export const srpSetupAlreadyComplete = () => badRequest('SRP setup already complete');
+
+// Public-link errors (ente/errors.go, Phase D)
+export const publicCollectDisabled = () =>
+  new ApiError('PUBLIC_COLLECT_DISABLED', 405, 'User has not enabled public collect for this url');
+export const linkDeviceLimitExceeded = () =>
+  new ApiError('LINK_DEVICE_LIMIT_EXCEEDED', 403, 'Public link device limit reached');

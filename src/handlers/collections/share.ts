@@ -17,9 +17,9 @@ import {
   resolveCollectionAccess,
   shareesJson,
 } from '../../domain/collections.ts';
-import { addSharee } from '../../domain/sharing.ts';
+import { addSharee, assertSealedCollectionKey } from '../../domain/sharing.ts';
 import { getUserIdByEmail } from '../../domain/users.ts';
-import { errBadRequestSentinel, errNotFound, SentinelError } from '../../lib/errors.ts';
+import { errBadRequestSentinel, errNotFound } from '../../lib/errors.ts';
 
 const bodySchema = z.object({
   collectionID: z.number().refine((v) => v !== 0), // gin binding:"required" fails on zero
@@ -33,25 +33,12 @@ const bodySchema = z.object({
   role: z.enum(['VIEWER', 'COLLABORATOR']).optional(),
 });
 
-/** museum validateSealedCollectionKey (collections/key_validation.go): the
- * sealed collection key is exactly 32 (key) + 48 (crypto_box_seal overhead)
- * bytes. A plain Go error there maps to a bare 500 (handler.go). */
-const assertSealedKey = (encryptedKey: string): void => {
-  let decoded: Buffer;
-  try {
-    decoded = Buffer.from(encryptedKey, 'base64');
-  } catch {
-    throw new SentinelError(500, 'encryptedKey must be valid base64');
-  }
-  if (decoded.length !== 80) {
-    throw new SentinelError(500, 'encryptedKey must decode to 80 bytes');
-  }
-};
-
 export const shareCollection = (deps: Deps) => async (c: Context) => {
   const body = bodySchema.parse(await c.req.json());
   const { userId } = auth(c);
-  assertSealedKey(body.encryptedKey);
+  // museum validateSealedCollectionKey — moved to domain/sharing.ts in Phase D
+  // (join-link validates the same shape).
+  assertSealedCollectionKey(body.encryptedKey);
   const role = body.role ?? 'VIEWER';
 
   // museum collectionForShareMutation: owner (or an ADMIN sharee — none can

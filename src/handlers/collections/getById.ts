@@ -14,6 +14,7 @@ import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { collectionToJson, resolveCollectionAccess, shareesJson } from '../../domain/collections.ts';
 import { getSharee } from '../../domain/sharing.ts';
+import { filterPublicURLsForRole, publicURLsForCollection } from '../../domain/publicLinks.ts';
 import { errBadRequestSentinel, errNotFound } from '../../lib/errors.ts';
 
 export const getCollectionById = (deps: Deps) => async (c: Context) => {
@@ -28,14 +29,20 @@ export const getCollectionById = (deps: Deps) => async (c: Context) => {
   });
 
   let row = collection;
+  // Phase D: [] or the active link — museum repo.Get pre-seeds every id in
+  // its URL map, so getById always emits an array; the controller filters it
+  // for non-owner roles (GetCollection -> FilterPublicURLsForRole).
+  let publicURLs = await publicURLsForCollection(deps, collectionId);
   if (role !== 'OWNER') {
     const share = await getSharee(deps, collectionId, userId);
     if (!share) throw errNotFound(); // race: unshared between the two reads
     row = { ...collection, encryptedKey: share.encryptedKey };
+    publicURLs = filterPublicURLsForRole(publicURLs, role);
   }
   return c.json({
     collection: await collectionToJson(deps, row, {
       sharees: await shareesJson(deps, collectionId),
+      publicURLs,
     }),
   });
 };

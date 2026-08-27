@@ -159,7 +159,7 @@ describe('sharee /collections/v2 (query-time merge)', () => {
     expect((await getV2(mate.token)).filter((c) => c.id === album && c.isDeleted)).toHaveLength(0);
   });
 
-  it('pure-owner regression: a user with no sharing gets exactly the pre-Phase-C feed (plus sharees: [])', async () => {
+  it('pure-owner regression: a user with no sharing gets exactly the pre-Phase-C feed (plus sharees/publicURLs: [])', async () => {
     const solo = await signupAccount(world, 'feed-solo@b.c');
     const a1 = await createAlbum(world, solo, 'one');
     const a2 = await createAlbum(world, solo, 'two');
@@ -167,7 +167,9 @@ describe('sharee /collections/v2 (query-time merge)', () => {
     expect(cols.map((c) => c.id).sort()).toEqual([a1, a2].sort());
     for (const col of cols) {
       expect(col.sharees).toEqual([]);
-      expect(col.publicURLs).toBeNull();
+      // Phase D: museum emits [] on the v2 feed for link-less collections
+      // (repo GetCollectionsOwnedByUserV2 initializes the empty slice).
+      expect(col.publicURLs).toEqual([]);
       expect(col.keyDecryptionNonce).toBeTruthy();
     }
     const synced = maxStamp(cols);

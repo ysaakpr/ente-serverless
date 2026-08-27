@@ -5,7 +5,12 @@
  * sharees list); shared is the Phase C query-time merge (plan §2): the user's
  * SHARED# reverse rows joined to their collections, plus SHAREDTOMB# unshare
  * tombstones — museum GetCollectionsSharedWithUser emits both live shares and
- * is_deleted share rows from one query (repo/collection.go).
+ * is_deleted share rows from one query (repo/collection.go). Since Phase D
+ * both halves populate publicURLs from the active link: the owner sees the
+ * full PublicURL (token-bearing url included — museum's owned-feed join), a
+ * sharee sees it filtered by their role against the link's minRole
+ * (FilterPublicURLsForRole); link-less and deleted rows emit [] / the
+ * tombstone shape.
  */
 
 import type { Context } from 'hono';
@@ -19,6 +24,7 @@ import {
   shareesJson,
 } from '../../domain/collections.ts';
 import { listSharedTombstones, listUserShareRows } from '../../domain/sharing.ts';
+import { filterPublicURLsForRole, publicURLsForCollection } from '../../domain/publicLinks.ts';
 
 export const getCollectionsV2 = (deps: Deps) => async (c: Context) => {
   const { userId, app } = auth(c);
@@ -30,7 +36,12 @@ export const getCollectionsV2 = (deps: Deps) => async (c: Context) => {
       collectionToJson(
         deps,
         r,
-        r.isDeleted ? {} : { sharees: await shareesJson(deps, r.collectionId) },
+        r.isDeleted
+          ? {}
+          : {
+              sharees: await shareesJson(deps, r.collectionId),
+              publicURLs: await publicURLsForCollection(deps, r.collectionId),
+            },
       ),
     ),
   );
@@ -47,7 +58,14 @@ export const getCollectionsV2 = (deps: Deps) => async (c: Context) => {
     // tombstone below (or the next sync) covers it.
     if (col.isDeleted) continue;
     if (col.updationTime <= sinceTime && share.updationTime <= sinceTime) continue;
-    collections.push(await sharedCollectionToJson(deps, col, share));
+    collections.push(
+      await sharedCollectionToJson(deps, col, share, {
+        publicURLs: filterPublicURLsForRole(
+          await publicURLsForCollection(deps, col.collectionId),
+          share.role,
+        ),
+      }),
+    );
   }
 
   // Unshares: per-user tombstones (plan §3 caveat 4 — the collection row is

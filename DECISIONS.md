@@ -900,6 +900,155 @@ source says Y — source won).
   - Non-member 403-vs-404 stays as D49 left it (this repo 403s), now also
     covering the post-unshare probes in the new tests.
 
+- **D51 [SHARING 2026-08-27] Phase D: public album links end to end —
+  share-url management, the /public-collection serving surface, collect
+  uploads, and the plan-§4.1 abuse controls. Pinned against museum source
+  fetched 2026-08-27 (ente-io/ente main: cmd/museum/main.go,
+  pkg/api/public_collection.go + collection.go, pkg/controller/public/
+  collection_link.go + link_common.go + link_device_token.go,
+  pkg/controller/collections/share.go, pkg/repo/public/collection_link.go,
+  pkg/middleware/collection_link.go, ente/public_collection.go, ente/jwt;
+  where the frozen 2026-08-16 oracle revision ba654ea differs it was diffed
+  and the FROZEN behaviour kept — noted per item).** Routes:
+  POST/PUT `/collections/share-url`, DELETE `/collections/share-url/:id`
+  (response `{"result": PublicURL}` / `{"result": PublicURL}` / bare 200),
+  POST `/collections/join-link` (authed + access token), and the public group
+  behind the X-Auth-Access-Token middleware: GET `/public-collection/info`,
+  `/diff`, `/files/preview/:id`, `/files/thumbnail/v3/:id`,
+  `/files/download/:id`, `/files/download/v3/:id`, POST `/verify-password`,
+  `/upload-url`, `/multipart-upload-url`, `/file`. Judgment calls:
+  - **D48's "only the token hash is stored" is PARTIALLY REVERSED.** Its
+    premise ("no route must return the plaintext") is false: museum re-emits
+    the full token-bearing URL (`<apps.public-albums>/?t=<token>`) in
+    `publicURLs` on the owned feed, the sharee feed and getById
+    (repo/collection.go GetCollectionToActivePublicURLMap + the owned-feed
+    join). The PUBTOKEN row therefore now stores the plaintext token as an
+    attribute — the exact session-token discipline of tokens.ts (hash-keyed
+    row, plaintext alongside; museum stores plaintext outright). The rewritten
+    test asserts the plaintext appears in no key, only on the hash-keyed row.
+  - **Token format**: 10 chars uniform over the unambiguous 32-char uppercase
+    alphanumeric alphabet (50 bits from crypto rand) — same length/shape as
+    museum's `strings.ToUpper(shortuuid.New()[0:10])` and at least its
+    effective entropy. A create on a collection with an active link returns
+    THAT link, 200 (museum's ErrActiveLinkAlreadyExists path) — even when the
+    existing link is expired ("active" upstream only means not disabled, so
+    expired links keep emitting in publicURLs and stay updatable). validTill
+    is clock-checked on UPDATE only, never on create — upstream quirk, kept.
+  - **PublicURL JSON** field-for-field per ente/public_collection.go:
+    nonce/memLimit/opsLimit only on passworded links, minRole omitempty,
+    passwordEnabled keyed on the nonce (the repo scans do that; the update
+    path's PassHash-based computation is equivalent since the four move
+    together here). The `/info` variant is museum's "limited info" scrub:
+    flags + KDF params only, url/deviceLimit/validTill as zero values —
+    a viewer never gets the token echoed back. minRole is accepted on update
+    (VIEWER/COLLABORATOR/ADMIN/OWNER — IsValidShareRole) and filters
+    feed/getById visibility by role rank (FilterPublicURLsForRole); a sharee
+    whose role satisfies it DOES see the token-bearing URL, as upstream.
+  - **Owner email is blanked on `/public-collection/info`** (museum repo.Get
+    never selects it) — the one place collectionToJson's always-filled owner
+    email (D50) must not leak, so the handler builds the JSON itself.
+    referralCode rides the storage-bonus stub → `""` (museum ignores the
+    GetOrCreateReferralCode error; zero value on that path).
+  - **Middleware order + error bodies verbatim** from
+    pkg/middleware/collection_link.go: missing token 401 {"error":"missing
+    accessToken","context":"album_link"}; unknown 401 {"error":"invalid
+    token"} (one GetItem — plan §4.1b cheap-fail); disabled 410
+    {"error":"disabled token"}; expired 410 {"error":"expired token"};
+    password gate 401 {"error":{}} (gin marshals the Go error to {}) with
+    /info and /verify-password whitelisted so clients can fetch KDF params.
+    NOT ported: the owner-subscription check (billing is stubbed active, D34
+    — including the free-user device-limit clamp, the only frozen-vs-main
+    middleware diff) and custom-domain Origin validation.
+  - **Device limit**: museum-exact mechanics — a device is (client IP, UA);
+    admission happens ONLY on /info and /diff; a device that ever got in
+    stays in; deviceLimit 0 = unlimited but unique devices are still
+    recorded; the settable max 50 is enforced as 500
+    (DeviceLimitThreshold×10 — quirk, reproduced); over-limit → 403
+    {"code":"LINK_DEVICE_LIMIT_EXCEEDED",...}. Implemented as one DEVICE# row
+    per device + an atomic DEVICES counter under the PUBTOKEN partition (one
+    transactWrite — museum's SELECT-then-INSERT is racier). The link-device
+    JWT rides too: X-Auth-Link-Device-Token in, X-**Ente**-Link-Device-Token
+    out (the FROZEN header name; current main renamed it to
+    X-Link-Device-Token post-freeze — frozen wins), 365-day expiry capped at
+    validTill, refreshed inside 30 days, claims per LinkDeviceClaim with
+    linkID = tokenHash (upstream uses the row's serial id; the claim is
+    opaque to clients). Discord abuse alerts and the CF-worker IP skip have
+    no equivalent here.
+  - **JWT**: new src/lib/jwt.ts, HS256 compact JWS mirroring golang-jwt v4 as
+    museum uses it — NO registered exp/iat handling; claims carry
+    `expiryTime` in epoch MICROS checked by the caller (LinkPasswordClaim
+    {passKey, expiryTime}, 30-day validity). Museum signs with its own
+    `jwt.secret` config; this repo derives the signing key as keyed blake2b
+    of a fixed context over HASHING_KEY (no second secret to provision, and
+    the email-hash / JWT domains stay separated). verify-password compares
+    the client-derived argon2id passHash constant-time; its wire shapes are
+    museum's (missing body 400 {}, unconfigured 400 {}, wrong 401 {}, match
+    {"jwtToken"}). Join-link reproduces museum's quirky split: a
+    missing/garbled JWT is a bare 500 (golang-jwt parse error propagates as a
+    plain error), a valid JWT with a stale passKey is 401.
+  - **GetPublicDiff**: same 2500/cluster pagination spine as the authed diff
+    (extracted to domain/files.ts collectionDiffPage), with magicMetadata
+    stripped per entry. Museum's action-marker→isDeleted and
+    `encryptedData=="-"` stale-row conversions have no equivalent rows here
+    (links tombstone via isDeleted directly). Missing sinceTime is 400
+    BAD_REQUEST (museum ParseInt), unlike the authed diff's default-to-0.
+  - **Collect**: only museum's POST routes exist publicly (upload-url,
+    multipart-upload-url — partMd5s REQUIRED there, bare 400 on absence —
+    and file). Attribution flips to the link owner: object keys under
+    `<ownerID>/`, quota asserted/charged against the owner, file.OwnerID =
+    owner and file.ID forced 0 (no updates through a link), body.collectionID
+    must equal the link's (400 "can only update to associated collection").
+    enableCollect=false → 405 PUBLIC_COLLECT_DISABLED on all three.
+  - **DIVERGENCE — flags are access-control, not DRM (plan §4.2/§4.3).**
+    `enableDownload:false` is enforced server-side as 403 {} on ORIGINAL
+    downloads (both variants) while previews still serve — museum does NOT
+    enforce the flag at all (client-honoured; verified in
+    GetPublicOrCastFileURL → getSignedURLForCollectionObject, no flag check).
+    Documented limits, deliberately: previews must stay decryptable for the
+    page to render; presigned GETs are bearer URLs for their lifetime (public
+    presigns use a new short knob, below); a link-holder who synced keeps the
+    collection key forever — revocation is shallow by protocol design, the
+    one real remedy is the client-side remove-files-and-recreate-album flow.
+    Disable kills the token immediately at the API but not bytes already
+    fetched; a disabled token is never resurrected — re-enable mints a new
+    one.
+  - **DIVERGENCE — abuse ceilings with no museum equivalent (plan §4.1).**
+    (a) verify-password wrong-attempt cap: 20 per (tokenHash, IP) per sliding
+    hour → 429 {} (the OTT-cap pattern, atomic ADD-then-judge, TTL'd row);
+    museum leans on its per-IP gin rate limiter, which this stack lacks.
+    (b) Per-link daily ceilings: downloads (presign issuance, previews
+    included) and uploads (upload-url mints + commits) against
+    PUBLIC_LINK_DAILY_DOWNLOADS (default 10000) / PUBLIC_LINK_DAILY_UPLOADS
+    (default 1000), 0 = off → 429 {}. Counter rows live under the PUBTOKEN
+    partition, TTL'd, no gsi attributes (D48 rollback rule holds for every
+    new row type).
+  - **Config knobs added**: ALBUMS_URL (museum apps.public-albums, default
+    https://albums.ente.com — main.go SetDefault, verified at the frozen
+    revision), PRESIGN_PUBLIC_GET_EXPIRY_SECONDS (default 3600 — the plan
+    §4.2 short public presign, vs 7d authed), and the two daily ceilings.
+  - **Lifecycle (plan §4.6, done now not Phase E)**: deleteCollectionV3
+    disables the link BEFORE tombstoning (museum TrashV3 order) and
+    reapUserData disables links on every owned collection (museum
+    HandleAccountDeletion); disableLink also purges the link's device/attempt/
+    ceiling rows best-effort. TTL backstop: EXPIRING link rows carry the
+    table's `ttl` attribute at validTill + 90 days (so recently expired links
+    still emit in publicURLs and can be extended, museum-style) — middleware
+    stays the enforcement; disabled rows have their ttl STRIPPED so dead
+    tokens never get reaped into a 401 (they must answer 410 forever).
+  - **Deliberately unimplemented public routes** (404, never hollow 200s —
+    plan §3 caveat 5): the social/comments/reactions/anon-identity group
+    (Phase E scope with the D27 stubs), and GET /files/data/fetch +
+    /files/data/preview (public HLS video-data — the albums app degrades to
+    original download; revisit with a capture if the pinned albums build
+    breaks on it). POST /public-collection/report-abuse does NOT exist
+    upstream anymore (absent from main.go at the frozen revision AND current
+    main — only the request struct lingers in ente/public_collection.go), so
+    it is deliberately NOT implemented despite appearing in older docs; the
+    ground rule "never invent a shape" wins.
+  - Free-user device-limit clamping, locker URLs (`share.ente.com/c/<t>`),
+    Discord alerts, and the middleware's response cache are museum features
+    with no meaning here (billing stubbed, photos-only, single-user scale).
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

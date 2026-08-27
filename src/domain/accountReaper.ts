@@ -16,7 +16,7 @@ import type { Deps } from '../deps.ts';
 import { keys, gsi } from './model.ts';
 import { getFile, type LinkRow } from './files.ts';
 import { getCollection, revokeShareeAccess, type CollectionRow } from './collections.ts';
-import { listSharedCollectionIds, removeAllSharees, removeSharee } from './sharing.ts';
+import { disableLink, listSharedCollectionIds, removeAllSharees, removeSharee } from './sharing.ts';
 import { enqueueObjectDeletion } from './objectSweep.ts';
 
 /** SKs under USER#<id> that hold key material or auth secrets. */
@@ -38,12 +38,16 @@ export const reapUserData = async (deps: Deps, userId: number): Promise<void> =>
       else await removeSharee(deps, colId, userId);
     }
     // Collections the user OWNED and shared with others: drop every sharee
-    // pair + tombstone their feeds so the album disappears on their next sync.
+    // pair + tombstone their feeds so the album disappears on their next sync,
+    // and kill every public link (museum CollectionLinkController
+    // HandleAccountDeletion disables all active tokens for the user; the
+    // disable also purges the link's device/attempt/ceiling rows — Phase D).
     const owned = await deps.db.query<CollectionRow>(gsi.userCollections(userId), {
       index: 'gsi2',
     });
     for (const col of owned) {
       await removeAllSharees(deps, col.collectionId);
+      await disableLink(deps, col.collectionId);
     }
   } catch (err) {
     console.error('account reaper: sharing cascade failed', userId, err);

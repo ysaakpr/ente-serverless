@@ -457,3 +457,115 @@ describe('Phase C sharing on LocalStack (real transactWrite paths)', () => {
     expect(back.find((c) => c.id === album)!.isDeleted).toBeUndefined();
   });
 });
+
+describe('Phase D public link on LocalStack (anonymous end to end)', () => {
+  it('share-url -> info -> diff -> download bytes -> collect upload -> disable, all by raw token', async () => {
+    const { createHash } = await import('node:crypto');
+    const owner = await fullSignup(uniqueEmail(), makeClientKeys());
+
+    const create = await world.request('POST', '/collections', {
+      token: owner.token,
+      body: {
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        type: 'album',
+      },
+    });
+    const album = ((await create.json()) as { collection: { id: number } }).collection.id;
+
+    // Owner uploads one photo the normal way.
+    const cipher = randomBytes(64 * 1024);
+    const thumb = randomBytes(2048);
+    const urlsRes = await world.request('GET', '/files/upload-urls?count=2', { token: owner.token });
+    const { urls } = (await urlsRes.json()) as { urls: Array<{ objectKey: string; url: string }> };
+    expect((await fetch(urls[0]!.url, { method: 'PUT', body: cipher })).status).toBe(200);
+    expect((await fetch(urls[1]!.url, { method: 'PUT', body: thumb })).status).toBe(200);
+    const commit = await world.request('POST', '/files', {
+      token: owner.token,
+      body: {
+        id: 0,
+        collectionID: album,
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        file: { objectKey: urls[0]!.objectKey, decryptionHeader: b64(randomBytes(24)) },
+        thumbnail: { objectKey: urls[1]!.objectKey, decryptionHeader: b64(randomBytes(24)) },
+        metadata: { encryptedData: b64(randomBytes(64)), decryptionHeader: b64(randomBytes(24)) },
+      },
+    });
+    expect(commit.status).toBe(200);
+    const fileId = ((await commit.json()) as { id: number }).id;
+
+    // Mint the link; the token is only ever shown here.
+    const mint = await world.request('POST', '/collections/share-url', {
+      token: owner.token,
+      body: { collectionID: album, enableCollect: true },
+    });
+    expect(mint.status).toBe(200);
+    const { result } = (await mint.json()) as { result: { url: string } };
+    const accessToken = new URL(result.url).searchParams.get('t')!;
+    const anon = (method: string, path: string, body?: unknown) =>
+      world.request(method, path, {
+        body,
+        headers: { 'x-auth-access-token': accessToken },
+      });
+
+    // Anonymous info + diff on the real adapters (device admission writes a
+    // real transactWrite: device row + counter).
+    const info = await anon('GET', '/public-collection/info');
+    expect(info.status).toBe(200);
+    const { collection } = (await info.json()) as { collection: { id: number; owner: { email: string } } };
+    expect(collection.id).toBe(album);
+    expect(collection.owner.email).toBe('');
+    const diff = await anon('GET', '/public-collection/diff?sinceTime=0');
+    expect(diff.status).toBe(200);
+    expect(((await diff.json()) as { diff: Array<{ id: number }> }).diff.map((f) => f.id)).toContain(fileId);
+
+    // Anonymous download: presigned GET round-trips the exact bytes.
+    const dl = await anon('GET', `/public-collection/files/download/v3/${fileId}`);
+    expect(dl.status).toBe(200);
+    const { url } = (await dl.json()) as { url: string };
+    expect(Buffer.from(await (await fetch(url)).arrayBuffer())).toEqual(Buffer.from(cipher));
+
+    // Collect: anonymous presigned PUT (Content-MD5 is SIGNED — D23/D37) and
+    // commit; the file lands owned by the link owner.
+    const guestBytes = randomBytes(32 * 1024);
+    const guestThumb = randomBytes(1024);
+    const guestKeys: string[] = [];
+    for (const body of [guestBytes, guestThumb]) {
+      const md5 = createHash('md5').update(body).digest('base64');
+      const mintUrl = await anon('POST', '/public-collection/upload-url', {
+        contentLength: body.length,
+        contentMD5: md5,
+      });
+      expect(mintUrl.status).toBe(200);
+      const { objectKey, url: putUrl } = (await mintUrl.json()) as { objectKey: string; url: string };
+      const put = await fetch(putUrl, { method: 'PUT', body, headers: { 'Content-MD5': md5 } });
+      expect(put.status).toBe(200);
+      guestKeys.push(objectKey);
+    }
+    const guestCommit = await anon('POST', '/public-collection/file', {
+      id: 0,
+      collectionID: album,
+      encryptedKey: b64(randomBytes(48)),
+      keyDecryptionNonce: b64(randomBytes(24)),
+      file: { objectKey: guestKeys[0], decryptionHeader: b64(randomBytes(24)) },
+      thumbnail: { objectKey: guestKeys[1], decryptionHeader: b64(randomBytes(24)) },
+      metadata: { encryptedData: b64(randomBytes(64)), decryptionHeader: b64(randomBytes(24)) },
+    });
+    expect(guestCommit.status).toBe(200);
+    const collected = (await guestCommit.json()) as { id: number; ownerID: number };
+    expect(collected.ownerID).toBe(owner.id);
+    // ... and the owner's quota carries both uploads.
+    const details = await world.request('GET', '/users/details/v2', { token: owner.token });
+    expect(((await details.json()) as { usage: number }).usage).toBe(
+      cipher.length + thumb.length + guestBytes.length + guestThumb.length,
+    );
+
+    // Disable: the raw token dies immediately (410, museum's disabled shape).
+    const kill = await world.request('DELETE', `/collections/share-url/${album}`, { token: owner.token });
+    expect(kill.status).toBe(200);
+    const dead = await anon('GET', '/public-collection/info');
+    expect(dead.status).toBe(410);
+    expect(await dead.json()).toEqual({ error: 'disabled token' });
+  });
+});

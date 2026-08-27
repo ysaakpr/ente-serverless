@@ -191,11 +191,15 @@ export const shareesJson = async (deps: Deps, collectionId: number): Promise<Col
  * caller-resolved sharee list (getById + the /collections/v2 feed populate it,
  * matching museum's GetWithSharingDetailsForUser / GetCollectionsOwnedByUserV2);
  * left undefined it stays null, which is museum's create-response shape (a
- * fresh Collection struct never sets Sharees). */
+ * fresh Collection struct never sets Sharees). `opts.publicURLs` is the same
+ * seam for share links (Phase D): the owned feed and getById pass the active
+ * link's PublicURL array (possibly empty — museum emits [] there, null only on
+ * a create response), filtered per role by the caller for non-owners
+ * (museum FilterPublicURLsForRole). */
 export const collectionToJson = async (
   deps: Deps,
   row: CollectionRow,
-  opts: { sharees?: CollectionUserJson[] } = {},
+  opts: { sharees?: CollectionUserJson[]; publicURLs?: Record<string, unknown>[] } = {},
 ): Promise<Record<string, unknown>> => {
   const owner = await getUser(deps, row.ownerID);
   if (row.isDeleted) {
@@ -231,12 +235,10 @@ export const collectionToJson = async (
     type: row.type,
     attributes: row.attributes,
     sharees: opts.sharees ?? null,
-    // Phase D seam: once share links exist, populate PublicURL objects here and
-    // filter them for non-owner roles (museum FilterPublicURLsForRole — a
-    // sharee never sees the link token). Museum emits [] on the v2 feeds and
-    // null only on a link-less getById; null everywhere is the pre-sharing
-    // behaviour, kept until Phase D captures pin it (D50).
-    publicURLs: null,
+    // Phase D: [] or the active link's PublicURL on feeds/getById (filtered
+    // per role by the caller — museum FilterPublicURLsForRole); null only on
+    // the create response, museum's fresh-struct shape (D50 seam closed, D51).
+    publicURLs: opts.publicURLs ?? null,
     updationTime: row.updationTime,
     ...(row.magicMetadata ? { magicMetadata: row.magicMetadata } : {}),
     ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),
@@ -259,6 +261,7 @@ export const sharedCollectionToJson = async (
   deps: Deps,
   row: CollectionRow,
   share: ShareeRow,
+  opts: { publicURLs?: Record<string, unknown>[] } = {},
 ): Promise<Record<string, unknown>> => {
   const owner = await getUser(deps, row.ownerID);
   return {
@@ -271,7 +274,11 @@ export const sharedCollectionToJson = async (
     type: row.type,
     attributes: { version: 0 },
     sharees: await shareesJson(deps, row.collectionId),
-    publicURLs: null, // Phase D (museum: FilterPublicURLsForRole over the active link)
+    // Phase D: the sharee-visible slice of the active link (caller filters via
+    // FilterPublicURLsForRole — museum GetCollectionsSharedWithUser). Yes, a
+    // sharee whose role satisfies minRole sees the full URL, token included —
+    // museum behaviour, reproduced. [] when link-less.
+    publicURLs: opts.publicURLs ?? [],
     updationTime: row.updationTime,
     ...(share.sharedAt ? { sharedAt: share.sharedAt } : {}),
     ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),

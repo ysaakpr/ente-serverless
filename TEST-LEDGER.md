@@ -13,18 +13,24 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
 | db-counters.test.ts | F0 race-free capped counter (security review) | SEC | 4 | 4 | ✅ |
 | db-transact.test.ts | transactWrite atomicity + 100-op cap (D48) | P3-A | 4 | 4 | ✅ |
-| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 9 | 9 | ✅ |
+| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 10 | 10 | ✅ |
 | entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
 | file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
+| join-link.test.ts | ? | ? | 4 | 4 | ✅ |
 | lifecycle.test.ts | infra guards | M7 | 37 | 37 | ✅ |
 | origin-lock.test.ts | origin lock (finding 4, D43) | SEC | 4 | 4 | ✅ |
 | ping.test.ts | [HEALTH] | M1 | 2 | 2 | ✅ |
 | presign-expiry.test.ts | presign expiry split (finding 5, D44) | SEC | 3 | 3 | ✅ |
 | presign-md5.test.ts | ? | ? | 5 | 5 | ✅ |
+| public-collect.test.ts | ? | ? | 5 | 5 | ✅ |
+| public-collection.test.ts | ? | ? | 8 | 8 | ✅ |
+| public-download.test.ts | ? | ? | 4 | 4 | ✅ |
+| public-password.test.ts | ? | ? | 5 | 5 | ✅ |
 | security-review-2.test.ts | ? | ? | 11 | 11 | ✅ |
 | send-ott.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
+| share-url.test.ts | ? | ? | 12 | 12 | ✅ |
 | sharing-authz.test.ts | ? | ? | 6 | 6 | ✅ |
 | sharing-feed.test.ts | ? | ? | 9 | 9 | ✅ |
 | sharing.test.ts | [SHARING] dual-write + link rows (D48) | P3-A | 10 | 10 | ✅ |
@@ -42,4 +48,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 
-**Total: 326/326 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 365/365 passing.** CI must fail if any implemented endpoint is below 100%.
