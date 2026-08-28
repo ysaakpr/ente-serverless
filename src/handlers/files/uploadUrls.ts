@@ -1,6 +1,8 @@
 /**
  * GET /files/upload-urls?count=N (auth) — src: pkg/controller/file.go
- * GetUploadURLs: quota precheck, cap 50, key = userID/uuid, no DB writes.
+ * GetUploadURLs: quota precheck, cap 50, key = userID/uuid; each mint is
+ * recorded as a temp object (getObjectURL → AddTempObjectKey) so the stale
+ * sweep can reclaim never-committed keys (D65).
  * Response: {"urls":[{objectKey,url}]}.
  */
 
@@ -8,6 +10,7 @@ import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { assertQuota, MAX_UPLOAD_URLS } from '../../domain/files.ts';
+import { recordTempObjects } from '../../domain/staleObjects.ts';
 import { blobsForPool } from '../../domain/storagePools.ts';
 
 export const getUploadUrls = (deps: Deps) => async (c: Context) => {
@@ -28,5 +31,6 @@ export const getUploadUrls = (deps: Deps) => async (c: Context) => {
       };
     }),
   );
+  await recordTempObjects(deps, ctx.pool?.poolId, urls.map((u) => ({ objectKey: u.objectKey })));
   return c.json({ urls });
 };

@@ -18,6 +18,7 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { publicAccess } from '../../middleware/publicAccess.ts';
 import { assertQuota } from '../../domain/files.ts';
+import { recordTempObjects } from '../../domain/staleObjects.ts';
 import { blobsForPool } from '../../domain/storagePools.ts';
 import {
   assertCollectEnabled,
@@ -51,5 +52,6 @@ export const publicUploadUrl = (deps: Deps) => async (c: Context) => {
     deps.config.presignPutExpirySeconds,
     body.contentMD5,
   );
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey }]); // museum AddTempObjectKey (D65)
   return c.json({ objectKey, url });
 };

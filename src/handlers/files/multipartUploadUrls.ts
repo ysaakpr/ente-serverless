@@ -8,6 +8,7 @@ import type { Context } from 'hono';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
+import { recordTempObjects } from '../../domain/staleObjects.ts';
 import { blobsForPool } from '../../domain/storagePools.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
@@ -27,6 +28,8 @@ export const getMultipartUploadUrls = (deps: Deps) => async (c: Context) => {
 
   const objectKey = `${userId}/${deps.rand.uuid()}`;
   const multipart = await blobs.createMultipart(objectKey, count, deps.config.presignPutExpirySeconds);
+  // museum AddMultipartTempObjectKey — the stale sweep aborts + deletes (D65)
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey, uploadID: multipart.uploadID }]);
   return c.json({
     urls: {
       objectKey,

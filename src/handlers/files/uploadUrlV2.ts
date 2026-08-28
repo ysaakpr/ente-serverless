@@ -20,6 +20,7 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
+import { recordTempObjects } from '../../domain/staleObjects.ts';
 import { blobsForPool } from '../../domain/storagePools.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
@@ -50,6 +51,7 @@ export const getUploadUrlV2 = (deps: Deps) => async (c: Context) => {
     deps.config.presignPutExpirySeconds,
     body.contentMD5,
   );
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey }]); // museum AddTempObjectKey (D65)
   return c.json({ objectKey, url });
 };
 
@@ -80,6 +82,8 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
     deps.config.presignPutExpirySeconds,
     body.partMd5s ?? undefined,
   );
+  // museum AddMultipartTempObjectKey — the stale sweep aborts + deletes (D65)
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey, uploadID: multipart.uploadID }]);
   return c.json({
     objectKey,
     partURLs: multipart.partUrls,

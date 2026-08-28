@@ -42,6 +42,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
 | srp-endpoints.test.ts | [AUTH-SRP] | M1 | 24 | 24 | ✅ |
 | srp-math.test.ts | [AUTH-SRP] | M1 | 5 | 5 | ✅ |
+| stale-objects.test.ts | ? | ? | 5 | 5 | ✅ |
 | storage-pools.test.ts | ? | ? | 28 | 28 | ✅ |
 | stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 9 | 9 | ✅ |
 | subscription.test.ts | [BILLING] free-sub determinism (gate finding D30) | M5 | 7 | 7 | ✅ |
@@ -55,4 +56,4 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 | web.test.ts | infra guards: albums web hosting (D52) | P3-F | 31 | 31 | ✅ |
 
-**Total: 480/480 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 485/485 passing.** CI must fail if any implemented endpoint is below 100%.

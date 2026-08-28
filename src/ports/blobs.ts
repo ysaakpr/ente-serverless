@@ -40,6 +40,13 @@ export interface Blobs {
     partMd5s?: readonly string[],
   ): Promise<MultipartUrls>;
   /**
+   * Abort one multipart upload (the stale-object sweep, D65 — museum
+   * object_cleanup.go AbortMultipartUpload). MUST tolerate an upload that no
+   * longer exists (completed or already aborted): resolve, never throw, for
+   * S3's NoSuchUpload.
+   */
+  abortMultipart(key: string, uploadID: string): Promise<void>;
+  /**
    * Object tags drive the storage-class lifecycle: museum's key layout puts
    * originals AND thumbnails under the same `userID/uuid` prefix, so the
    * GLACIER_IR rule filters on `tier=original`, applied at commit time.

@@ -113,6 +113,11 @@ export class MemoryBlobs implements Blobs {
     };
   }
 
+  async abortMultipart(_key: string, uploadID: string): Promise<void> {
+    // Tolerates unknown uploads, like the S3 adapter's NoSuchUpload path.
+    this.multiparts.delete(uploadID);
+  }
+
   // ---- test-side "S3" the synthetic client talks to ----
 
   /** Simulate the client PUTting bytes to a presigned URL. */

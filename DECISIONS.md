@@ -1849,7 +1849,7 @@ source says Y — source won).
     flow, all link ops, stamp equality with the link, and the forward-only
     guard.
 
-- **D63 [INFRA/OPS 2026-08-28] A dedicated operator role for the `tools/`
+- **D64 [INFRA/OPS 2026-08-28] A dedicated operator role for the `tools/`
   CLI, separate from the Lambda execution role.** The invite (D54) and
   storage-pool (D55) CLIs run as a human operator against prod, and they need
   one action the request path deliberately withholds: `dynamodb:Scan`, used by
@@ -1896,6 +1896,15 @@ source says Y — source won).
     picks which creds assume the role; new `region` output added to both env
     roots (the tools default to us-east-1). HASHING_KEY stays the operator's to
     supply for the hash-keyed subcommands.
+  - `make users` (tools/users.ts, 2026-08-28) rides this role: one paged Scan
+    joins USER#/META with USER#/USAGE and prints every account's email, state
+    (active/viewer/DELETED), usage bytes+files, limit (explicit override or
+    'default' — resolved per the deployment's FREE_PLAN_STORAGE_BYTES, which
+    this shell may not share; the footer says what it resolved), pool and
+    creation date; `JSON=1` emits raw JSON. No HASHING_KEY needed — user rows
+    carry the plaintext email. Observed on test: DELETED tombstones can keep a
+    non-zero USAGE row (the reaper sweeps objects, the counter row is
+    historical) — the live/total footer excludes them.
 
 - **D63 [SHARING/AUTHZ 2026-08-28] ADMIN sharee role honoured end to end —
   the app's role-change / add-admin UI works.** Field report: changing a
@@ -1929,6 +1938,44 @@ source says Y — source won).
   - Tests: admin-role.test.ts (9 scenarios, the oracle matrix 1:1);
     collection-share.test.ts's ADMIN-refused assertion flipped to the new
     contract.
+
+- **D65 [GC 2026-08-28] Stale-object sweep — minted-but-never-committed keys
+  no longer leak.** Found live during the BYO pool E2E: a mint → presigned PUT
+  → failed commit (426 over-quota there; any validation error or client crash
+  equally) leaves unreferenced encrypted blobs in the central or pool bucket
+  forever — no file row, no OBJ# guard, and objectSweep only drains
+  explicitly queued deletions. Museum's answer is the temp_objects machinery
+  (pkg/repo/object_cleanup.go + pkg/controller/object_cleanup.go): every mint
+  INSERTs a temp row (controller/file.go getObjectURL → AddTempObjectKey;
+  multipart mints → AddMultipartTempObjectKey with the upload id), expiry =
+  now + 2 × PreSignedRequestValidityDuration (their presign validity is 7 d,
+  so 14 d); the COMMIT path removes nothing; a worker drains expired rows
+  (LIMIT 1000) and — the load-bearing check, removeUnreportedObject — skips
+  any key that has a DB entry (ObjectRepo.DoesObjectExist), else aborts the
+  multipart upload if any and deletes from S3, tolerating NoSuchKey/
+  NoSuchUpload.
+  - Port: domain/staleObjects.ts. recordTempObjects rides every mint (all six:
+    /files/upload-urls, /files/multipart-upload-urls, the V2 POST pair, and
+    both /public-collection mints — each already knows the pool it presigned
+    into, D55); rows land in a STALEQ partition shaped like PURGEQ (time-
+    ordered sk, no gsi — D48 discipline), expiry = 2 × presignPutExpirySeconds
+    (museum's formula on our constants: default 24 h presign → 48 h window;
+    the commit-races-sweep exposure is the same one museum accepts).
+    sweepStaleObjects runs as the trash-purge worker's third GC (F6-style
+    isolated), batch 1000, pool-aware with objectSweep's quarantine pattern.
+  - Two deliberate deviations, both server-internal: a CLAIMED key's row is
+    deleted rather than museum's "bump expiry +1 day and re-check forever"
+    loop (a committed object's later deletion already flows through PURGEQ),
+    and the claim check runs BEFORE resolving pool credentials (a claimed row
+    costs one GetItem, never an STS call). New Blobs.abortMultipart port
+    method (S3 AbortMultipartUploadCommand; NoSuchUpload tolerated) — the
+    uploadUrls.ts "no DB writes" citation was WRONG upstream and is corrected
+    (museum's mint does write temp_objects).
+  - The mint hot path gains one DynamoDB put per minted key (museum pays the
+    same INSERT); a temp-row write failure fails the mint, as upstream.
+  - Tests: stale-objects.test.ts — all six mints record, pre-expiry no-op,
+    claimed-key immunity, the 426-orphan delete, multipart abort, pool
+    routing + quarantine.
 
 ## Environment facts discovered while building
 

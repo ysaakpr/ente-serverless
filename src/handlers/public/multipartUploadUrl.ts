@@ -12,6 +12,7 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { publicAccess } from '../../middleware/publicAccess.ts';
 import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
+import { recordTempObjects } from '../../domain/staleObjects.ts';
 import { blobsForPool } from '../../domain/storagePools.ts';
 import {
   assertCollectEnabled,
@@ -56,6 +57,8 @@ export const publicMultipartUploadUrl = (deps: Deps) => async (c: Context) => {
     deps.config.presignPutExpirySeconds,
     body.partMd5s,
   );
+  // museum AddMultipartTempObjectKey — the stale sweep aborts + deletes (D65)
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey, uploadID: multipart.uploadID }]);
   return c.json({
     objectKey,
     partURLs: multipart.partUrls,

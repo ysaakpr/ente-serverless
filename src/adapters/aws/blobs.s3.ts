@@ -1,6 +1,7 @@
 /** S3 implementation of the Blobs port (LocalStack + real AWS). */
 
 import {
+  AbortMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -157,5 +158,18 @@ export class S3Blobs implements Blobs {
       { expiresIn },
     );
     return { objectKey: key, uploadID, partUrls, completeUrl };
+  }
+
+  async abortMultipart(key: string, uploadID: string): Promise<void> {
+    const client = await this.client();
+    try {
+      await client.send(
+        new AbortMultipartUploadCommand({ Bucket: this.bucket, Key: key, UploadId: uploadID }),
+      );
+    } catch (err) {
+      // Completed or already-aborted upload — nothing left to abort (D65).
+      if ((err as { name?: string }).name === 'NoSuchUpload') return;
+      throw err;
+    }
   }
 }
