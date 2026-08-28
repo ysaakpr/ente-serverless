@@ -110,8 +110,10 @@ describe('POST /collections/share', () => {
     expect((await share(owner.token, shareBody({ encryptedKey: undefined }))).status).toBe(500);
     expect((await share(owner.token, { email: mate.email, encryptedKey: sealedKey() })).status).toBe(400);
     expect((await share(owner.token, shareBody({ email: '' }))).status).toBe(400);
-    // ADMIN exists in museum's repo but nothing here can honour it — 400 (D50).
-    expect((await share(owner.token, shareBody({ role: 'ADMIN' }))).status).toBe(400);
+    // ADMIN is honoured since D63 (admin-role.test.ts); a truly unknown
+    // string stays our 400 where museum 500s (D50 divergence).
+    expect((await share(owner.token, shareBody({ role: 'ADMIN' }))).status).toBe(200);
+    expect((await share(owner.token, shareBody({ role: 'BANANA' }))).status).toBe(400);
   });
 
   it('allows sharing favorites and uncategorized-as-VIEWER; uncategorized-as-COLLABORATOR is 400 (AllowParticipantSharing)', async () => {

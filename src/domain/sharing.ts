@@ -17,8 +17,12 @@ import { keys, skPrefixes } from './model.ts';
 import { tokenHash } from './tokens.ts';
 import { SentinelError } from '../lib/errors.ts';
 
-/** museum ente.ShareeRole (VIEWER can read; COLLABORATOR can also add files). */
-export type ShareeRole = 'VIEWER' | 'COLLABORATOR';
+/** museum ente.CollectionParticipantRole minus OWNER/UNKNOWN (ente/access.go):
+ * VIEWER reads; COLLABORATOR also adds files (CanAdd); ADMIN additionally
+ * shares/unshares/changes roles and removes other sharees' files (D63 —
+ * oracle-verified matrix; public-link ops stay OWNER-only, museum 403s an
+ * admin there). */
+export type ShareeRole = 'VIEWER' | 'COLLABORATOR' | 'ADMIN';
 
 export interface ShareeRow {
   pk: string;

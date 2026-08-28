@@ -19,7 +19,7 @@ import {
 } from '../../domain/collections.ts';
 import { addSharee, assertSealedCollectionKey } from '../../domain/sharing.ts';
 import { getUserIdByEmail } from '../../domain/users.ts';
-import { errBadRequestSentinel, errNotFound } from '../../lib/errors.ts';
+import { errBadRequestSentinel, errNotFound, errPermissionDenied } from '../../lib/errors.ts';
 
 const bodySchema = z.object({
   collectionID: z.number().refine((v) => v !== 0), // gin binding:"required" fails on zero
@@ -27,10 +27,11 @@ const bodySchema = z.object({
   // Not binding-required in museum; a missing/short key fails the length
   // validation below instead.
   encryptedKey: z.string().default(''),
-  // museum's repo also accepts ADMIN (repo/collection.go Share); nothing in
-  // this repo can honour an ADMIN row (D49), so it is refused as 400 here
-  // where museum would 500 on truly unknown strings — capture-gated (D50).
-  role: z.enum(['VIEWER', 'COLLABORATOR']).optional(),
+  // The full sharee role set (D63) — role changes ride this same endpoint
+  // (the app re-shares with the new role; museum upserts). A truly unknown
+  // string 500s in museum (Postgres enum reject); zod's 400 here is the
+  // deliberate divergence D50 recorded.
+  role: z.enum(['VIEWER', 'COLLABORATOR', 'ADMIN']).optional(),
 });
 
 export const shareCollection = (deps: Deps) => async (c: Context) => {
@@ -41,13 +42,13 @@ export const shareCollection = (deps: Deps) => async (c: Context) => {
   assertSealedCollectionKey(body.encryptedKey);
   const role = body.role ?? 'VIEWER';
 
-  // museum collectionForShareMutation: owner (or an ADMIN sharee — none can
-  // exist here, D49); unknown collection 404, everyone else 403. Museum's
-  // repo.Get does not filter deleted collections; ours 404s them — a share
-  // onto a deleted album is nonsense anyway (capture-gated, D50).
-  const { collection } = await resolveCollectionAccess(deps, userId, body.collectionID, {
-    verifyOwner: true,
-  });
+  // museum collectionForShareMutation: the OWNER or an ADMIN sharee may
+  // share/unshare/change roles (share.go; oracle-verified D63) — unknown
+  // collection 404, every other member and non-member 403. Museum's repo.Get
+  // does not filter deleted collections; ours 404s them — a share onto a
+  // deleted album is nonsense anyway (capture-gated, D50).
+  const { collection, role: actorRole } = await resolveCollectionAccess(deps, userId, body.collectionID);
+  if (actorRole !== 'OWNER' && actorRole !== 'ADMIN') throw errPermissionDenied();
 
   // museum AllowParticipantSharing (ente/collection.go): uncategorized may
   // only be shared as VIEWER; every other type (favorites included) is open.

@@ -25,10 +25,10 @@ export const unshareCollection = (deps: Deps) => async (c: Context) => {
   const body = bodySchema.parse(await c.req.json());
   const { userId } = auth(c);
 
-  // museum collectionForShareMutation: owner-only here (no ADMIN rows, D49).
-  const { collection } = await resolveCollectionAccess(deps, userId, body.collectionID, {
-    verifyOwner: true,
-  });
+  // museum collectionForShareMutation: the OWNER or an ADMIN sharee
+  // (share.go; oracle-verified D63) — other members and non-members 403.
+  const { collection, role: actorRole } = await resolveCollectionAccess(deps, userId, body.collectionID);
+  if (actorRole !== 'OWNER' && actorRole !== 'ADMIN') throw errPermissionDenied();
 
   // museum shareeIndexForEmail over GetSharees: not a sharee -> 404.
   const sharees = await shareesJson(deps, body.collectionID);

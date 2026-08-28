@@ -82,8 +82,8 @@ export const putCollection = async (deps: Deps, row: CollectionRow): Promise<Col
 export const getCollection = async (deps: Deps, collectionId: number): Promise<CollectionRow | null> =>
   deps.db.get<CollectionRow>(keys.collection(collectionId).pk, 'META');
 
-/** museum ente.CollectionParticipantRole (ente/access.go), minus ADMIN —
- * nothing in this repo can mint an ADMIN row yet (D49). */
+/** museum ente.CollectionParticipantRole (ente/access.go), minus UNKNOWN —
+ * ADMIN rows mint via /collections/share since D63. */
 export type CollectionRole = 'OWNER' | ShareeRole;
 
 export interface CollectionAccess {

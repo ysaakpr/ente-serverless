@@ -2,15 +2,16 @@
  * POST /collections/add-files · /collections/move-files ·
  * /collections/restore-files · /collections/v3/remove-files (auth) —
  * src: pkg/controller/collections/file_action.go, semantics preserved:
- *  - add: OWNER or COLLABORATOR (museum Role.CanAdd()) + files the CALLER
- *    owns, untrashed (FILE_IN_TRASH 409)
+ *  - add: OWNER, COLLABORATOR or ADMIN (museum Role.CanAdd()) + files the
+ *    CALLER owns, untrashed (FILE_IN_TRASH 409)
  *  - move: both collections owned (VerifyOwner), to != from, files owned
  *  - restore: owned collection (VerifyOwner); tombstone flips isRestored
- *  - remove v3: any member resolves, then isRemoveAllowed — files owned by
- *    the collection owner are never removable this way (400, clients move or
- *    trash instead); the owner removes any sharee-owned files; a sharee
- *    removes only files they own (403 otherwise). Museum's ADMIN
- *    remove-suggestion branch is out of scope (no ADMIN rows exist, D49).
+ *  - remove v3: any member resolves, then isRemoveAllowed — the owner and an
+ *    ADMIN remove any sharee-owned files; a COLLABORATOR/VIEWER removes only
+ *    files they own (403 otherwise); owner-owned files are never removed
+ *    here (400 — clients move or trash instead), except that an ADMIN's
+ *    request for them is museum's remove-SUGGESTION branch: 200 with links
+ *    untouched (suggestion store stubbed empty, D63).
  */
 
 import type { Context } from 'hono';
@@ -86,10 +87,11 @@ export const addFiles = (deps: Deps) => async (c: Context) => {
   const body = addSchema.parse(await c.req.json());
   assertBatchSize(body.files.length);
   const { userId } = auth(c);
-  // museum AddFiles: any member resolves, then Role.CanAdd() — OWNER or
-  // COLLABORATOR; a collaborator adds files THEY OWN into the shared album.
+  // museum AddFiles: any member resolves, then Role.CanAdd() — OWNER,
+  // COLLABORATOR or ADMIN (ente/access.go); the sharee adds files THEY OWN
+  // into the shared album.
   const { role } = await resolveCollectionAccess(deps, userId, body.collectionID);
-  if (role !== 'OWNER' && role !== 'COLLABORATOR') throw errPermissionDenied();
+  if (role !== 'OWNER' && role !== 'COLLABORATOR' && role !== 'ADMIN') throw errPermissionDenied();
   await verifyFileOwnership(deps, userId, body.files.map((f) => f.id));
   await assertNotTrashed(deps, userId, body.files.map((f) => f.id));
   let latest = 0;
@@ -156,7 +158,7 @@ export const removeFilesV3 = (deps: Deps) => async (c: Context) => {
   const body = removeSchema.parse(await c.req.json());
   assertBatchSize(body.fileIDs.length);
   const { userId } = auth(c);
-  const { collection } = await resolveCollectionAccess(deps, userId, body.collectionID);
+  const { collection, role } = await resolveCollectionAccess(deps, userId, body.collectionID);
 
   // Filter to files actively in the collection (museum FilterActiveFileIDs).
   const active: number[] = [];
@@ -166,24 +168,32 @@ export const removeFilesV3 = (deps: Deps) => async (c: Context) => {
   }
   if (active.length === 0) return c.body(null, 200);
 
-  // museum isRemoveAllowed (file_action.go): files owned by the collection
-  // owner are never removable via this endpoint (clients move or trash
-  // instead) — 400 for the owner themselves and for any sharee (the ADMIN
-  // remove-suggestion path is out of scope, D49). Past that gate the owner
-  // removes anything; a sharee removes only files they own.
+  // museum isRemoveAllowed (file_action.go), oracle-verified D63:
+  //  - owner-owned files are never removed via this endpoint: the owner (and
+  //    any non-ADMIN sharee) reads 400; an ADMIN sharee gets museum's
+  //    remove-SUGGESTION branch — 200, links untouched, a suggestion queued
+  //    for the owner. Our suggestion store is the empty stub (social.ts), so
+  //    the ADMIN case is a 200 no-op here: wire-identical for the remove call
+  //    and the (empty) suggestions inbox; only the diff's delete-suggested
+  //    marker is missing (D63).
+  //  - past that gate the owner and an ADMIN remove any sharee-owned file; a
+  //    COLLABORATOR/VIEWER removes only files they own.
   const files = (await Promise.all(active.map((id) => getFile(deps, id)))).filter(
     (f): f is FileRow => f !== null,
   );
-  if (files.some((f) => f.ownerID === collection.ownerID)) {
-    throw userId === collection.ownerID
+  const isOwner = userId === collection.ownerID;
+  const ownerOwned = new Set(files.filter((f) => f.ownerID === collection.ownerID).map((f) => f.fileId));
+  if (ownerOwned.size > 0 && role !== 'ADMIN') {
+    throw isOwner
       ? badRequest('can not remove files owned collection owner, admins can perform remove suggestion')
       : badRequest('can not remove files owned by album owner');
   }
-  if (userId !== collection.ownerID && files.some((f) => f.ownerID !== userId)) {
+  if (!isOwner && role !== 'ADMIN' && files.some((f) => f.ownerID !== userId)) {
     throw errPermissionDenied(); // 'can not remove files owned by others'
   }
   let latestRemove = 0;
   for (const id of active) {
+    if (ownerOwned.has(id)) continue; // ADMIN suggestion branch: no removal
     const link = await getLink(deps, body.collectionID, id);
     if (link) {
       const tombstoned = restampLink(deps, link, true);

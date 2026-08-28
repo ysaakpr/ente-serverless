@@ -72,17 +72,29 @@ source says Y — source won).
   `{storageBonuses: []}`, billing free plan `{storage, duration: 100,
   period: "days"}`, subscription id = userID. Shapes from source; self-host
   capture should be copied verbatim once the oracle runs.
-- **D11 [DECIDED 2026-08-16, REVISED 2026-08-17] Free plan storage default =
-  10 TiB.** Museum's constant is 10 GiB; ours stays env-configurable
-  (`FREE_PLAN_STORAGE_BYTES`) but defaults high, because it's the user's own
-  bucket and bill and quota should not interfere on a self-host. Originally
-  1 PiB ("effectively unlimited"); lowered to **10 TiB = 10995116277760** on
-  request — still far past any realistic library, but a real ceiling rather
-  than a number chosen to never trigger, so a runaway client hits 426 instead
-  of an S3 invoice. Binary units throughout, matching museum's 10 GiB
-  (10737418240) and the rest of this repo. Set in config.ts and the tofu
-  variable `free_plan_storage_bytes`; the 426 quota path stays covered by
-  tests via the override.
+- **D11 [DECIDED 2026-08-16, REVISED 2026-08-17 → 10 TiB, REVISED 2026-08-28 →
+  1 GiB] Free plan storage default = 1 GiB; increase per-user by invite.**
+  Museum's constant is 10 GiB; ours stays env-configurable
+  (`FREE_PLAN_STORAGE_BYTES`). The default is now a deliberately SMALL floor: an
+  open/uninvited signup gets **1 GiB = 1073741824** on the shared central
+  bucket, and real storage is granted per-user by invite — `make invite
+  --storage-gb N` writes `storageLimitBytes` on the invite row, inherited to the
+  user row at signup, and `userStorageBytes` resolves `storageLimitBytes ??
+  freePlanStorageBytes`, so the grant overrides the floor. History: originally
+  1 PiB ("effectively unlimited"), then 10 TiB (a real ceiling vs a runaway
+  client), now 1 GiB — the shift is from "the user brings their own bucket,
+  don't let quota interfere" (BYO pools, D55) to "storage is granted
+  deliberately, gate it at the door". Binary units throughout (museum's 10 GiB =
+  10737418240). Set in config.ts and the tofu variable
+  `free_plan_storage_bytes`, guard-matched by lifecycle.test.ts; the 426 quota
+  path stays covered by tests via the override.
+  - Consequence: `userStorageBytes` reads config per request, so a deploy
+    re-quotas EVERY existing default-quota user (no explicit `storageLimitBytes`)
+    the moment it lands. An already-signed-up user who has uploaded more than
+    1 GiB and was never given an explicit limit is over quota afterwards —
+    reads still work, new uploads 426 — until you `make set-storage` /
+    `make invite --storage-gb N` them a real allowance. Users on an explicit
+    `storageLimitBytes` (any invite that set `--storage-gb`) are unaffected.
 
 ## Corrections to the build plan (source beat the plan doc)
 
@@ -1836,6 +1848,87 @@ source says Y — source won).
   - Tests: collection-restamp.test.ts — 9 scenarios including the collect
     flow, all link ops, stamp equality with the link, and the forward-only
     guard.
+
+- **D63 [INFRA/OPS 2026-08-28] A dedicated operator role for the `tools/`
+  CLI, separate from the Lambda execution role.** The invite (D54) and
+  storage-pool (D55) CLIs run as a human operator against prod, and they need
+  one action the request path deliberately withholds: `dynamodb:Scan`, used by
+  every `list` subcommand and by `pool-requeue`'s queue drain. Rather than add
+  Scan to `ente-sl-<env>-api` (it is shared by both Lambdas — widening it
+  hands a runaway Scan to the request path, exactly the self-host footgun the
+  execution role avoids) or run the CLI as an unscoped admin, the tools get
+  their own least-privilege role, `ente-sl-<env>-operator`, in `modules/data`
+  (co-located with the table it grants on).
+  - Policy: table + `/index/*` with Get/Put/Update/Delete/Query/**Scan**, plus
+    `sts:AssumeRole` on `arn:aws:iam::*:role/ente-pool-*` (role-mode pool
+    validation assumes the pool's bucket role with the operator's creds — same
+    reach and confused-deputy rationale as the execution role's PoolAssumeRole,
+    D56). **No S3**: pool validation runs entirely with the pool's assumed-role
+    or static keys, and no CLI path touches the central objects bucket; a
+    keys-mode pool needs no IAM here at all.
+  - Trust: `operator_principal_arns` (new `modules/data` var, threaded through
+    both env roots) when set, else the **account root** — the self-host answer,
+    where the operator owns the account. Named `ente-sl-*` so the deployer
+    policy's `IamForExecutionRole` statement (`iam:CreateRole`/`PutRolePolicy`
+    on `arn:aws:iam::*:role/ente-sl-*`) manages it with no deployer-policy
+    change. Output `operator_role_arn` surfaces it for an AWS-profile `role_arn`.
+  - `tofu validate` + `fmt` clean; the role + inline policy plan as `1 to add`
+    (a full plan needs the deployer creds — a `-target` refresh under a limited
+    user 403s on `dynamodb:DescribeTable`, unrelated to the change).
+  - CLI ergonomics: the deployer principal has NO DynamoDB data-plane actions
+    (deployer-policy.json is control-plane only — `CreateTable`/`Describe*`/
+    `List*`/`UpdateTable`), so it cannot run the tools directly; it now carries
+    `sts:AssumeRole` on `arn:aws:iam::*:role/ente-sl-*-operator` (new Sid
+    `OperatorAssumeRole`) so it can assume the operator role instead. The
+    `deployer-policy.json` is a reference doc, not a tofu resource — re-apply it
+    to the deployer principal after this change.
+  - Make convenience: every invite/pool target runs through `$(OPS)` →
+    `tools/with-operator-role.sh $(TFDIR)`, which assumes the SELECTED env's
+    operator role (`make profile dev|test`) and exports the temp creds +
+    `TABLE_NAME` + region from `tofu output`, so `make invite EMAIL=...` needs
+    no `TABLE_NAME=`/`AWS_PROFILE=` prefix. It clears `AWS_PROFILE` + inherited
+    static keys before running the tool (the @aws-sdk chain prefers AWS_PROFILE
+    over the env key pair when both are set, which would otherwise run the tool
+    as the base user → `dynamodb:Scan` AccessDenied). It is a transparent
+    passthrough when `AWS_ENDPOINT_URL` is set, so the LocalStack flow
+    (`$(LOCALSTACK_ENV)`) is untouched — LocalStack has no role or STS.
+    `OPERATOR_PROFILE=<profile>`
+    picks which creds assume the role; new `region` output added to both env
+    roots (the tools default to us-east-1). HASHING_KEY stays the operator's to
+    supply for the hash-keyed subcommands.
+
+- **D63 [SHARING/AUTHZ 2026-08-28] ADMIN sharee role honoured end to end —
+  the app's role-change / add-admin UI works.** Field report: changing a
+  participant's role and "add admin" failed from the app. The app has no
+  dedicated role endpoint — every role change re-POSTs /collections/share
+  with the new role string (mobile collection_share_gateway.share, role
+  serialized "VIEWER"/"COLLABORATOR"/"ADMIN"), and our zod refused ADMIN
+  (D49/D50 left it out: "nothing can honour an ADMIN row"). Oracle matrix
+  (2026-08-28, pinned image): owner grants/demotes ADMIN via re-share (200,
+  upsert); owner OR ADMIN sharee may share/unshare/change roles
+  (collectionForShareMutation — COLLABORATOR/VIEWER 403); ADMIN CanAdd()s
+  (add-files 200); remove-files v3: ADMIN removes any sharee-owned file, and
+  for OWNER-owned files gets the remove-SUGGESTION branch — 200 with links
+  UNTOUCHED; unshare of self/owner 403 even for ADMIN; public-link
+  mint/update/disable stay OWNER-only (admin 403); unknown role string 500s
+  upstream (Postgres enum) — our 400 stays, D50.
+  - Fix: ShareeRole += 'ADMIN' (domain/sharing.ts); share.ts + unshare.ts
+    actor gate is now owner-or-ADMIN via resolveCollectionAccess role;
+    fileActions.ts addFiles admits ADMIN, removeFilesV3 ports isRemoveAllowed
+    (ADMIN removes sharee-owned; owner-owned subset no-ops at 200 — museum's
+    suggestion lands in a store we stub empty, so the wire behaviour of the
+    remove call AND the /collection-actions/delete-suggestions inbox
+    ({"actions":[],"hasMore":false}) both match; only the diff's
+    delete-suggested marker is missing). minRole ADMIN on links already
+    ranked (D51 filter).
+  - Museum's oracle inbox also read empty right after a suggestion was
+    queued, so the stub is indistinguishable at this probe depth; a real
+    suggestion store (plus /collection-actions accept/reject) stays an open
+    follow-up, as does PUT /collections/sharee-magic-metadata (route absent
+    here; museum 400'd the naive probe body — unpinned).
+  - Tests: admin-role.test.ts (9 scenarios, the oracle matrix 1:1);
+    collection-share.test.ts's ADMIN-refused assertion flipped to the new
+    contract.
 
 ## Environment facts discovered while building
 
