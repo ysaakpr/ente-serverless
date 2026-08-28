@@ -108,11 +108,11 @@ it('aborts an abandoned multipart upload and drops its row', async () => {
   const rowsBefore = await staleRows();
   const uploadID = rowsBefore[0]!.uploadID as string;
   expect(uploadID).toBeTruthy();
-  expect(world.deps.blobs.multiparts.has(uploadID)).toBe(true);
+  expect(world.deps.blobs.hasMultipart(uploadID)).toBe(true);
 
   world.deps.clock.advance(tempWindowMicros() + MICROS);
   expect(await sweepStaleObjects(world.deps)).toBe(1);
-  expect(world.deps.blobs.multiparts.has(uploadID)).toBe(false); // aborted
+  expect(world.deps.blobs.hasMultipart(uploadID)).toBe(false); // aborted
   expect(await world.deps.blobs.head(urls.objectKey)).toBeNull();
   expect(await staleRows()).toHaveLength(0);
 });

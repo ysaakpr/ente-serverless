@@ -20,6 +20,11 @@ export class MemoryBlobs implements Blobs {
 
   constructor(private poolId?: string) {}
 
+  /** Test-only: does an in-flight multipart upload with this ID exist? */
+  hasMultipart(uploadID: string): boolean {
+    return this.multiparts.has(uploadID);
+  }
+
   /** The isolated namespace for one pool (created on first use). */
   forPool(poolId: string): MemoryBlobs {
     let child = this.children.get(poolId);
