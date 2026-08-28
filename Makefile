@@ -251,10 +251,14 @@ ALBUMS_WEB_REPO = https://github.com/ente-io/ente
 # wasm-pack on PATH). Stale/partial clones need no special handling: the
 # unconditional rm -rf below starts every run from a fresh clone, so a changed
 # sparse set or an earlier failed run can never leave dist/ente-web-src stale.
+# Homebrew installs rustup KEG-ONLY: its cargo/rustc proxies live in
+# /opt/homebrew/opt/rustup/bin, never symlinked onto PATH. Append (not
+# prepend) so a user-managed cargo still wins.
+build-web: export PATH := $(PATH):/opt/homebrew/opt/rustup/bin
 build-web: require-profile
 	@command -v git >/dev/null || { echo "git is required"; exit 1; }
 	@command -v npm >/dev/null || { echo "npm is required (the ente web workspace pins npm 11.x — a very old npm may refuse)"; exit 1; }
-	@command -v cargo >/dev/null || { echo "cargo is required (rustup with the wasm32-unknown-unknown target — the workspace wasm-pack-builds rust/bindings/wasm/*)"; exit 1; }
+	@command -v cargo >/dev/null || { echo "cargo is required (rustup with the wasm32-unknown-unknown target — the workspace wasm-pack-builds rust/bindings/wasm/*; brew's rustup keeps them in /opt/homebrew/opt/rustup/bin)"; exit 1; }
 	@ORIGIN="$${ALBUMS_API_ORIGIN:-$$($(TF) output -raw server_url 2>/dev/null)}"; \
 	case "$$ORIGIN" in \
 		http*) ;; \
