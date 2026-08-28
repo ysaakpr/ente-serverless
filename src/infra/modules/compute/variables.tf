@@ -36,7 +36,7 @@ variable "alarm_email" {
 
 variable "free_plan_storage_bytes" {
   type    = number
-  default = 10995116277760 # 10 TiB (decision D11, revised 2026-08-17); museum's constant is 10 GiB
+  default = 1073741824 # 1 GiB (D11, revised 2026-08-28): minimal default floor; increase per-user by invite (storageLimitBytes). museum's constant is 10 GiB
 }
 
 # Security review 2026-08-17, finding 4 — the three spend/abuse knobs.

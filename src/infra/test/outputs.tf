@@ -15,6 +15,19 @@ output "objects_bucket" {
   value = module.data.objects_bucket
 }
 
+# The role the tools/ CLI assumes (invite + storage-pool provisioning). The
+# make targets read this (+ region below) to assume the role and set TABLE_NAME
+# automatically; see tools/with-operator-role.sh.
+output "operator_role_arn" {
+  value = module.data.operator_role_arn
+}
+
+# Consumed by tools/with-operator-role.sh — the tools default to us-east-1, so
+# the operator CLI must pass the real region explicitly.
+output "region" {
+  value = var.region
+}
+
 # What minted share links actually point at (D52/D58/D60) — the value the
 # Lambda's ALBUMS_URL was deployed with: the custom-domain tfvars override if
 # set, else this distribution's own URL + /albums (server_url domain, the

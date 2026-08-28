@@ -4,7 +4,8 @@ Pre-deploy report for M7 (DECISIONS.md D4). Read alongside NEXT-TASKS.md §4.
 Derived from `src/infra` as of 2026-08-17 (albums web hosting added
 2026-08-27, Phase F/D52, and consolidated onto the ONE distribution the same
 day, D58; the execution role's pool `sts:AssumeRole` statement added the same
-day, Phase H2/D55); **no cloud deploy has happened yet**, so nothing below
+day, Phase H2/D55; the operator role for the `tools/` CLI added 2026-08-28,
+D64 — rows 7/8); **no cloud deploy has happened yet**, so nothing below
 has been observed running — it is what `tofu apply` will attempt.
 
 Names below are written as `ente-sl-dev-*` for continuity, but `region` and
@@ -14,7 +15,7 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 `-prod-`. `<account>` is the 12-digit account ID, filled in at plan time from
 `aws_caller_identity`.
 
-## 1. The inventory — 27 managed resources
+## 1. The inventory — 29 managed resources
 
 ### Stateful (`modules/data`) — delete protection is variable-driven (D57)
 
@@ -26,26 +27,28 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 | 4 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
 | 5 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
 | 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (after `gir_transition_days`, default 7 — D7/D59; filtered on object tag `tier=original`), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
+| 7 | `aws_iam_role` | `ente-sl-dev-operator` | The role the `tools/` CLI assumes — `invite.ts` (invite-gated signup + per-user storage, D54) and `storagePool.ts` (BYO-pool provisioning, D55). A **human** operator role, separate from the execution role, because these need `dynamodb:Scan` the request path deliberately lacks (D64). Trust: `operator_principal_arns` when set, else the **account root** (the self-host default). Named `ente-sl-*` so the deployer policy manages it with no change. |
+| 8 | `aws_iam_role_policy` | `ente-sl-dev-operator` | Inline. Scoped to the table + `/index/*` with `Get/Put/Update/Delete/Query/`**`Scan`** (Scan is the one action beyond the execution role's set — every `list` subcommand + pool-requeue's queue drain), plus `sts:AssumeRole` on `arn:aws:iam::*:role/ente-pool-*` for role-mode pool validation (same reach/rationale as the execution role's PoolAssumeRole). **No S3**: pool validation runs with the pool's own assumed-role or static keys, and no CLI path touches the central bucket. D64. |
 
 ### Stateless (`modules/compute`)
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 7 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
-| 8 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*` — plus `sts:AssumeRole` on `*` for BYO pool buckets (D55): deliberate, because assuming a pool role also requires that role's trust policy to name this principal with the mandatory ExternalId, so enumerating pool ARNs would add churn, not security. Guard-tested. |
-| 9 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
-| 10 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
-| 11 | `aws_lambda_permission` | `FunctionURLAllowPublicAccess` | Grants anonymous `lambda:InvokeFunctionUrl`. **Required** — auth NONE alone 403s every caller, CloudFront included. Guard-tested. |
-| 12 | `aws_lambda_function` | `ente-sl-dev-trash-purge` | nodejs22.x, arm64, 256 MB, 300 s. Drains the 30-day trash **and** the deferred object-sweep queue (D6). |
-| 13 | `aws_cloudwatch_event_rule` | `ente-sl-dev-trash-purge` | `rate(1 day)`. |
-| 14 | `aws_cloudwatch_event_target` | ↑ → the purge function | |
-| 15 | `aws_lambda_permission` | `AllowEventBridge` | Lets `events.amazonaws.com` invoke the purge function. |
-| 16 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-api` | 30-day retention. Created explicitly, so the role does **not** need `logs:CreateLogGroup`. |
-| 17 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-trash-purge` | 30-day retention. |
-| 18 | `aws_sns_topic` | `ente-sl-dev-alarms` | Alarm fan-out. |
-| 19 | `aws_sns_topic_subscription` | email → `alarm_email` (defaults to `mail_from`) | **Needs confirming from the inbox.** Until you click AWS's link the subscription stays pending and silently drops every alarm. |
-| 20 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-api-errors` | Lambda `Errors` > 0 over 5 min. |
-| 21 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-trash-purge-errors` | Lambda `Errors` > 0 over **86400 s** — a daily window for a daily cron. The failure this exists for: the purge drains the D6 object-sweep queue, so a silently dead cron means deleted bytes are never reclaimed and the bill grows with no other signal. |
+| 9 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
+| 10 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*` — plus `sts:AssumeRole` on `*` for BYO pool buckets (D55): deliberate, because assuming a pool role also requires that role's trust policy to name this principal with the mandatory ExternalId, so enumerating pool ARNs would add churn, not security. Guard-tested. |
+| 11 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
+| 12 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
+| 13 | `aws_lambda_permission` | `FunctionURLAllowPublicAccess` | Grants anonymous `lambda:InvokeFunctionUrl`. **Required** — auth NONE alone 403s every caller, CloudFront included. Guard-tested. |
+| 14 | `aws_lambda_function` | `ente-sl-dev-trash-purge` | nodejs22.x, arm64, 256 MB, 300 s. Drains the 30-day trash **and** the deferred object-sweep queue (D6). |
+| 15 | `aws_cloudwatch_event_rule` | `ente-sl-dev-trash-purge` | `rate(1 day)`. |
+| 16 | `aws_cloudwatch_event_target` | ↑ → the purge function | |
+| 17 | `aws_lambda_permission` | `AllowEventBridge` | Lets `events.amazonaws.com` invoke the purge function. |
+| 18 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-api` | 30-day retention. Created explicitly, so the role does **not** need `logs:CreateLogGroup`. |
+| 19 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-trash-purge` | 30-day retention. |
+| 20 | `aws_sns_topic` | `ente-sl-dev-alarms` | Alarm fan-out. |
+| 21 | `aws_sns_topic_subscription` | email → `alarm_email` (defaults to `mail_from`) | **Needs confirming from the inbox.** Until you click AWS's link the subscription stays pending and silently drops every alarm. |
+| 22 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-api-errors` | Lambda `Errors` > 0 over 5 min. |
+| 23 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-trash-purge-errors` | Lambda `Errors` > 0 over **86400 s** — a daily window for a daily cron. The failure this exists for: the purge drains the D6 object-sweep queue, so a silently dead cron means deleted bytes are never reclaimed and the bill grows with no other signal. |
 
 `Errors` counts **failed invocations** — crashes, timeouts, OOM, init failures.
 It does *not* count application errors hono handles and returns, so the SES-500
@@ -69,12 +72,12 @@ web app the single `/albums*` behavior — 2 of 5. Share links are
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api + albums web` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert. **2 cache behaviors — the FREE plan caps them at 5 (D60, guard-tested)**. **DEFAULT behavior = the API**: the Lambda Function URL origin (no OAC there, deliberate — same finding as immich-serverless; `x-origin-secret` injected per-origin), managed **CachingDisabled** + **AllViewerExceptHostHeader**, all 7 methods, https-only — unknown paths 404 museum-shaped from the app, and new route groups need no edge change. **`/albums*`** → the web bucket via OAC (assets under the `albums/` key prefix, URI = object key): managed **CachingOptimized**, the row-23 SPA function, GET/HEAD only, compressed; index.html freshness is origin metadata (`Cache-Control: no-cache`, set by `make deploy-web` — no dedicated behavior). No `default_root_object` (`/` belongs to the API). **NO `custom_error_response`** — error responses are distribution-wide and would rewrite the API's museum-shaped 404/403 JSON into HTML (the D58 load-bearing constraint, guard-tested). Its domain is the `server_url` output the app gets pointed at; the Lambda's `ALBUMS_URL` is that domain + `/albums`. |
-| 23 | `aws_cloudfront_function` | `ente-sl-dev-spa-rewrite` | Viewer-request, cloudfront-js-2.0, attached to the **`/albums*` behavior only**: URIs whose last segment has no extension (bare `/albums` and `/albums/` included) rewrite to `/albums/index.html` (the SPA fallback that replaced `custom_error_response`); asset paths pass through. |
-| 24 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — unconditionally `force_destroy = true` (not tied to `delete_protection`), **no** versioning: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
-| 25 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. The bucket is never public. |
-| 26 | `aws_s3_bucket_policy` | ↑ | `s3:GetObject` to the `cloudfront.amazonaws.com` service principal only, condition-pinned (`AWS:SourceArn`) to distribution 22. |
-| 27 | `aws_cloudfront_origin_access_control` | `ente-sl-dev-web-albums` | sigv4, `signing_behavior = always`. The repo's "no OAC" decision applies to the **Lambda** origin (IAM auth breaks the POST body hash); an S3 origin takes OAC cleanly and must have it. |
+| 24 | `aws_cloudfront_distribution` | comment `ente-sl-dev api + albums web` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert. **2 cache behaviors — the FREE plan caps them at 5 (D60, guard-tested)**. **DEFAULT behavior = the API**: the Lambda Function URL origin (no OAC there, deliberate — same finding as immich-serverless; `x-origin-secret` injected per-origin), managed **CachingDisabled** + **AllViewerExceptHostHeader**, all 7 methods, https-only — unknown paths 404 museum-shaped from the app, and new route groups need no edge change. **`/albums*`** → the web bucket via OAC (assets under the `albums/` key prefix, URI = object key): managed **CachingOptimized**, the row-23 SPA function, GET/HEAD only, compressed; index.html freshness is origin metadata (`Cache-Control: no-cache`, set by `make deploy-web` — no dedicated behavior). No `default_root_object` (`/` belongs to the API). **NO `custom_error_response`** — error responses are distribution-wide and would rewrite the API's museum-shaped 404/403 JSON into HTML (the D58 load-bearing constraint, guard-tested). Its domain is the `server_url` output the app gets pointed at; the Lambda's `ALBUMS_URL` is that domain + `/albums`. |
+| 25 | `aws_cloudfront_function` | `ente-sl-dev-spa-rewrite` | Viewer-request, cloudfront-js-2.0, attached to the **`/albums*` behavior only**: URIs whose last segment has no extension (bare `/albums` and `/albums/` included) rewrite to `/albums/index.html` (the SPA fallback that replaced `custom_error_response`); asset paths pass through. |
+| 26 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — unconditionally `force_destroy = true` (not tied to `delete_protection`), **no** versioning: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
+| 27 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. The bucket is never public. |
+| 28 | `aws_s3_bucket_policy` | ↑ | `s3:GetObject` to the `cloudfront.amazonaws.com` service principal only, condition-pinned (`AWS:SourceArn`) to distribution 22. |
+| 29 | `aws_cloudfront_origin_access_control` | `ente-sl-dev-web-albums` | sigv4, `signing_behavior = always`. The repo's "no OAC" decision applies to the **Lambda** origin (IAM auth breaks the POST body hash); an S3 origin takes OAC cleanly and must have it. |
 
 Pricing consequences of the consolidation, all deliberate (D47/D58):
 
@@ -168,7 +171,13 @@ These are the actual gating work for the first apply.
 3. **The deployer principal.** `src/infra/deployer-policy.json` is a policy
    document, not a resource — the IAM user/role that carries it is a manual
    bootstrap step. It is scoped to `ente-sl-*` and deliberately omits
-   `dynamodb:DeleteTable` and `s3:DeleteBucket`.
+   `dynamodb:DeleteTable` and `s3:DeleteBucket`. Its DynamoDB grant is
+   control-plane only (no `GetItem`/`Scan`/`PutItem`), so it cannot run the
+   `tools/` CLI directly; it carries `sts:AssumeRole` on
+   `ente-sl-*-operator` (Sid `OperatorAssumeRole`, D64) to assume the operator
+   role instead — `make invite`/`make pool-*` do this automatically via
+   `tools/with-operator-role.sh`. **Re-apply the policy to your principal after
+   pulling D64** (this is a doc, not a tofu-managed resource).
 
 4. **`src/infra/dev/ente-sl.tfvars`.** Gitignored, does not exist yet. Copy the
    example, generate `hashing_key` with `openssl rand -base64 32`, and **back

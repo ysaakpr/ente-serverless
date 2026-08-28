@@ -127,3 +127,11 @@ variable "delete_protection" {
   type    = bool
   default = true
 }
+
+# Who may assume ente-sl-<env>-operator, the role the tools/ CLI runs under.
+# Empty (the default) trusts the account root — the self-host answer. Set it in
+# the tfvars to specific IAM user / SSO-role ARNs to narrow who can assume it.
+variable "operator_principal_arns" {
+  type    = list(string)
+  default = []
+}

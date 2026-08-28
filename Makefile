@@ -7,7 +7,7 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
-	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage \
+	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage users \
 	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue \
 	profile require-profile
 
@@ -71,40 +71,57 @@ ledger:
 
 # ---------------------------------------------------------------------------
 # Invite-gated signup + per-user storage (Phase H1, D54) — operator tooling,
-# never a client surface. Env-driven exactly like the Lambda: TABLE_NAME +
-# AWS credentials/region select the deployment; add the $(LOCALSTACK_ENV)
-# variables (or `env $(LOCALSTACK_ENV) make invite ...`) to hit LocalStack.
-# set-storage additionally needs HASHING_KEY (user lookup is hash-keyed);
-# invite/list/revoke deliberately do not (invite rows key on plain email).
+# never a client surface.
+#
+# LIVE ENV (D64): pick it once with `make profile dev|test`; every target below
+# then runs through $(OPS), which assumes that env's operator role and sets
+# TABLE_NAME + region for you — no TABLE_NAME/AWS_PROFILE prefix. Your creds
+# just need sts:AssumeRole on the role (your deployer profile has it); set
+# OPERATOR_PROFILE=<profile> to choose which profile assumes it. set-storage
+# additionally needs HASHING_KEY (user lookup is hash-keyed); invite/list/revoke
+# deliberately do not (invite rows key on plain email) — export it or prefix it.
+# LOCALSTACK: `env $(LOCALSTACK_ENV) make invite ...` sets AWS_ENDPOINT_URL, so
+# $(OPS) passes straight through — the role dance is skipped.
+#   make profile dev            # once — selects the env everything below hits
 #   make invite EMAIL=alice@example.com [STORAGE_GB=50] [VIEWER=1]
 #   make invites
 #   make revoke-invite EMAIL=alice@example.com
-#   make set-storage EMAIL=alice@example.com STORAGE_GB=50   (or STORAGE_GB=default)
+#   HASHING_KEY=... make set-storage EMAIL=alice@example.com STORAGE_GB=50   (or =default)
 # STORAGE_GB=0 means ZERO bytes — a viewer-style no-upload account, not "off".
 # ---------------------------------------------------------------------------
 INVITE_TOOL = node --experimental-transform-types tools/invite.ts
 
 invite:
 	@test -n "$(EMAIL)" || { echo "usage: make invite EMAIL=... [STORAGE_GB=...] [VIEWER=1]"; exit 1; }
-	@$(INVITE_TOOL) invite "$(EMAIL)" \
+	@$(OPS) $(INVITE_TOOL) invite "$(EMAIL)" \
 		$(if $(STORAGE_GB),--storage-gb $(STORAGE_GB)) $(if $(VIEWER),--viewer)
 
 invites:
-	@$(INVITE_TOOL) list
+	@$(OPS) $(INVITE_TOOL) list
 
 revoke-invite:
 	@test -n "$(EMAIL)" || { echo "usage: make revoke-invite EMAIL=..."; exit 1; }
-	@$(INVITE_TOOL) revoke "$(EMAIL)"
+	@$(OPS) $(INVITE_TOOL) revoke "$(EMAIL)"
 
 set-storage:
 	@test -n "$(EMAIL)" -a -n "$(STORAGE_GB)" || { echo "usage: make set-storage EMAIL=... STORAGE_GB=<n|default>"; exit 1; }
-	@$(INVITE_TOOL) set-storage "$(EMAIL)" "$(STORAGE_GB)"
+	@$(OPS) $(INVITE_TOOL) set-storage "$(EMAIL)" "$(STORAGE_GB)"
+
+# Every account with email, usage and limits (operator Scan, D64):
+#   make users            table view
+#   make users JSON=1     raw JSON
+users:
+	@$(OPS) node --experimental-transform-types tools/users.ts list $(if $(JSON),--json)
 
 # ---------------------------------------------------------------------------
 # BYO storage pools (Phase H2, D55) — operator tooling, never a client
 # surface. One pool = one S3 bucket shared by many users (a household);
 # object keys stay <userID>/<uuid>, and pool membership never grants access
-# to other members' photos. Env-driven exactly like tools/invite.ts.
+# to other members' photos. Runs through $(OPS) exactly like the invite
+# targets above (D64): `make profile dev|test` picks the env, the operator role
+# supplies creds + TABLE_NAME. HASHING_KEY is still yours to provide for
+# pool-attach/pool-detach (hashed user lookup) and keys-mode pool-create
+# (credential encryption).
 # pool-create runs a validation checklist (creds, HeadBucket, PUT/GET/DELETE
 # probe, tagging, multipart, public-access-block, CORS, abort-MPU lifecycle)
 # and REFUSES to onboard on hard failures. HASHING_KEY is needed by
@@ -129,33 +146,33 @@ pool-create:
 	@test -n "$(POOL)" -a -n "$(BUCKET)" -a -n "$(REGION)" || { \
 		echo "usage: make pool-create POOL=... BUCKET=... REGION=... (ROLE_ARN=... EXTERNAL_ID=... | POOL_ACCESS_KEY/POOL_SECRET_KEY env | ACCESS_KEY=... SECRET_KEY=... [ENDPOINT=...]) [STORAGE_GB=...]"; \
 		echo "  keys mode: prefer the POOL_ACCESS_KEY/POOL_SECRET_KEY env vars — make vars land in ps/shell history"; exit 1; }
-	@$(POOL_TOOL) create "$(POOL)" --bucket "$(BUCKET)" --region "$(REGION)" \
+	@$(OPS) $(POOL_TOOL) create "$(POOL)" --bucket "$(BUCKET)" --region "$(REGION)" \
 		$(if $(ROLE_ARN),--role-arn "$(ROLE_ARN)") $(if $(EXTERNAL_ID),--external-id "$(EXTERNAL_ID)") \
 		$(if $(ACCESS_KEY),--access-key "$(ACCESS_KEY)") $(if $(SECRET_KEY),--secret-key "$(SECRET_KEY)") \
 		$(if $(ENDPOINT),--endpoint "$(ENDPOINT)") $(if $(STORAGE_GB),--storage-gb $(STORAGE_GB))
 
 pool-attach:
 	@test -n "$(EMAIL)" -a -n "$(POOL)" || { echo "usage: make pool-attach EMAIL=... POOL=..."; exit 1; }
-	@$(POOL_TOOL) attach "$(EMAIL)" "$(POOL)"
+	@$(OPS) $(POOL_TOOL) attach "$(EMAIL)" "$(POOL)"
 
 pool-detach:
 	@test -n "$(EMAIL)" || { echo "usage: make pool-detach EMAIL=..."; exit 1; }
-	@$(POOL_TOOL) detach "$(EMAIL)"
+	@$(OPS) $(POOL_TOOL) detach "$(EMAIL)"
 
 pools:
-	@$(POOL_TOOL) list
+	@$(OPS) $(POOL_TOOL) list
 
 pool-set-quota:
 	@test -n "$(POOL)" -a -n "$(STORAGE_GB)" || { echo "usage: make pool-set-quota POOL=... STORAGE_GB=<n|unlimited>"; exit 1; }
-	@$(POOL_TOOL) set-quota "$(POOL)" "$(STORAGE_GB)"
+	@$(OPS) $(POOL_TOOL) set-quota "$(POOL)" "$(STORAGE_GB)"
 
 pool-disable:
 	@test -n "$(POOL)" || { echo "usage: make pool-disable POOL=..."; exit 1; }
-	@$(POOL_TOOL) disable "$(POOL)"
+	@$(OPS) $(POOL_TOOL) disable "$(POOL)"
 
 pool-enable:
 	@test -n "$(POOL)" || { echo "usage: make pool-enable POOL=..."; exit 1; }
-	@$(POOL_TOOL) enable "$(POOL)"
+	@$(OPS) $(POOL_TOOL) enable "$(POOL)"
 
 # Drain a deleted/unresolvable pool's QUARANTINED sweep rows by re-pinning
 # them to another pool or the central bucket (D56). Running it ASSERTS the
@@ -163,7 +180,7 @@ pool-enable:
 #   make pool-requeue POOL=smith [TO=<poolId>|central]   (default: central)
 pool-requeue:
 	@test -n "$(POOL)" || { echo "usage: make pool-requeue POOL=... [TO=<poolId>|central]"; exit 1; }
-	@$(POOL_TOOL) requeue "$(POOL)" $(if $(TO),--to "$(TO)")
+	@$(OPS) $(POOL_TOOL) requeue "$(POOL)" $(if $(TO),--to "$(TO)")
 
 oracle-up:
 	docker compose -f docker-compose.oracle.yml up -d --wait
@@ -328,6 +345,18 @@ TF     = tofu -chdir=$(TFDIR)
 TFVARS = ente-sl.tfvars
 TFPLAN = tfplan
 STATE  = $(TFDIR)/terraform.tfstate
+
+# Wrapper for the operator CLIs (invite/pool, D64): assumes the SELECTED env's
+# operator role and sets TABLE_NAME + region so you run `make invite EMAIL=...`
+# with no TABLE_NAME/AWS_PROFILE prefix — just `make profile dev` once. It is a
+# transparent passthrough when AWS_ENDPOINT_URL is set (LocalStack via
+# $(LOCALSTACK_ENV)), so those flows are unchanged. OPERATOR_PROFILE picks which
+# AWS profile's creds assume the role (your deployer profile qualifies — the
+# role trusts the account root and deployer-policy.json grants it
+# sts:AssumeRole); unset uses your default credential chain / exported
+# AWS_PROFILE. HASHING_KEY is still yours to provide for set-storage / pool
+# attach-detach / keys-mode pool-create.
+OPS = $(if $(OPERATOR_PROFILE),AWS_PROFILE=$(OPERATOR_PROFILE) )sh tools/with-operator-role.sh $(TFDIR)
 
 # `make profile <name>` records the choice; bare `make profile` prints it.
 profile:

@@ -94,6 +94,12 @@
       "Resource": "arn:aws:iam::*:role/ente-sl-*"
     },
     {
+      "Sid": "OperatorAssumeRole",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/ente-sl-*-operator"
+    },
+    {
       "Sid": "Events",
       "Effect": "Allow",
       "Action": [

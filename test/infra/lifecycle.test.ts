@@ -463,8 +463,8 @@ describe('storage pool guards (H2, D55)', () => {
 });
 
 describe('config/tofu default agreement (D11)', () => {
-  it('free_plan_storage_bytes matches the config.ts default (10 TiB)', () => {
-    const TEN_TIB = 10 * 1024 ** 4;
+  it('free_plan_storage_bytes matches the config.ts default (1 GiB)', () => {
+    const ONE_GIB = 1024 ** 3;
 
     const tf = readFileSync(join(INFRA, 'modules/compute/variables.tf'), 'utf8');
     const block = tf.slice(tf.indexOf('variable "free_plan_storage_bytes"'));
@@ -472,14 +472,14 @@ describe('config/tofu default agreement (D11)', () => {
 
     const config = readFileSync(join(import.meta.dirname, '../../src/config.ts'), 'utf8');
     const expr = config.match(/FREE_PLAN_STORAGE_BYTES\s*\?\?\s*([0-9*\s.]+)\)/)![1]!;
-    // The default is written as an expression (10 * 1024 ** 4); evaluate the
-    // literal arithmetic rather than duplicating the constant here.
+    // The default is written as an expression (1024 ** 3); evaluate the literal
+    // arithmetic rather than duplicating the constant here.
     const configDefault = Number(
       // eslint-disable-next-line no-new-func
       Function(`"use strict";return (${expr})`)(),
     );
 
-    expect(configDefault).toBe(TEN_TIB);
+    expect(configDefault).toBe(ONE_GIB);
     expect(tfDefault).toBe(configDefault);
   });
 

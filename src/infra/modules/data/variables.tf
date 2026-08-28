@@ -28,3 +28,14 @@ variable "delete_protection" {
   type    = bool
   default = true
 }
+
+# Who may assume the operator role (ente-sl-<env>-operator) that the tools/ CLI
+# runs under — invite.ts and storagePool.ts, which need dynamodb:Scan the
+# execution role lacks. Empty (the default) trusts the ACCOUNT ROOT: the
+# self-host answer, where the operator owns the account and any IAM principal
+# in it that also holds sts:AssumeRole on the role can use it. Set it to
+# specific IAM user / SSO-role ARNs to narrow who can assume it.
+variable "operator_principal_arns" {
+  type    = list(string)
+  default = []
+}

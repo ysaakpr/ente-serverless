@@ -100,10 +100,13 @@ export const configFromEnv = (): Config => ({
   presignPutExpirySeconds: Number(
     process.env.PRESIGN_PUT_EXPIRY_SECONDS ?? process.env.PRESIGN_EXPIRY_SECONDS ?? 24 * 3600,
   ),
-  // 10 TiB by default (decision D11, revised 2026-08-17): it's the user's own
-  // bucket and bill, but a real ceiling beats "unlimited" as a backstop
-  // against a runaway client. Raise it with FREE_PLAN_STORAGE_BYTES.
-  freePlanStorageBytes: Number(process.env.FREE_PLAN_STORAGE_BYTES ?? 10 * 1024 ** 4),
+  // 1 GiB by default (D11, revised 2026-08-28): a deliberately SMALL floor, so
+  // an open/uninvited signup gets only a minimal allowance on the shared
+  // central bucket. Real storage is granted per-user by invite — `make invite
+  // --storage-gb N` writes storageLimitBytes, which overrides this floor
+  // (userStorageBytes = storageLimitBytes ?? freePlanStorageBytes). Change the
+  // global floor with FREE_PLAN_STORAGE_BYTES; increase a person with an invite.
+  freePlanStorageBytes: Number(process.env.FREE_PLAN_STORAGE_BYTES ?? 1024 ** 3),
   maxFileSizeBytes: Number(process.env.MAX_FILE_SIZE_BYTES ?? 10 * 1024 * 1024 * 1024),
   port: Number(process.env.PORT ?? 8080),
   logRequests: process.env.LOG_REQUESTS === '1',
