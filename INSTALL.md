@@ -236,6 +236,10 @@ denied so the deployer can never destroy the photo store.
    `src/infra/deployer-policy.json`.
    - The console may warn that `cloudfront:CreateDistributionWithTags` is
      unrecognized — that is a validator quirk; the action is real. Save anyway.
+   - **The policy evolves with the repo** — re-paste it when you pull (D64
+     added Sid `OperatorAssumeRole`, without which the operator CLI targets
+     under [Inviting users & storage pools](#inviting-users--storage-pools)
+     can't assume the env's operator role).
 3. Create an access key and put it in a **dedicated profile**:
 
 ```bash
@@ -461,8 +465,13 @@ AWS_PROFILE=ente-sl make deploy    # sentinel -> the distribution's real domain
 ```
 
 Prerequisites: `git`, Node ≥ 20 and a recent `npm` (the ente web workspace
-pins npm 11.x), network access to github.com and the npm registry, and disk
-for a ~2 GB workspace install under `dist/`.
+pins npm 11.x), a **Rust toolchain with the wasm target** — the pinned tag
+wasm-pack-builds `rust/bindings/wasm/*` during `npm ci`, so `cargo`, the
+`wasm32-unknown-unknown` target and `wasm-pack` must be on PATH
+(`brew install rustup wasm-pack && rustup-init -y && rustup target add
+wasm32-unknown-unknown`; `build-web` refuses early when `cargo` is missing) —
+network access to github.com and the npm registry, and disk for a ~2 GB
+workspace install under `dist/`.
 
 ```bash
 make build-web                     # clones ente at the PINNED tag (ALBUMS_WEB_TAG
@@ -510,18 +519,47 @@ DECISIONS.md D54/D55). Both are server/CLI-side only: the stock apps see
 byte-identical wire shapes, and with `SIGNUP_MODE` unset and no pool rows the
 server behaves exactly as it did before Phase H.
 
-The CLIs (`tools/invite.ts`, `tools/storagePool.ts`) are env-driven exactly
-like the Lambda. Against LocalStack, prefix the targets with the same
-variables `make dev` injects. Against a real deployment, point them at it
-explicitly:
+The CLIs (`tools/invite.ts`, `tools/storagePool.ts`, `tools/users.ts`) run
+as a **human operator**, never the Lambda — and they need table access the
+deployer deliberately lacks (`dynamodb:Scan` above all). Since D64 every env
+deploys its own least-privilege **operator role** (`ente-sl-<env>-operator`),
+and the make targets assume it for you via `tools/with-operator-role.sh`:
+pick the env once with `make profile dev|test` and run the targets bare —
+the wrapper reads the role ARN, table and region from that env's tofu
+outputs and exports temporary credentials around the tool:
 
 ```bash
-TABLE_NAME=ente-sl-<env> AWS_REGION=<region> AWS_PROFILE=ente-sl \
-HASHING_KEY=<the tfvars value> make invites
+AWS_PROFILE=ente-sl make invites   # assumes ente-sl-<env>-operator automatically
 ```
 
-`HASHING_KEY` is needed only where noted below; everything else works
-without it.
+Worth knowing about the wrapper:
+
+- Your ambient identity needs `sts:AssumeRole` on the operator role —
+  `deployer-policy.json` ships it (Sid `OperatorAssumeRole`); if your
+  deployer user predates D64, re-paste the policy (C3). The account **root
+  user cannot assume roles at all** — use an IAM user/role.
+  `OPERATOR_PROFILE=<profile>` picks different assuming credentials.
+- An env deployed before D64 has no operator role yet — one plan/deploy
+  cycle creates it.
+- **LocalStack is a clean passthrough** (no role, no STS): with
+  `AWS_ENDPOINT_URL` set — the Makefile's LocalStack flow does this — or
+  `ENTE_OPS_NO_ASSUME=1`, the tools run against whatever the environment
+  already points at, exactly as before.
+- `HASHING_KEY=<the tfvars value>` is still yours to supply, and only where
+  noted below (hash-keyed user lookups and keys-mode pool secrets);
+  everything else works without it.
+
+To see **every account with email, usage and limits** (one operator Scan,
+joined with the usage counters):
+
+```bash
+make users          # table view: id, email, state, usage, files, limit, used%, pool, created
+make users JSON=1   # raw JSON
+```
+
+Per-user limits render as the explicit override or `default` — the default
+is the *deployment's* `FREE_PLAN_STORAGE_BYTES`, which your shell may not
+share; the footer prints what it resolved locally.
 
 ### Inviting users (invite-gated signup, D54)
 
@@ -581,8 +619,11 @@ failures:
 - **CORS mirroring the central bucket's browser-PUT rule** (warn): methods
   `GET/PUT/POST/HEAD`, origins `*`, `ExposeHeaders: ETag` — without it
   web/browser uploads fail (D33).
-- **An abort-incomplete-multipart lifecycle rule** (warn) — abandoned
-  multipart uploads otherwise bill forever; the central bucket uses 7 days.
+- **An abort-incomplete-multipart lifecycle rule** (warn) — belt and braces:
+  the server's stale-object sweep aborts uploads whose mint was never
+  committed (D65, within ~2× the presign validity), but the bucket-side rule
+  still catches anything the sweep can't reach (e.g. rows quarantined by
+  broken pool credentials); the central bucket uses 7 days.
 - **Optional but recommended — the GLACIER_IR tier rule**: the server tags
   originals `tier=original` in every bucket, central or pool, so a lifecycle
   rule filtered on that tag (transition to `GLACIER_IR` after **7 or more
@@ -605,9 +646,10 @@ that account that holds a broad AssumeRole grant — the naming convention
 keeps this deployment's reach to roles that explicitly opted in.
 
 The role's trust policy admits the server's Lambda execution role — and the
-operator identity you run the CLI as, since `pool-create` validates with
-*your* credentials — both locked to a shared ExternalId (generate one:
-`openssl rand -hex 16`). Name the **principals**, not the account root:
+**operator role** (`ente-sl-<env>-operator`), since `make pool-create` runs
+the validation *as that role* (D64) — both locked to a shared ExternalId
+(generate one: `openssl rand -hex 16`). Name the **principals**, not the
+account root:
 
 ```json
 {
@@ -618,7 +660,7 @@ operator identity you run the CLI as, since `pool-create` validates with
       "Principal": {
         "AWS": [
           "arn:aws:iam::<server-account>:role/ente-sl-<env>-api",
-          "arn:aws:iam::<server-account>:user/<your-operator-user>"
+          "arn:aws:iam::<server-account>:role/ente-sl-<env>-operator"
         ]
       },
       "Action": "sts:AssumeRole",
@@ -740,13 +782,24 @@ pool's shared cap.
 
 ## Updating a deployment
 
-Code change → redeploy is the same plan/deploy cycle; `make plan` rebuilds the
+Code change → redeploy is the same plan/deploy cycle against the profile you
+selected (`make profile dev|test`, sticky); `make plan` rebuilds the Lambda
 bundles automatically:
 
 ```bash
 AWS_PROFILE=ente-sl make plan     # read it — routine code updates change only the lambdas
 AWS_PROFILE=ente-sl make deploy
 AWS_PROFILE=ente-sl make smoke
+```
+
+The **albums web app is a separate artifact** — `deploy` never touches it.
+Rebuild and re-sync it only when the viewer itself must change: an
+`ALBUMS_WEB_TAG` bump (keep it in lockstep with ORACLE-VERSION, then re-run
+the C13 open-a-real-link verification), a basePath-patch change, or a changed
+`server_url`:
+
+```bash
+make build-web && AWS_PROFILE=ente-sl make deploy-web
 ```
 
 `make outputs` reprints the URLs anytime.
