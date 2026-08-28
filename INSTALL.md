@@ -467,11 +467,14 @@ AWS_PROFILE=ente-sl make deploy    # sentinel -> the distribution's real domain
 Prerequisites: `git`, Node ≥ 20 and a recent `npm` (the ente web workspace
 pins npm 11.x), a **Rust toolchain with the wasm target** — the pinned tag
 wasm-pack-builds `rust/bindings/wasm/*` during `npm ci`, so `cargo`, the
-`wasm32-unknown-unknown` target and `wasm-pack` must be on PATH
+`wasm32-unknown-unknown` target and `wasm-pack` must be available
 (`brew install rustup wasm-pack && rustup-init -y && rustup target add
-wasm32-unknown-unknown`; `build-web` refuses early when `cargo` is missing) —
-network access to github.com and the npm registry, and disk for a ~2 GB
-workspace install under `dist/`.
+wasm32-unknown-unknown`) — network access to github.com and the npm
+registry, and disk for a ~2 GB workspace install under `dist/`. `build-web`
+refuses early when `cargo` is missing; note that **Homebrew installs rustup
+keg-only** (its `cargo` lives in `/opt/homebrew/opt/rustup/bin`, not on
+PATH) — the target adds that directory to PATH itself, so a brew install
+needs no manual PATH edit.
 
 ```bash
 make build-web                     # clones ente at the PINNED tag (ALBUMS_WEB_TAG
