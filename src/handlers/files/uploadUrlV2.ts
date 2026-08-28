@@ -20,6 +20,8 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
+import { recordTempObjects } from '../../domain/staleObjects.ts';
+import { blobsForPool } from '../../domain/storagePools.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
 
 const MIN_PART_SIZE = 5 * 1024 * 1024;
@@ -40,14 +42,16 @@ export const getUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
   if (body.contentLength <= 0) throw errBadRequestSentinel();
   if (body.contentLength > deps.config.maxFileSizeBytes) throw errBadRequestSentinel();
-  await assertQuota(deps, userId, body.contentLength);
+  const ctx = await assertQuota(deps, userId, body.contentLength);
+  const blobs = await blobsForPool(deps, ctx.pool); // current pool (H2, D55)
 
   const objectKey = `${userId}/${deps.rand.uuid()}`;
-  const url = await deps.blobs.presignPut(
+  const url = await blobs.presignPut(
     objectKey,
     deps.config.presignPutExpirySeconds,
     body.contentMD5,
   );
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey }]); // museum AddTempObjectKey (D65)
   return c.json({ objectKey, url });
 };
 
@@ -68,15 +72,18 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const partCount = Math.ceil(body.contentLength / body.partLength);
   if (partCount > MAX_MULTIPART_PART_COUNT) throw errBadRequestSentinel();
   if (body.partMd5s && body.partMd5s.length !== partCount) throw errBadRequestSentinel();
-  await assertQuota(deps, userId, null);
+  const ctx = await assertQuota(deps, userId, null);
+  const blobs = await blobsForPool(deps, ctx.pool); // current pool (H2, D55)
 
   const objectKey = `${userId}/${deps.rand.uuid()}`;
-  const multipart = await deps.blobs.createMultipart(
+  const multipart = await blobs.createMultipart(
     objectKey,
     partCount,
     deps.config.presignPutExpirySeconds,
     body.partMd5s ?? undefined,
   );
+  // museum AddMultipartTempObjectKey — the stale sweep aborts + deletes (D65)
+  await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey, uploadID: multipart.uploadID }]);
   return c.json({
     objectKey,
     partURLs: multipart.partUrls,

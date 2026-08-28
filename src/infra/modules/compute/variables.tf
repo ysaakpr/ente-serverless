@@ -36,7 +36,7 @@ variable "alarm_email" {
 
 variable "free_plan_storage_bytes" {
   type    = number
-  default = 10995116277760 # 10 TiB (decision D11, revised 2026-08-17); museum's constant is 10 GiB
+  default = 1073741824 # 1 GiB (D11, revised 2026-08-28): minimal default floor; increase per-user by invite (storageLimitBytes). museum's constant is 10 GiB
 }
 
 # Security review 2026-08-17, finding 4 — the three spend/abuse knobs.
@@ -65,4 +65,52 @@ variable "monthly_budget_usd" {
 variable "origin_secret" {
   type      = string
   sensitive = true
+}
+
+# Public album links (Phase F, D52; consolidated D58). No default: the env
+# root must wire it — normally the deployment's own distribution URL (the
+# albums app rides the same distribution as the API) via the make-injected
+# albums_url_hint — because a silently-wrong fallback here would mint share
+# links pointing at ente's own albums.ente.com.
+variable "albums_url" {
+  type = string
+}
+
+# Plan §4.2: a public presigned GET is a bearer URL held by an anonymous
+# party, so its validity is minutes-to-an-hour, not the authed 7 days. The
+# default must agree with config.ts (guard-tested, same as D11).
+variable "presign_public_get_expiry_seconds" {
+  type    = number
+  default = 3600
+}
+
+# Plan §4.1d per-link daily ceilings (D51): 429 once exceeded, 0 disables.
+# Defaults must agree with config.ts (guard-tested).
+variable "public_link_daily_downloads" {
+  type    = number
+  default = 10000
+}
+
+variable "public_link_daily_uploads" {
+  type    = number
+  default = 1000
+}
+
+variable "public_link_daily_devices" {
+  type    = number
+  default = 1000
+}
+
+# Invite-gated signup (H1, D54; wired as a var in D56 — previously a manual
+# environment-block edit). "open" is config.ts's default (guard-tested, same
+# D11 discipline); "invite" admits only emails with an unconsumed INVITE# row.
+# Only account CREATION is gated — login and change-email never are.
+variable "signup_mode" {
+  type    = string
+  default = "open"
+
+  validation {
+    condition     = contains(["open", "invite"], var.signup_mode)
+    error_message = "signup_mode must be \"open\" or \"invite\"."
+  }
 }

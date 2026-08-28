@@ -40,13 +40,96 @@ export const keys = {
   remoteStore: (userId: number, key: string) => ({ pk: `USER#${userId}`, sk: `STORE#${key}` }),
   /** Store-and-ignore push registration (one row per user). */
   pushToken: (userId: number) => ({ pk: `USER#${userId}`, sk: 'PUSHTOKEN' }),
+
+  // --- Sharing + public links (PENDING-FEATURES-PLAN §2 Phase A, D48) ---
+  // Rollback rule: none of these rows may set gsi1/gsi2/gsi3 attributes. The
+  // GSIs are sparse, so staying out of them keeps every pre-sharing query
+  // path blind to the new rows — old code deployed against a table containing
+  // them behaves exactly as before.
+  /** Participant row, collection side: who can see COL#<id>. */
+  collectionSharee: (collectionId: number, userId: number) => ({
+    pk: `COL#${collectionId}`,
+    sk: `SHAREE#${userId}`,
+  }),
+  /** Participant row, user side (dual-written): collections shared with me. */
+  userSharedCollection: (userId: number, collectionId: number) => ({
+    pk: `USER#${userId}`,
+    sk: `SHARED#${collectionId}`,
+  }),
+  /** Public link token → collection: a plain GetItem. tokenHash only — the
+   * plaintext token never lands at rest (same discipline as TOKEN# rows). */
+  publicLinkToken: (tokenHash: string) => ({ pk: `PUBTOKEN#${tokenHash}`, sk: 'META' }),
+  /** Per-collection pointer to its active link (holds the tokenHash). */
+  collectionLink: (collectionId: number) => ({ pk: `COL#${collectionId}`, sk: 'LINK' }),
+  /** Per-user unshare tombstone for the sharee's /collections/v2 feed
+   * (written by sharing.ts removeSharee/removeAllSharees since Phase C; a
+   * re-share deletes it). The sk deliberately does NOT match the `SHARED#`
+   * prefix, so live listings never see tombstones. */
+  sharedTombstone: (userId: number, collectionId: number) => ({
+    pk: `USER#${userId}`,
+    sk: `SHAREDTOMB#${collectionId}`,
+  }),
+
+  // --- Public-link serving rows (Phase D, D51). All live under the link's
+  // PUBTOKEN# partition so disabling a link can purge them with one Query, and
+  // none set gsi attributes (the D48 rollback rule).
+  /** One admitted device per (ip, ua) — museum public_collection_access_history
+   * (unique_access_sid_ip_ua). Existence = admitted. */
+  publicLinkDevice: (tokenHash: string, deviceHash: string) => ({
+    pk: `PUBTOKEN#${tokenHash}`,
+    sk: `DEVICE#${deviceHash}`,
+  }),
+  /** Atomic unique-device counter (museum counts the history rows instead). */
+  publicLinkDeviceCount: (tokenHash: string) => ({ pk: `PUBTOKEN#${tokenHash}`, sk: 'DEVICES' }),
+  /** verify-password wrong-attempt cap per (link, ip) — OTT-cap pattern. */
+  publicLinkPwAttempts: (tokenHash: string, ipHash: string) => ({
+    pk: `PUBTOKEN#${tokenHash}`,
+    sk: `PWATTEMPTS#${ipHash}`,
+  }),
+  /** Per-link daily download/upload ceilings (plan §4.1d), one row per UTC day. */
+  publicLinkCeiling: (tokenHash: string, day: string) => ({
+    pk: `PUBTOKEN#${tokenHash}`,
+    sk: `CEIL#${day}`,
+  }),
+
+  // --- Invite-gated signup (Phase H1, D54). Ops-provisioned rows only —
+  // written by tools/invite.ts, read at signup; no client route creates them.
+  // Keyed by the LOWERCASED email in plaintext, unlike EMAIL# guards (hashed):
+  // an operator must be able to list and revoke invites without HASHING_KEY,
+  // and an invite is operator data, not a user secret. No gsi attributes
+  // (the D48 rollback rule holds for every new row type).
+  invite: (lowercasedEmail: string) => ({ pk: `INVITE#${lowercasedEmail}`, sk: 'META' }),
+
+  // --- BYO storage pools (Phase H2, D55). Ops-provisioned rows only — written
+  // by tools/storagePool.ts, read wherever blobs are resolved; no client route
+  // creates them. No gsi attributes (the D48 rollback rule holds), so `main`
+  // deployed against a table with pool rows behaves exactly as before —
+  // provided no user row carries storagePoolId yet (detach first).
+  /** Pool descriptor: bucket, region, credentials (encrypted), quota. */
+  storagePool: (poolId: string) => ({ pk: `POOL#${poolId}`, sk: 'META' }),
+  /** Shared usage counter, mirrored atomically with the per-user USAGE row. */
+  poolUsage: (poolId: string) => ({ pk: `POOL#${poolId}`, sk: 'USAGE' }),
+};
+
+/** sk prefixes for partition listings over the sharing rows. */
+export const skPrefixes = {
+  /** All sharees of one collection (COL#<id> partition). */
+  sharee: 'SHAREE#',
+  /** All collections shared with one user (USER#<id> partition). */
+  sharedWithUser: 'SHARED#',
+  /** All unshare tombstones for one user (USER#<id> partition). Distinct from
+   * `SHARED#` — 'SHAREDTOMB#'.startsWith('SHARED#') is false (T ≠ #), so live
+   * listings never see tombstones. */
+  sharedTombstone: 'SHAREDTOMB#',
 };
 
 // GSI partitions
 export const gsi = {
   /** gsi1: file membership + diff feed for one collection. */
   collectionDiff: (collectionId: number) => `COL#${collectionId}#DIFF`,
-  /** gsi2: all collections visible to a user, by updationTime. */
+  /** gsi2: collections OWNED by a user, by updationTime. Shared-with-me
+   * visibility is NOT here — it lives in the `SHARED#` reverse rows above,
+   * merged at query time (Phase C). */
   userCollections: (userId: number) => `USER#${userId}#COLS`,
   /** gsi3: tokens per user / trash diff per user. */
   userTokens: (userId: number) => `USER#${userId}#TOKENS`,

@@ -72,17 +72,29 @@ source says Y — source won).
   `{storageBonuses: []}`, billing free plan `{storage, duration: 100,
   period: "days"}`, subscription id = userID. Shapes from source; self-host
   capture should be copied verbatim once the oracle runs.
-- **D11 [DECIDED 2026-08-16, REVISED 2026-08-17] Free plan storage default =
-  10 TiB.** Museum's constant is 10 GiB; ours stays env-configurable
-  (`FREE_PLAN_STORAGE_BYTES`) but defaults high, because it's the user's own
-  bucket and bill and quota should not interfere on a self-host. Originally
-  1 PiB ("effectively unlimited"); lowered to **10 TiB = 10995116277760** on
-  request — still far past any realistic library, but a real ceiling rather
-  than a number chosen to never trigger, so a runaway client hits 426 instead
-  of an S3 invoice. Binary units throughout, matching museum's 10 GiB
-  (10737418240) and the rest of this repo. Set in config.ts and the tofu
-  variable `free_plan_storage_bytes`; the 426 quota path stays covered by
-  tests via the override.
+- **D11 [DECIDED 2026-08-16, REVISED 2026-08-17 → 10 TiB, REVISED 2026-08-28 →
+  1 GiB] Free plan storage default = 1 GiB; increase per-user by invite.**
+  Museum's constant is 10 GiB; ours stays env-configurable
+  (`FREE_PLAN_STORAGE_BYTES`). The default is now a deliberately SMALL floor: an
+  open/uninvited signup gets **1 GiB = 1073741824** on the shared central
+  bucket, and real storage is granted per-user by invite — `make invite
+  --storage-gb N` writes `storageLimitBytes` on the invite row, inherited to the
+  user row at signup, and `userStorageBytes` resolves `storageLimitBytes ??
+  freePlanStorageBytes`, so the grant overrides the floor. History: originally
+  1 PiB ("effectively unlimited"), then 10 TiB (a real ceiling vs a runaway
+  client), now 1 GiB — the shift is from "the user brings their own bucket,
+  don't let quota interfere" (BYO pools, D55) to "storage is granted
+  deliberately, gate it at the door". Binary units throughout (museum's 10 GiB =
+  10737418240). Set in config.ts and the tofu variable
+  `free_plan_storage_bytes`, guard-matched by lifecycle.test.ts; the 426 quota
+  path stays covered by tests via the override.
+  - Consequence: `userStorageBytes` reads config per request, so a deploy
+    re-quotas EVERY existing default-quota user (no explicit `storageLimitBytes`)
+    the moment it lands. An already-signed-up user who has uploaded more than
+    1 GiB and was never given an explicit limit is over quota afterwards —
+    reads still work, new uploads 426 — until you `make set-storage` /
+    `make invite --storage-gb N` them a real allowance. Users on an explicit
+    `storageLimitBytes` (any invite that set `--storage-gb`) are unaffected.
 
 ## Corrections to the build plan (source beat the plan doc)
 
@@ -737,6 +749,1233 @@ source says Y — source won).
   - *Guarded* by `test/infra/lifecycle.test.ts` (`pricing-plan subscribes THIS
     distribution + web ACL to the FREE tier`), including that the target can
     never create a paid tier.
+
+- **D48 [SCHEMA 2026-08-27] Sharing/public-link lookups use explicit
+  reverse-lookup partitions (PENDING-FEATURES-PLAN §2 Option 2), NOT a new
+  `gsi4`.** Phase A schema foundation, decided before any sharing handler
+  exists so it is cut once. Three parts:
+  - **Reverse partitions over gsi4.** "Collections shared with me" is a dual
+    write: `COL#<id>/SHAREE#<userID>` + `USER#<userID>/SHARED#<colID>`, both
+    sides applied in one `transactWrite` (the port primitive already existed;
+    it now also refuses batches past DynamoDB's 100-item TransactWriteItems
+    ceiling, both adapters). "Token → collection" is its own PK
+    (`PUBTOKEN#<tokenHash>/META`, a plain GetItem) plus a `COL#<id>/LINK`
+    pointer so the owner finds the active link. A `gsi4` would have been
+    cleaner to query but costs an online backfill on the prod table, mirrored
+    memory-adapter + tofu changes, and the last cheap index — the dual-write
+    tax is paid instead, and *only* `src/domain/sharing.ts` may write the
+    pairs (no handler touches one side directly, so the sides cannot drift).
+    `USER#<id>/SHAREDTOMB#<colID>` is reserved for the Phase C per-user
+    unshare tombstone (deliberately NOT under the `SHARED#` prefix, so live
+    listings never see tombstones); nothing writes it yet.
+  - **Link tokens are hashed at rest** (sha256, the `tokenHash` discipline
+    session tokens already follow). Unlike session tokens there is no
+    list-sessions-style route that must return the plaintext, so only the
+    hash is stored; the plaintext exists once, in the create response, and a
+    disabled link is never resurrected — re-enabling mints a new token
+    (plan §4.3 margin against leaked URLs).
+  - **Rollback rule: new row types set NO gsi1/gsi2/gsi3 attributes.** The
+    GSIs are sparse, so sharee/link/tombstone rows are invisible to every
+    pre-sharing query path by construction — code deployed from `main`
+    against a table already containing Phase A rows behaves exactly as
+    today. Enforced by the "rollback rule" test in
+    `test/unit/sharing.test.ts`; the key shapes live in `src/domain/model.ts`
+    with the rule stated where the next row type will be added.
+
+- **D49 [AUTHZ 2026-08-27] Phase B authz seam: role-aware access resolution,
+  with museum re-verified from source where the plan's audit was wrong.**
+  `resolveCollectionAccess` (src/domain/collections.ts) ports museum's access
+  controller (pkg/controller/access/collection.go GetCollection) including its
+  check order and the `VerifyOwner` short-circuit; `getOwnedCollection` is now
+  a thin owner-requiring wrapper, so owner-only routes are byte-identical.
+  Judgment calls, each pinned against museum source fetched 2026-08-27
+  (ente-io/ente main — the pinned oracle image is frozen 2026-08-16 main and
+  the cited lines predate the freeze):
+  - **removeFilesV3's dead branch became museum's real matrix**
+    (file_action.go isRemoveAllowed): files owned by the COLLECTION OWNER are
+    never removable via this endpoint — 400 for everyone (owner included;
+    clients move or trash instead); past that gate the owner removes any
+    sharee-owned files, and a sharee removes only files they own (403
+    otherwise). Museum's ADMIN remove-suggestion flow is out of scope: no code
+    path here can mint an ADMIN participant row, so `CollectionRole` models
+    OWNER/COLLABORATOR/VIEWER only. The old test locking the unconditional 400
+    was rewritten in the same commit (plan §4.8).
+  - **/files/info did NOT get "filter-to-accessible".** The
+    PENDING-FEATURES-PLAN §1 audit claimed museum filters to accessible files;
+    museum source says otherwise — GetFileInfo (pkg/controller/file.go) gates
+    on FileRepo.VerifyFileOwner, pure strict ownership (400 unknown/partial,
+    403 foreign), sharing or not. Strict ownership stands unchanged;
+    capture-gated (a capture showing sharee access flips this).
+  - **File commit stays owner-only.** The plan expected collaborators to
+    commit into shared collections; museum's validateFileCreateOrUpdateReq
+    says "Creating a file requires collection ownership, not shared access"
+    (the check carries a "Warning: Do not remove" in pre-prune history). The
+    collaborator flow is commit-into-own-collection + /collections/add-files
+    (AddFiles allows Role.CanAdd() = OWNER|COLLABORATOR|ADMIN). Quota and
+    object-key attribution stay with the uploader — unchanged.
+  - **Non-members read 403, museum reads 404.** On role-resolved paths
+    (getById, diff v2, add-files, remove-files v3) museum surfaces
+    non-membership as sql.ErrNoRows from GetCollectionShareeRole → 404 via
+    handler.go's status mapping. This repo throws errPermissionDenied (403),
+    matching the pre-sharing owner-only behaviour and the existing locked
+    tests. Deliberate, capture-gated: if the capture-diff harness confirms
+    museum's 404, flip the resolver's non-member throw and the tests together.
+  - **Deleted-collection diffs still serve tombstones to the owner.** Museum
+    GetDiffV2 passes IncludeDeleted:false (deleted → 404); this repo keeps the
+    pre-Phase-B behaviour (includeDeleted:true) because the trash replay gate
+    diffs deleted albums to convergence. Capture-gated with the same rule.
+  - **getAccessibleFile's sharee branch** ports the accessible-object SQL
+    (pkg/repo/object.go GetAccessibleObjectWithDCs): owner, else any live
+    FILE-LINKS row whose collection the caller is sharee of (getSharee, one
+    GetItem) or owns. One simplification: museum's owner branch technically
+    requires a live collection_shares row with from_user_id = actor; this repo
+    grants the collection owner directly, so an owner who unshared everyone
+    keeps reading a collaborator's still-linked file where museum would 404 —
+    strictly more permissive for exactly the user the E2EE model already
+    trusts with the collection key. Non-members and unknown ids stay 404
+    (enumeration resistance preserved).
+
+- **D50 [SHARING 2026-08-27] Phase C: collaborator share endpoints + the
+  sharee sync feed, pinned against museum source fetched 2026-08-27
+  (pkg/api/collection.go, pkg/controller/collections/share.go +
+  key_validation.go + diff.go, pkg/repo/collection.go, ente/collection.go —
+  the pinned oracle image is frozen 2026-08-16, so anything newer than the
+  freeze is flagged capture-gated below).** Routes are museum's:
+  `POST /collections/share`, `POST /collections/unshare`,
+  `POST /collections/leave/:collectionID`, `GET /collections/sharees`, all
+  answering `{"sharees":[{id,email,name:"",role}]}` where museum does.
+  Judgment calls:
+  - **The per-user unshare tombstone is a `SHAREDTOMB#` row, and its feed
+    entry reuses the blanked global-tombstone shape.** Museum has no separate
+    tombstone: the collection_shares row itself flips `is_deleted` and the
+    sharee-feed scan emits it with the collection's live fields, the share's
+    encryptedKey, owner email blanked, and `sharees`/`publicURLs` as `[]`.
+    This repo emits the pre-existing blanked shape (key material empty,
+    sharees/publicURLs null) — clients act only on `id`+`isDeleted`.
+    Capture-gated. Related divergence: museum's shared-feed join has NO
+    is_deleted filter, so a stale unshare re-surfaces whenever the collection
+    is later restamped; ours surfaces once per tombstone stamp (re-stamped on
+    repeat removals). Idempotent either way; capture-gated.
+  - **The sharee's live feed entry is museum's scan, field for field**
+    (GetCollectionsSharedWithUser): `encryptedKey` = the share row's wrapped
+    key with NO `keyDecryptionNonce` (never selected; omitempty; sealed boxes
+    need no nonce), owner block carries the real owner's email, `attributes`
+    is the zero struct `{"version":0}`, the owner's private magicMetadata is
+    withheld while pubMagicMetadata passes, and `sharees` is the full live
+    list including the caller. `sharedAt` is stored (first-share time, kept on
+    live re-share, re-stamped on resurrection — the ON CONFLICT CASE) and
+    emitted; the field may postdate the frozen oracle — capture-gated.
+    `sharedMagicMetadata` and the plain-name legacy column have no equivalent
+    here (no sharee-magic-metadata endpoint yet — Phase E at the earliest).
+  - **GET /collections/:id now swaps in the sharee's wrapped key** (museum
+    GetWithSharingDetailsForUser) while the collection's own
+    keyDecryptionNonce rides along unchanged — museum's exact quirk. Sharees
+    lists are populated for every caller on getById and both feed halves;
+    the create response keeps `sharees: null` (museum returns the fresh
+    struct, Sharees never set).
+  - **publicURLs stays null everywhere until Phase D.** Museum emits `[]` on
+    both v2 feed halves and null only on a link-less getById, then filters
+    links for non-owner roles (FilterPublicURLsForRole — seam comment left in
+    collectionToJson). Pre-sharing behaviour kept; capture-gated with Phase D.
+    Same call for the owned-feed owner block: museum's owned scan leaves
+    owner.email "", this repo has always filled it — kept, capture-gated.
+  - **Role menu is VIEWER|COLLABORATOR; ADMIN is 400.** Museum's repo accepts
+    ADMIN on share (and 500s on unknown strings); nothing in this repo can
+    honour an ADMIN row (D49), so zod refuses it as 400. Capture-gated.
+    Sealed-key validation matches museum's plain-error-to-bare-500 mapping
+    (validateSealedCollectionKey: exactly 80 bytes), including a MISSING
+    encryptedKey (not binding-required upstream → 500, not 400).
+    AllowParticipantSharing verified from source: favorites ARE shareable;
+    uncategorized only as VIEWER. Share carries NO app-mismatch check in
+    museum (ErrInvalidApp is create-time only) — none added, per the Phase B
+    handoff question. Sharing a DELETED collection: museum's repo.Get does
+    not filter is_deleted so it would proceed; this repo 404s — capture-gated.
+  - **Leave removes the leaver's OWN files from the collection** — verified in
+    source (Leave → UnShare → UnShareContext's collection_files update), same
+    composite as unshare (`revokeShareeAccess`: row pair + tombstone in one
+    transaction, then the sharee's link tombstones, then a collection
+    restamp). Owner-leave is 403, leaving a collection never shared with you
+    is a 200 no-op, both museum-exact.
+  - **Cascades.** deleteCollectionV3 now (a) trashes only OWNER-owned files
+    and merely unlinks sharee-owned ones (museum TrashV3 +
+    removeAllFilesAddedByOthers — the old code would have trashed a
+    collaborator's file into the owner's trash), and (b) removes + feed-
+    tombstones every sharee (museum ScheduleDelete's collection_shares
+    UPDATE), chunked at 33 sharees per transaction (3 ops each, under
+    MAX_TRANSACT_OPS; each sharee's ops stay in one chunk — only the batch as
+    a whole is non-atomic past 33, where museum's single SQL UPDATE is).
+    Account deletion (reapUserData) revokes both directions — collections
+    shared WITH the user via the full unshare composite (their files leave
+    others' albums too), collections the user OWNED via removeAllSharees —
+    matching ResetUserSharingAccess; cast/social/link cleanup has no
+    equivalent surface here yet. Best-effort like the rest of the reaper.
+  - Non-member 403-vs-404 stays as D49 left it (this repo 403s), now also
+    covering the post-unshare probes in the new tests.
+
+- **D51 [SHARING 2026-08-27] Phase D: public album links end to end —
+  share-url management, the /public-collection serving surface, collect
+  uploads, and the plan-§4.1 abuse controls. Pinned against museum source
+  fetched 2026-08-27 (ente-io/ente main: cmd/museum/main.go,
+  pkg/api/public_collection.go + collection.go, pkg/controller/public/
+  collection_link.go + link_common.go + link_device_token.go,
+  pkg/controller/collections/share.go, pkg/repo/public/collection_link.go,
+  pkg/middleware/collection_link.go, ente/public_collection.go, ente/jwt;
+  where the frozen 2026-08-16 oracle revision ba654ea differs it was diffed
+  and the FROZEN behaviour kept — noted per item).** Routes:
+  POST/PUT `/collections/share-url`, DELETE `/collections/share-url/:id`
+  (response `{"result": PublicURL}` / `{"result": PublicURL}` / bare 200),
+  POST `/collections/join-link` (authed + access token), and the public group
+  behind the X-Auth-Access-Token middleware: GET `/public-collection/info`,
+  `/diff`, `/files/preview/:id`, `/files/thumbnail/v3/:id`,
+  `/files/download/:id`, `/files/download/v3/:id`, POST `/verify-password`,
+  `/upload-url`, `/multipart-upload-url`, `/file`. Judgment calls:
+  - **D48's "only the token hash is stored" is PARTIALLY REVERSED.** Its
+    premise ("no route must return the plaintext") is false: museum re-emits
+    the full token-bearing URL (`<apps.public-albums>/?t=<token>`) in
+    `publicURLs` on the owned feed, the sharee feed and getById
+    (repo/collection.go GetCollectionToActivePublicURLMap + the owned-feed
+    join). The PUBTOKEN row therefore now stores the plaintext token as an
+    attribute — the exact session-token discipline of tokens.ts (hash-keyed
+    row, plaintext alongside; museum stores plaintext outright). The rewritten
+    test asserts the plaintext appears in no key, only on the hash-keyed row.
+  - **Token format**: 10 chars uniform over the unambiguous 32-char uppercase
+    alphanumeric alphabet (50 bits from crypto rand) — same length/shape as
+    museum's `strings.ToUpper(shortuuid.New()[0:10])` and at least its
+    effective entropy. A create on a collection with an active link returns
+    THAT link, 200 (museum's ErrActiveLinkAlreadyExists path) — even when the
+    existing link is expired ("active" upstream only means not disabled, so
+    expired links keep emitting in publicURLs and stay updatable). validTill
+    is clock-checked on UPDATE only, never on create — upstream quirk, kept.
+  - **PublicURL JSON** field-for-field per ente/public_collection.go:
+    nonce/memLimit/opsLimit only on passworded links, minRole omitempty,
+    passwordEnabled keyed on the nonce (the repo scans do that; the update
+    path's PassHash-based computation is equivalent since the four move
+    together here). The `/info` variant is museum's "limited info" scrub:
+    flags + KDF params only, url/deviceLimit/validTill as zero values —
+    a viewer never gets the token echoed back. minRole is accepted on update
+    (VIEWER/COLLABORATOR/ADMIN/OWNER — IsValidShareRole) and filters
+    feed/getById visibility by role rank (FilterPublicURLsForRole); a sharee
+    whose role satisfies it DOES see the token-bearing URL, as upstream.
+  - **Owner email is blanked on `/public-collection/info`** (museum repo.Get
+    never selects it) — the one place collectionToJson's always-filled owner
+    email (D50) must not leak, so the handler builds the JSON itself.
+    referralCode rides the storage-bonus stub → `""` (museum ignores the
+    GetOrCreateReferralCode error; zero value on that path).
+  - **Middleware order + error bodies verbatim** from
+    pkg/middleware/collection_link.go: missing token 401 {"error":"missing
+    accessToken","context":"album_link"}; unknown 401 {"error":"invalid
+    token"} (one GetItem — plan §4.1b cheap-fail); disabled 410
+    {"error":"disabled token"}; expired 410 {"error":"expired token"};
+    password gate 401 {"error":{}} (gin marshals the Go error to {}) with
+    /info and /verify-password whitelisted so clients can fetch KDF params.
+    NOT ported: the owner-subscription check (billing is stubbed active, D34
+    — including the free-user device-limit clamp, the only frozen-vs-main
+    middleware diff) and custom-domain Origin validation.
+  - **Device limit**: museum-exact mechanics — a device is (client IP, UA);
+    admission happens ONLY on /info and /diff; a device that ever got in
+    stays in; deviceLimit 0 = unlimited but unique devices are still
+    recorded; the settable max 50 is enforced as 500
+    (DeviceLimitThreshold×10 — quirk, reproduced); over-limit → 403
+    {"code":"LINK_DEVICE_LIMIT_EXCEEDED",...}. Implemented as one DEVICE# row
+    per device + an atomic DEVICES counter under the PUBTOKEN partition (one
+    transactWrite — museum's SELECT-then-INSERT is racier). The link-device
+    JWT rides too: X-Auth-Link-Device-Token in, X-**Ente**-Link-Device-Token
+    out (the FROZEN header name; current main renamed it to
+    X-Link-Device-Token post-freeze — frozen wins), 365-day expiry capped at
+    validTill, refreshed inside 30 days, claims per LinkDeviceClaim with
+    linkID = tokenHash (upstream uses the row's serial id; the claim is
+    opaque to clients). Discord abuse alerts and the CF-worker IP skip have
+    no equivalent here.
+  - **JWT**: new src/lib/jwt.ts, HS256 compact JWS mirroring golang-jwt v4 as
+    museum uses it — NO registered exp/iat handling; claims carry
+    `expiryTime` in epoch MICROS checked by the caller (LinkPasswordClaim
+    {passKey, expiryTime}, 30-day validity). Museum signs with its own
+    `jwt.secret` config; this repo derives the signing key as keyed blake2b
+    of a fixed context over HASHING_KEY (no second secret to provision, and
+    the email-hash / JWT domains stay separated). verify-password compares
+    the client-derived argon2id passHash constant-time; its wire shapes are
+    museum's (missing body 400 {}, unconfigured 400 {}, wrong 401 {}, match
+    {"jwtToken"}). Join-link reproduces museum's quirky split: a
+    missing/garbled JWT is a bare 500 (golang-jwt parse error propagates as a
+    plain error), a valid JWT with a stale passKey is 401.
+  - **GetPublicDiff**: same 2500/cluster pagination spine as the authed diff
+    (extracted to domain/files.ts collectionDiffPage), with magicMetadata
+    stripped per entry. Museum's action-marker→isDeleted and
+    `encryptedData=="-"` stale-row conversions have no equivalent rows here
+    (links tombstone via isDeleted directly). Missing sinceTime is 400
+    BAD_REQUEST (museum ParseInt), unlike the authed diff's default-to-0.
+  - **Collect**: only museum's POST routes exist publicly (upload-url,
+    multipart-upload-url — partMd5s REQUIRED there, bare 400 on absence —
+    and file). Attribution flips to the link owner: object keys under
+    `<ownerID>/`, quota asserted/charged against the owner, file.OwnerID =
+    owner and file.ID forced 0 (no updates through a link), body.collectionID
+    must equal the link's (400 "can only update to associated collection").
+    enableCollect=false → 405 PUBLIC_COLLECT_DISABLED on all three.
+  - **DIVERGENCE — flags are access-control, not DRM (plan §4.2/§4.3).**
+    `enableDownload:false` is enforced server-side as 403 {} on ORIGINAL
+    downloads (both variants) while previews still serve — museum does NOT
+    enforce the flag at all (client-honoured; verified in
+    GetPublicOrCastFileURL → getSignedURLForCollectionObject, no flag check).
+    Documented limits, deliberately: previews must stay decryptable for the
+    page to render; presigned GETs are bearer URLs for their lifetime (public
+    presigns use a new short knob, below); a link-holder who synced keeps the
+    collection key forever — revocation is shallow by protocol design, the
+    one real remedy is the client-side remove-files-and-recreate-album flow.
+    Disable kills the token immediately at the API but not bytes already
+    fetched; a disabled token is never resurrected — re-enable mints a new
+    one.
+  - **DIVERGENCE — abuse ceilings with no museum equivalent (plan §4.1).**
+    (a) verify-password wrong-attempt cap: 20 per (tokenHash, IP) per sliding
+    hour → 429 {} (the OTT-cap pattern, atomic ADD-then-judge, TTL'd row);
+    museum leans on its per-IP gin rate limiter, which this stack lacks.
+    (b) Per-link daily ceilings: downloads (presign issuance, previews
+    included) and uploads (upload-url mints + commits) against
+    PUBLIC_LINK_DAILY_DOWNLOADS (default 10000) / PUBLIC_LINK_DAILY_UPLOADS
+    (default 1000), 0 = off → 429 {}. Counter rows live under the PUBTOKEN
+    partition, TTL'd, no gsi attributes (D48 rollback rule holds for every
+    new row type).
+  - **Config knobs added**: ALBUMS_URL (museum apps.public-albums, default
+    https://albums.ente.com — main.go SetDefault, verified at the frozen
+    revision), PRESIGN_PUBLIC_GET_EXPIRY_SECONDS (default 3600 — the plan
+    §4.2 short public presign, vs 7d authed), and the two daily ceilings.
+  - **Lifecycle (plan §4.6, done now not Phase E)**: deleteCollectionV3
+    disables the link BEFORE tombstoning (museum TrashV3 order) and
+    reapUserData disables links on every owned collection (museum
+    HandleAccountDeletion); disableLink also purges the link's device/attempt/
+    ceiling rows best-effort. TTL backstop: EXPIRING link rows carry the
+    table's `ttl` attribute at validTill + 90 days (so recently expired links
+    still emit in publicURLs and can be extended, museum-style) — middleware
+    stays the enforcement; disabled rows have their ttl STRIPPED so dead
+    tokens never get reaped into a 401 (they must answer 410 forever).
+  - **Deliberately unimplemented public routes** (404, never hollow 200s —
+    plan §3 caveat 5): the social/comments/reactions/anon-identity group
+    (Phase E scope with the D27 stubs), and GET /files/data/fetch +
+    /files/data/preview (public HLS video-data — the albums app degrades to
+    original download; revisit with a capture if the pinned albums build
+    breaks on it). POST /public-collection/report-abuse does NOT exist
+    upstream anymore (absent from main.go at the frozen revision AND current
+    main — only the request struct lingers in ente/public_collection.go), so
+    it is deliberately NOT implemented despite appearing in older docs; the
+    ground rule "never invent a shape" wins.
+  - Free-user device-limit clamping, locker URLs (`share.ente.com/c/<t>`),
+    Discord alerts, and the middleware's response cache are museum features
+    with no meaning here (billing stubbed, photos-only, single-user scale).
+
+- **D52 [SHARING 2026-08-27] Phase F: albums web hosting infra — tofu web
+  module, build/deploy pipeline for the pinned albums viewer, and the
+  plan-§4.1a edge posture for /public-collection/*. Infra + tooling only; no
+  deploy performed (M7 discipline holds).** Judgment calls:
+  - **Module placement: a fourth module, `src/infra/modules/web`,** beside
+    data/compute/edge rather than inside edge — it shares edge's technology
+    (CloudFront) but not its lifecycle or subject (edge fronts the API and is
+    pinned to the D47 FREE-plan shape; web is an independent static site the
+    operator re-syncs at will). Stateless like compute: the bucket holds only
+    `make build-web` output, so it carries `force_destroy = true`, no
+    versioning, no prevent_destroy, and `make destroy` now targets module.web
+    too — tearing it down costs a rebuild, never a memory.
+  - **A SECOND distribution, not a new origin/behavior on the API one.**
+    Three reasons: ALBUMS_URL is a different BASE URL by museum contract
+    (apps.public-albums vs the API host — path-based routing on one domain
+    would diverge from every upstream client's URL parsing); the dev env uses
+    default *.cloudfront.net domains, and one distribution has exactly one of
+    those; and the API distribution + its web ACL are the exact resource pair
+    the D47 FREE subscription was created against — mutating it risks the
+    undocumented eligibility gates D47 already tripped over. The albums
+    distribution stays on PAY-AS-YOU-GO (PriceClass_100, no WAF): static
+    assets sit inside CloudFront's perpetual free tier, a web ACL is $5/mo
+    flat, and a cached static origin has no per-request compute to protect.
+  - **OAC on the web bucket** — the long-standing "no OAC" decision transfers
+    from immich-serverless for the LAMBDA origin only (IAM auth breaks the
+    POST body hash); an S3 origin takes OAC cleanly, so the bucket is fully
+    private (public-access-block ×4) with s3:GetObject granted only to the
+    cloudfront service principal condition-pinned to this distribution's ARN.
+    SPA fallback maps BOTH 403 and 404 → /index.html 200 (OAC without
+    ListBucket surfaces missing keys as 403), error_caching_min_ttl 0. Cache
+    split: managed CachingOptimized for the hashed assets, CachingDisabled
+    pinned to /index.html (it names the current hashes — a stale index 404s
+    every asset it references), managed SecurityHeadersPolicy on both.
+  - **§4.1a rate limiting for /public-collection/*: the FREE plan cannot
+    scope a rate rule to a path** (that needs a byte-match scope-down —
+    exactly the feature D47 traded away), so the surface rides the API
+    distribution's existing unscoped 2000/5min/IP rule and the tighter bounds
+    stay app-level and per-LINK (D51: one-GetItem token cheap-fail,
+    verify-password caps, per-link daily ceilings, short public presigns),
+    with reserved concurrency + budget alarms as bill fuses. Documented in
+    edge/main.tf and AWS-RESOURCES.md (guard-tested); restore a 300/5min
+    scoped rule only if the plan is ever cancelled to pay-as-you-go.
+  - **Albums build pinned like the oracle (plan §4.5): ente-io/ente tag
+    photos-v1.3.61** (2026-08-11; the viewer lives at web/apps/albums and
+    rides the photos-v* family — it has no tags of its own). The pin lives
+    twice on purpose — Makefile `ALBUMS_WEB_TAG` (machine-read by build-web)
+    and the ORACLE-VERSION "albums web" line (the version-of-record document)
+    — with a guard asserting they agree. Build facts verified against the
+    repo 2026-08-27: npm workspace (engines npm 11.x), `npm ci && npm run
+    build:albums`, Next.js STATIC export to web/apps/albums/out/,
+    NEXT_PUBLIC_ENTE_ENDPOINT baked in AT BUILD TIME — so `make build-web`
+    builds locally into gitignored dist/web-albums (sparse clone of web/
+    only), and a separate, guard-account-gated `make deploy-web` does the s3
+    sync + invalidation. An API-URL change is a REBUILD, not a re-sync.
+  - **ALBUMS_URL wiring**: compute takes a required `albums_url` variable (no
+    default — a silent fallback would mint links pointing at ente's own
+    albums.ente.com) and the dev env feeds it
+    `coalesce(var.albums_url, module.web.albums_url)`, so a custom domain is
+    a tfvars override away. PRESIGN_PUBLIC_GET_EXPIRY_SECONDS and the two
+    D51 ceilings became optional tofu vars → Lambda env; their tofu defaults
+    (3600 / 10000 / 1000) are guard-matched to config.ts, D11-style.
+  - **Objects-bucket CORS verified, unchanged**: browser upload/download from
+    the albums origin is already covered — origins `*`, headers `*`,
+    GET/PUT/POST/HEAD, ETag exposed (multipart part PUTs need it; D33 guards
+    keep tofu and the LocalStack bootstrap in lockstep). The
+    X-Auth-Access-Token header family is API CORS (src/middleware/cors.ts,
+    museum-shaped per D29), not bucket CORS — presigned S3 requests carry no
+    custom headers.
+  - Consciously NOT done here (Phase G / operator scope): actually deploying
+    anything, custom-domain plumbing (ACM cert + alias), CloudFront access
+    logging, and the manual open-a-real-link gate on the pinned build —
+    which stays the release gate before the README row flips to Done.
+
+- **D53 [SHARING 2026-08-27] Security-review fixes on the public-links branch
+  — device-admission TTL + daily ceiling (P2-1), atomic same-device admission
+  (P3-1), constant-time join-link token compare (P3-2).** Judgment calls:
+  - **P2-1a — admission rows get a rolling TTL backstop**: DEVICE#<hash> rows
+    and the DEVICES counter now carry `ttl` = now + 90 days (the link-META
+    validTill+90d margin), refreshed on the counter at every new admission.
+    Museum keeps public_collection_access_history forever, so a device reaped
+    after 90 quiet days simply gets RE-admitted (burning a slot and a ceiling
+    unit again) — "admitted stays admitted" drifting to "re-admitted" is the
+    accepted delta; the counter can also briefly overcount reaped rows near
+    the limit, which only errs toward stricter. The disable-link purge of the
+    PUBTOKEN partition is unchanged (TTL is the backstop, not the cleanup).
+  - **P2-1b — per-link daily admission ceiling**: new knob
+    `PUBLIC_LINK_DAILY_DEVICES` (default 1000, 0 = off) → config
+    `publicLinkDailyDeviceLimit` → `bumpDailyCeiling(kind: 'devices')`, wired
+    env→config→tofu exactly like the D51/D52 download/upload ceilings
+    (compute + dev variables, guard-matched defaults). Needed because
+    /public-collection/info is password-whitelisted AND device-admitting: a
+    token holder cycling User-Agents was unbounded permanent rows + write
+    cost, and with a deviceLimit set could exhaust slots to lock out real
+    viewers. A tripped ceiling fails the ADMISSION as the same bare-429
+    SentinelError the other ceilings raise (the middleware rethrows it past
+    its museum-500 catch-all); already-admitted devices are untouched.
+  - **P3-1 — the DEVICE# put is now conditioned on not-exists** inside the
+    existing transactWrite, so a concurrent admit of the SAME device loses
+    the transaction, maps ConditionFailedError to admitted, and can never
+    double-increment DEVICES. Two DIFFERENT devices racing under the last
+    slot can still both land (read-then-judge on the counter) — museum's
+    SELECT-then-INSERT is racier still, so that over-admission stays as
+    accepted, museum-consistent drift rather than new port machinery.
+  - **P3-2 — /collections/join-link token compare**: `link.token !==
+    accessToken` became `passHashEquals` (the branch's timingSafeEqual
+    helper from verify-password) — an attacker-supplied token must not leak
+    prefix-match timing.
+  - **Residuals accepted, unchanged**: the share email-enumeration oracle is
+    upstream-faithful (D50), and the XFF-based caps can be skewed only via
+    the direct Function URL, which the tracked origin-lock finding (D47/D52
+    ORIGIN_SECRET) already closes for edge traffic.
+
+- **D54 [OPS 2026-08-27] Phase H1: invite-gated signup + per-user storage
+  quotas — a deliberate OFF-PARITY feature, server/CLI-side only.** Museum has
+  no invite mode and no per-user storage knob; a self-host operator here wants
+  to invite users by email, let them complete the stock OTT+SRP flow
+  self-serve, and cap some of them (down to 0 bytes — "viewer accounts" that
+  only consume shares). HARD CONSTRAINT honoured: zero client-side changes —
+  every wire shape stays museum-shaped and only VALUES differ; provisioning is
+  `make invite` / tools/invite.ts, never an API route. **capture-diff must
+  skip invite-mode behaviour**: captures run against a museum that always
+  admits signups, so the harness must run this server with SIGNUP_MODE unset
+  (the default) — the gate is config'd off and the surface is byte-identical
+  to pre-H1. Judgment calls:
+  - **Config**: `SIGNUP_MODE=invite` → `config.signupMode` ('open' default —
+    existing deployments unaffected). Login and change-email are NEVER gated;
+    only account CREATION is.
+  - **Invite rows**: `INVITE#<lowercased-email>/META` (model.ts), fields
+    email, optional storageLimitBytes, viewer (default false), home,
+    createdAt, consumedAt. Keyed by PLAINTEXT lowercased email, unlike the
+    hashed EMAIL# guards, on purpose: invites are operator data, and listing/
+    revoking them must work without HASHING_KEY (only `make set-storage`
+    needs it, for the hashed user lookup). No gsi attributes — the D48
+    rollback rule holds; `main` deployed against a table with invite rows
+    behaves exactly as before. `home: 'local'` is a one-line federation seam:
+    a future multi-home deployment routes users by it without a migration;
+    nothing reads it today.
+  - **Error shape for a gated signup: 403 {} (errPermissionDenied), NOT a new
+    code.** Museum has no invite analogue, so the choice is which EXISTING
+    signup-path 4xx the stock client renders sanely: 409
+    USER_ALREADY_REGISTERED actively steers the user into the login flow
+    (wrong), 404 USER_NOT_REGISTERED means "not registered" only on login
+    paths, while /users/ott already returns a bare 403 {} on its
+    change-purpose branch — so a 403 is an in-family sendOtt refusal the
+    client shows as its generic failure dialog. Capture-gated for the LAN
+    gate (M5): if the device run shows the stock app handling it badly, pick
+    whatever the gate proves better. The gate keys on `state === 'noAccount'`
+    rather than `purpose === 'signup'` because old clients send purpose ""
+    (museum validates nothing there); login+noAccount has already 404'd
+    above it, so login flows are untouched by construction. The OTT is
+    neither stored nor mailed on rejection (tested).
+  - **Consumption is atomic with account creation** (createUser transaction:
+    email guard + user row + consumedAt stamp), copying
+    storageLimitBytes/viewer/home onto the user row. Invites are single-use
+    for signup but the consumed row is KEPT as audit trail; re-running
+    `make invite` re-arms it (the documented re-admission path, e.g. after
+    account deletion). createUser re-checks the invite as belt-and-braces —
+    covers the revoked-between-OTT-and-verify window. Overrides apply
+    whenever a usable invite exists even in open mode, so an operator can
+    pre-provision limits before flipping the mode.
+  - **Per-user quota**: user row gains optional `storageLimitBytes` (absent =
+    config.freePlanStorageBytes) and `viewer`. assertQuota resolves the limit
+    from the user row (one extra GetItem per quota check, shared by every
+    upload-url mint, eligibility probe, commit, and the public-collect path —
+    which passes the LINK OWNER, so a capped owner's links can't collect
+    either). **0 means ZERO** — no uploads at all — deliberately unlike the
+    0-disables-it ceiling knobs elsewhere in config; stated in both places
+    and locked by test. `userStorageBytes` (billing.ts) is the single
+    resolver: subscription stub, /users/details/v2 and enforcement all report
+    the same number, in the unchanged museum envelope (same fields, real
+    value). `/billing/plans/v2` keeps the global freePlan number — it is a
+    catalog, not the user's entitlement.
+  - **Viewer semantics**: viewer=true refuses every upload-URL mint, the
+    eligibility probe and file commit with the same 426 storage-limit
+    sentinel (self-consistent with a 0-byte plan, and the stock client
+    already renders it), and refuses album/folder creation with 403 {}
+    (errPermissionDenied — the same family a VIEWER sharee gets on rename).
+    Viewers still read shares, download, diff, leave collections, and appear
+    in sharees. **Special-collections decision** (the highest
+    client-breakage risk): POST /collections with type favorites or
+    uncategorized stays ALLOWED for viewers. The stock apps create these
+    lazily — favorites on the first favorite tap, uncategorized when a file
+    leaves its last album — not at boot, but a viewer favoriting a SHARED
+    photo is a legitimate consume-a-share action that must not 403 mid-loop.
+    Both are metadata-only rows (zero storage), and create.ts's
+    duplicate-create semantics already return the existing row idempotently,
+    so admitting them costs nothing. Locked by test; LAN-gate re-run with a
+    viewer account stays the release proof.
+  - **Ops CLI**: tools/invite.ts (`make invite EMAIL=... [STORAGE_GB=...]
+    [VIEWER=1]`, `make invites`, `make revoke-invite EMAIL=...`,
+    `make set-storage EMAIL=... STORAGE_GB=<n|default>`), env-driven exactly
+    like the Lambda (TABLE_NAME/AWS_* select LocalStack vs prod).
+    revoke-invite refuses consumed rows (audit); set-storage is the post-hoc
+    lever writing the user row attribute, `default` clears it. Listing is a
+    paged Scan filtered to INVITE# — the one operator-only full listing, not
+    worth an index (D48 discipline).
+
+- **D55 [OPS 2026-08-27] Phase H2: BYO storage pools — user-group-owned S3
+  buckets, many users : one bucket, server/CLI-side only.** A pool is ONE
+  bucket (typically owned and paid for by a household — "me and my partner one
+  bucket, my brother and his partner another") shared by MULTIPLE users; users
+  map many-to-one onto pools via `storagePoolId` on the user row. Object keys
+  stay `<userID>/<uuid>`, so members keep their own prefixes inside the shared
+  bucket. Deliberately OFF-PARITY (museum's S3 config is global); HARD
+  CONSTRAINT honoured: zero client-visible changes — clients only ever see
+  presigned URLs, and with no pool rows the surface is byte-identical to
+  pre-H2, so **capture-diff must simply run without pool rows** (the default;
+  no harness change needed). Judgment calls:
+  - **Pools are INVISIBLE to authorization.** getAccessibleFile and
+    resolveCollectionAccess never consult pool state — locked by a grep-level
+    test over their extracted sources plus route probes (two members of one
+    pool, no share → 404/403 exactly as strangers; access opens only via a
+    normal share). The pool is a storage/billing grouping, nothing else.
+  - **Schema**: `POOL#<poolId>/META` (mode 'role'|'keys', bucket, region,
+    endpoint?, roleArn+externalId or encryptedAccessKey/encryptedSecretKey,
+    poolStorageLimitBytes?, createdAt, disabled?) + `POOL#<poolId>/USAGE`
+    counter row, mirrored atomically wherever the per-user USAGE row mutates
+    (commit transaction, update paths, thumbnail replace, trash purge,
+    account reaper). No gsi attributes — the D48 rollback rule holds;
+    rollback caveat: detach users before deploying `main`, since old code
+    ignores `storagePoolId` and would mint against the central bucket.
+  - **File-level pool PINNING**: the commit stamps `storagePoolId` on the
+    FILE row (the row every download/purge path already reads — resolution
+    costs no extra read); absent = central bucket. `thumbPoolId` exists ONLY
+    when a post-move thumbnail replacement lands the thumb in a different
+    pool than the original (updateThumbnail / updateFileAttributes re-pin
+    per object: replaced key → current pool, unchanged key → old pin).
+    Downloads, previews, file-data (derived data follows the FILE's pin),
+    public downloads, purge deletes and account-deletion cleanup all resolve
+    the bucket from the PIN — **pool reassignment therefore affects only NEW
+    uploads**; nothing is migrated and nothing strands.
+  - **Quota precedence**, all one museum-shaped 426: viewer blocks first,
+    then the per-user limit (D54; a 0 override blocks before any pool math),
+    then the pool's shared cap against the POOL usage counter (absent =
+    unlimited pool). A `disabled` pool 426s new mints/commits; reads and
+    purges still resolve. assertQuota now returns the loaded {user, pool}
+    context so every mint reuses the read (H1's one-GetItem discipline kept;
+    pool users pay +2 GetItems: pool META + pool USAGE).
+  - **Credential handling**: mode 'role' (PREFERRED) stores roleArn +
+    ExternalId — no long-lived secret at rest at all; ExternalId is MANDATORY
+    (putPool refuses without it) as the confused-deputy guard: the pool
+    role's trust policy + ExternalId is what stops anyone who learns the ARN
+    from pointing their own deployment at the bucket. Temp creds are cached
+    ~50 min (10-min refresh margin) and **presigns from a role pool are
+    clamped to the remaining session lifetime** — a SigV4 URL signed with
+    temporary credentials dies with the session whatever X-Amz-Expires says,
+    so role-pool PUT/GET URLs live ≤ ~1h instead of the config'd 24h/7d
+    (documented deviation; keys-mode pools keep the full expiries). Mode
+    'keys' (for S3-compatibles + LocalStack) secretbox-encrypts both values
+    with a key derived from HASHING_KEY (fixed context, same
+    derive-don't-reuse family as the D51 JWT secret) — NEVER plaintext at
+    rest, never logged, decrypted only into the in-process client cache. KMS
+    was considered and rejected: HASHING_KEY is already the deployment's
+    root secret (losing it orphans every account), so a KMS dependency adds
+    IAM surface and per-call cost without changing the trust model.
+  - **sts:AssumeRole on Resource "*"** in the execution role (shared by the
+    API lambda and the trash-purge worker): acceptable because assuming a
+    role ALSO requires that role's trust policy to name this principal (plus
+    the ExternalId) — enumerating pool ARNs in the policy would add churn,
+    not security. Guard-tested, including that both lambdas still share the
+    one role.
+  - **The household caveat** (stated, not solved): whoever holds the pool
+    bucket's credentials — the household member who owns the AWS account —
+    can LIST and DELETE the ciphertext out-of-band. That is an AVAILABILITY
+    lever, not a confidentiality one: bytes are end-to-end encrypted, and a
+    member's own prefix names reveal only object counts/sizes. Members who
+    don't hold bucket credentials have no path at all (the server never
+    discloses other members' keys). Same trust shape as any BYO-storage
+    arrangement; the operator should say so to households.
+  - **Quarantine behaviour**: the object sweep resolves blobs per queue row's
+    pinned pool; a pool that fails to resolve or whose delete errors
+    quarantines THAT pool's remaining rows for the run — logged and counted,
+    rows left intact for retry — while other pools and the central bucket
+    keep sweeping. One broken household bucket can never stall global GC or
+    crash the cron.
+  - **Ops CLI**: tools/storagePool.ts (`make pool-create/pool-attach/
+    pool-detach/pools/pool-set-quota/pool-disable/pool-enable`), env-driven
+    like tools/invite.ts. pool-create runs a validation checklist FIRST and
+    refuses to write on hard failures (creds/AssumeRole, HeadBucket,
+    PUT+GET+DELETE probe, PutObjectTagging, multipart create+abort, and an
+    explicitly-open public-access block); warns on missing PAB config
+    (S3-compatibles), missing browser-PUT CORS (D33), and a missing
+    abort-MPU lifecycle rule. pool-attach works on user rows AND unconsumed
+    invite rows (the H1 seam: signup copies `storagePoolId` onto the user
+    row; `make invite` re-runs preserve it). Listing is a paged Scan — the
+    same operator-only full-listing exception as invites (D48 discipline).
+  - **Role-mode validation caveat**: the CLI assumes the pool role with the
+    OPERATOR's ambient credentials, so the pool role's trust policy must
+    admit the operator as well as the Lambda execution role (same
+    ExternalId). LocalStack e2e uses mode 'keys' (LocalStack accepts the STS
+    API but has no real assumable identities); the AssumeRole path is locked
+    at unit level with a stubbed STS client (ExternalId sent, creds cached,
+    presign clamped).
+
+- **D56 [FIX 2026-08-27] Review fixes on H1/H2: thumb-pin central sentinel,
+  file-data pool gates, scoped AssumeRole, ops hardening.** Second-pass review
+  findings on the Phase H work, all server/CLI-side; wire shapes unchanged.
+  - **P1 — thumb pin could not say "central" (silent 404 + object leak).**
+    `thumbPoolPin` resolved `thumbPoolId ?? storagePoolId`, and both re-stamp
+    sites (updateThumbnail / updateFileAttributes) only wrote `thumbPoolId`
+    when truthy — so a pool-detached user replacing a thumbnail put the new
+    bytes in the CENTRAL bucket while the row still resolved the thumb pin to
+    the old pool: previews presigned the wrong bucket (silent 404s) and the
+    central object survived deletion. Fixed with a SENTINEL: `thumbPoolId: ''`
+    (`CENTRAL_THUMB_PIN`, files.ts) means "diverged into the central bucket";
+    absence still means "follows storagePoolId". Both re-stamp sites now share
+    one helper (`restampThumbPin`, resolved-pin in, stored-shape out) so they
+    cannot drift; `thumbPoolPin` maps '' -> undefined. The pool-counter delta
+    math at both sites operates on RESOLVED pins (string | undefined, never
+    the sentinel) and was independently correct — left as-is, locked by tests
+    covering pool->central and central->pool divergence on BOTH update paths
+    (row shape, preview bucket, sweep bucket, counter deltas).
+  - **P2 — file-data write paths bypassed pool controls.** previewUploadUrl
+    (PUT + multipart mints), putFileData and putVideoData resolved the pinned
+    pool's client but never honoured `disabled` and never charged POOL#/USAGE.
+    Now: every file-data WRITE goes through `fileDataBlobsForWrite`
+    (fileData.ts), which 426s (museum shape) when the PIN's pool is disabled —
+    the pin's pool, not the owner's current one, because that is where the
+    bytes land; reads stay on the untouched resolver so pinned bytes remain
+    servable. **Quota decision:** the pool counter is charged only where the
+    write path KNOWS the size — putFileData (the server writes the object) and
+    putVideoData (the vid_preview commit step, size verified by HeadObject) —
+    each net of the previous fd-row size on replacement. Presigned img_preview
+    uploads have NO commit/verify step in museum main (D8 dormant tier), so
+    they stay UNCHARGED rather than invent a non-museum verification step;
+    likewise file/fd DELETION does not yet refund fd bytes. Both halves of
+    that drift are one item: the filedata size-reconciliation pass in
+    NEXT-TASKS. Per-user counters deliberately untouched (museum parity:
+    file-data never counts toward user storage).
+  - **P2 — sts:AssumeRole scoped to the ente-pool-\* naming convention.**
+    D55 shipped `Resource "*"` reasoning that each pool role's trust policy +
+    ExternalId is the real gate. The reviewer's counterpoint stands: a pool
+    role whose trust policy names its ACCOUNT ROOT (a common operator
+    shortcut) is assumable by any principal in that account holding a broad
+    AssumeRole — with "*" on our side, this deployment is such a principal
+    for every root-trusted role in every account. Now
+    `arn:aws:iam::*:role/ente-pool-*` (compute/iam.tf, guard test locks the
+    scoped form and rejects "*"), pool-create REFUSES role ARNs outside the
+    convention (clear operator error naming it), and INSTALL's trust-policy
+    section documents the convention and says to name principals, never the
+    account root.
+  - Also (one-liners): upsertInvite now preserves existing
+    storageLimitBytes/viewer across re-invites like storagePoolId (explicit
+    values win; re-arming a consumed 0-byte viewer invite keeps both) and the
+    invite CLI passes viewer only when --viewer given. trash.ts
+    permanentlyDelete is ONE transactWrite (tombstone + user/pool counters +
+    OBJ guards + queue rows + file row, <=9 ops); the account reaper folds
+    each chunk's queue rows and their pool decrements into one chunk-aware
+    transactWrite (flushes when <4 op slots remain of MAX_TRANSACT_OPS) — a
+    crash can no longer decrement a household counter without the matching
+    rows. `make pool-requeue POOL=... [TO=...]` drains a dead pool's
+    quarantined sweep rows by re-pinning them (default central); running it
+    ASSERTS the bytes' true location, restated by the CLI and INSTALL.
+    objectSweep now console.errors default-bucket delete failures with the
+    key (they were silently swallowed). blobs.pool.ts dedupes concurrent
+    AssumeRole refreshes behind one in-flight promise (N concurrent presigns
+    after idle = 1 STS call; failures clear the slot for retry). SIGNUP_MODE
+    is a tofu var (`signup_mode`, default "open", validated open|invite,
+    compute module + dev passthrough, guard-tested against the config.ts
+    default) replacing INSTALL's edit-main.tf instruction.
+
+- **D57 [OPS 2026-08-27] Operator safety: variable-driven delete protection +
+  Makefile profile switcher with typed confirmation.** Two features, one
+  motive: `src/infra/dev` IS the live production deployment (named before it
+  went live), and a second env has to be easy to stand up and tear down
+  without any command being able to silently address prod.
+  - **`delete_protection` replaces `prevent_destroy` (data module, bool,
+    default true).** `lifecycle { prevent_destroy }` only accepts a literal —
+    tofu evaluates lifecycle at parse time, so it cannot reference a var —
+    which made per-env protection impossible and would have hard-blocked test
+    teardown forever. The replacement rails are API-level and strictly
+    stronger where it matters: `deletion_protection_enabled =
+    var.delete_protection` on the table blocks DeleteTable for EVERYONE
+    (console and CLI included; prevent_destroy only ever stopped tofu), and
+    `force_destroy = !var.delete_protection` on the objects bucket preserves
+    today's effective behavior (protection on = destroy refuses while the
+    bucket is non-empty). Both lifecycle blocks are REMOVED — deliberately,
+    since a leftover literal would override the variable — and the guard
+    tests now assert the var wiring, the true default in the module and BOTH
+    env layers, and that no `prevent_destroy` remains in the data module.
+    **Expected diff on the next prod `make plan`** (could not be run here —
+    prod state is live): an in-place `~ update` on `aws_s3_bucket.objects`
+    setting `force_destroy = false` (provider-side attribute, never sent to
+    AWS — possibly no diff at all since false is the provider default), and
+    NO change on the table (`deletion_protection_enabled` was already
+    literally true; it becomes var-driven with the same value). Removing
+    lifecycle blocks produces no plan lines. **Any destroy/replace line means
+    stop.** `make destroy-data`'s steps collapse to: flip the tfvars value,
+    apply that alone, then destroy.
+  - **`src/infra/test`**: a full second env dir — main/variables/outputs/
+    versions copied VERBATIM from dev (they are env-agnostic; everything
+    env-specific rides the tfvars) plus its own `ente-sl.tfvars.example`
+    (`env_name = "test"`, `delete_protection = false`, and a loud FRESH-key
+    warning: reusing prod's `hashing_key` would link every test account to a
+    production identity). Gitignore already covers every env dir — the
+    `*.tfstate`/`*.tfvars`/`tfplan` patterns are bare names, now commented so
+    nobody re-scopes them to one dir.
+  - **Profile switcher**: `.tf-profile` (gitignored, repo root) names the env
+    every tofu-touching target addresses — `TF = tofu -chdir=src/infra/$(PROFILE)`,
+    with `TFVARS`/`STATE`/`guard-account` all derived from it. `make profile
+    dev|test` sets it (parse-time conditional neutralizes the second goal
+    word, so it cannot trigger the real `dev`/`test` targets); bare `make
+    profile` prints it. **No default, ever**: without a profile every such
+    target fails with `no profile chosen — choose: make profile dev | make
+    profile test`. **Labels name what the env IS, not the folder**:
+    dev → `ENV: PRODUCTION`, test → `ENV: TEST`, bannered
+    (`>>> profile: dev (ENV: PRODUCTION)`) before any action, plan included.
+  - **Typed confirmation on mutation**: `deploy`, `destroy`, `deploy-web` and
+    `pricing-plan` require the exact profile name typed back — stronger than
+    y/n because reflexively confirming while pointed at the wrong env is
+    precisely the accident; typing "dev" is hard to do while believing you
+    are on test. `CONFIRM=<profile>` skips the prompt for scripting/CI and
+    REFUSES on mismatch rather than falling back to the prompt. `plan` stays
+    unconfirmed (read-only) but banners. `guard-account` is per-profile (the
+    selected profile's state is the source of truth) and still no-ops on a
+    fresh env with no state, so the first test apply is not blocked.
+    Non-AWS targets (test/test-int/infra-test/build-lambda/ledger/dev/lan,
+    the invite + pool tooling) stay profile-free. All of it guard-tested:
+    profile-driven TF dir with no hardcoded `-chdir=src/infra/dev` left,
+    confirm gates on the four mutating targets, plan explicitly
+    unconfirmed.
+  - **Addendum [2026-08-27]: the typed profile confirmation is REMOVED**
+    (`confirm-profile` target and the `CONFIRM=<profile>` variable, gone
+    entirely). Rationale: it was redundant friction on top of safeguards
+    that already cover each mutation — `tofu destroy` prompts interactively
+    at the actual point of destruction (nothing passes `-auto-approve`, and
+    a guard test now asserts that), `deploy` applies only a saved plan the
+    operator just reviewed, and profile state/tfvars/guard-account are fully
+    disjoint so a mutation cannot cross environments. What remains, and is
+    still guard-tested: the `>>> profile: <name> (ENV: ...)` banner on every
+    profile-aware target, the no-default no-profile refusal, and
+    `guard-account` on the mutating path. The previously gated targets
+    (`deploy`, `destroy`, `deploy-web`, `pricing-plan`) now depend on
+    `require-profile guard-account` directly.
+
+- **D58 [COST/EDGE 2026-08-27] One CloudFront distribution per environment —
+  the API and the albums web app consolidated onto the (former) API
+  distribution; modules/web folded into modules/edge.** Motive: the CloudFront
+  flat-rate FREE plan (D47) covers one distribution + one web ACL per
+  subscription and allows **at most 3 distributions per account**; the D52
+  two-distribution layout spent 2 slots per env, so prod + test could never
+  both ride the $0 plan and the test env's albums distribution (plus its
+  future ACL) would silently run pay-as-you-go. Consolidated: prod + test = 2
+  distributions, one spare, every one subscribable. Judgment calls:
+  - **The API stays at the ROOT of the existing distribution — root-path
+    ordered behaviors, not an /api prefix.** Three reasons: the distribution's
+    domain IS the `server_url` real devices are configured with, so nothing
+    may re-point (an /api prefix or a new domain breaks every client); the
+    Lambda sees unrewritten paths, so museum 404/403 parity holds with no
+    prefix-strip anywhere; and prefix-stripping at the edge would need a
+    function on every API behavior. Every top-level prefix in src/app.ts gets
+    an ordered behavior to the Lambda origin (per-origin `x-origin-secret`
+    unchanged, WAF ACL unchanged): `/ping` exact plus 14 bare-prefix
+    wildcards (`/users*`, `/files*`, `/collections*`, `/trash*`,
+    `/user-entity*`, `/remote-store*`, `/billing*`, `/storage-bonus*`,
+    `/push*`, `/comments-reactions*`, `/collection-actions*`, `/contacts*`,
+    `/emergency-contacts*`, `/public-collection*`) — the no-slash form so
+    bare-prefix routes (POST /files, POST /collections, GET /remote-store)
+    ride the same behavior. **15 API + /index.html = 16 ordered behaviors + 1
+    default = 17, comfortably under the 25-behavior default quota.**
+  - **THE load-bearing constraint: `custom_error_response` must never exist
+    on the distribution.** Error responses are distribution-WIDE — the old
+    web module's 403/404→/index.html SPA fallback would rewrite the API's
+    museum-shaped 404/403 JSON into 200 HTML for every client. SPA fallback
+    is now a viewer-request **CloudFront function** on the DEFAULT behavior
+    only: a URI whose last segment has no dot rewrites to /index.html, asset
+    paths pass through. Consequence accepted: a deep link serves index.html
+    under the default behavior's CachingOptimized policy, so `make
+    deploy-web`'s /* invalidation stays the freshness backstop (the same
+    belt-and-braces the old error_caching_min_ttl-0 fallback relied on);
+    /index.html requested literally stays pinned to CachingDisabled.
+  - **The guard that keeps it honest** (test/infra/web.test.ts): derives the
+    top-level prefix set from src/app.ts route registrations and asserts
+    set-EQUALITY with the edge module's `api_path_patterns` (a new route
+    group without a behavior would fall through to the web bucket; a stale
+    pattern would steal web URL space), plus: no custom_error_response
+    anywhere in the infra, exactly one aws_cloudfront_distribution across all
+    modules, the SPA function associated to the default behavior only,
+    behavior count ≤ 20, API behaviors keeping CachingDisabled +
+    AllViewerExceptHostHeader + all 7 methods, and the moved-block refactor
+    below.
+  - **ALBUMS_URL = the distribution's own URL — wired via a plan-time hint,
+    because tofu cannot express the self-reference.** lambda env →
+    distribution domain → function URL → lambda is a hard resource cycle;
+    one of the three value-flows has to leave the graph. Chosen: `make plan`
+    injects `-var albums_url_hint=$(tofu output -raw server_url)` — the
+    previous apply's own output, stable because a distribution's domain
+    never changes in place — and the env roots wire
+    `coalesce(var.albums_url, var.albums_url_hint,
+    "https://albums-url-pending.invalid")`. A tfvars `albums_url` (custom
+    domain) still wins; a fresh env's FIRST apply deploys the loud .invalid
+    sentinel and the routine second plan/deploy pins the real domain (prod's
+    migration plan is correct immediately — its state already holds
+    server_url). Rejected alternatives: an operator-pinned tfvars value
+    (manual step on prod, forgettable), an SSM parameter + data source
+    (broken first-plan or unmanaged out-of-band state), and minting from a
+    CloudFront-function-injected x-forwarded-host header (app change on a
+    parity-sensitive, just-security-reviewed surface). Public links are now
+    `https://<server_url domain>/?t=<token>`; the albums app is same-origin
+    with the API it calls, and no rebuild is needed at migration because
+    build-web already baked this same origin as NEXT_PUBLIC_ENTE_ENDPOINT.
+  - **Module shape: modules/web died into modules/edge** (bucket, public
+    access block, bucket policy, OAC — policy now SourceArn-pinned to the one
+    distribution), because the bucket policy needs the distribution ARN and
+    the distribution needs the bucket/OAC: splitting them across modules
+    would mean mutually-referencing modules for no gain. `moved` blocks in
+    the env roots carry all four resources across, so the migration plan
+    MOVES them (bucket content preserved, no re-sync required) instead of
+    destroy-and-recreate. The standalone albums distribution has no
+    destination and is destroyed by the same plan. PriceClass_All (D47) now
+    simply applies — the web module's PriceClass_100 died with its
+    distribution.
+  - **Expected migration plan on an existing deployment** (verified shape;
+    could not be run against prod here): 4 moved, **1 to add** (the SPA
+    CloudFront function), **3 to change in-place** (the main distribution —
+    new web origin, default-behavior swap, 16 ordered behaviors,
+    default_root_object, comment; the bucket policy's SourceArn; the API
+    Lambda's ALBUMS_URL env), **1 to destroy** (the old albums
+    distribution). Everything on the main distribution is an in-place
+    UpdateDistribution — **any replace line touching it means STOP**, since
+    replacement mints a new domain and breaks every configured client. The
+    D47 FREE subscription survives in-place updates; verify with `make
+    pricing-plan-status` after, and run `make pricing-plan` per env (test
+    included — an unsubscribed env pays ~$6/mo of WAF fees). Links minted
+    BEFORE consolidation point at the old albums distribution's now-dead
+    domain — tokens stay valid, re-copy each link from the app (the
+    documented D52 caveat pattern).
+  - Trade-offs accepted: requests under prefixes app.ts does not register
+    now reach the web bucket and 200 as HTML instead of 404 JSON (real route
+    groups are guard-covered; clients never probe unregistered prefixes);
+    the WAF rate rule now also counts web-asset hits (cached responses
+    included — WAF runs before the cache), which only errs stricter; and a
+    brief albums-web blip during the migration apply while the bucket policy
+    re-pins (the API path is untouched throughout).
+  - **Amended same day → see D60**: the 17-behavior layout above was refused
+    at pricing-plan subscription time — the FREE tier caps a distribution at
+    **5 cache behaviors** — so D60 inverts it (API on the DEFAULT behavior,
+    albums under the one `/albums*` ordered behavior). The consolidation
+    itself — one distribution, modules/web folded into modules/edge, the
+    no-custom_error_response constraint, the albums_url_hint mechanism, the
+    moved-block refactor — all stands; only the behavior layout, the SPA
+    function target, and the ALBUMS_URL path changed.
+
+- **D59 [COST 2026-08-27] Originals move to GLACIER_IR after 7 days
+  (configurable), not day 0 — revises the 2026-08-16 GIR-only decision's
+  transition timing; the GIR-only class choice itself stands.** The day-0
+  transition charged $0.03/GB GIR retrieval on views of exactly the objects
+  people view most — fresh uploads. The fix: `gir_transition_days` (data
+  module, number, default 7, validated >= 0), driving the
+  `originals-to-glacier-ir` rule's `transition.days`; threaded through both
+  env roots (dev + test declare + pass it, tfvars.example entries state the
+  tradeoff). The math: a day in Standard costs ≈ $0.023/GB-month prorated
+  (~$0.0008/GB/day — the whole week ~$0.006/GB, once), so keeping the first
+  week hot is cheaper than a single early full-res view. Tag filter
+  (`tier=original`) and GLACIER_IR target unchanged; still no Deep Archive.
+  Guards updated: the day-0 assertion is now var-driven-days (a literal 0
+  would silently reinstate the charge), plus default-7 + validation in the
+  module and default-7 + passthrough in BOTH env layers. INSTALL's per-pool
+  GIR recommendation now recommends the same >= 7-day transition for pool
+  buckets (pool owners manage their own lifecycle rules; the server never
+  touches them).
+  **Migration facts — this is an in-place lifecycle-configuration update**
+  (one `~ update` on `aws_s3_bucket_lifecycle_configuration.objects` per
+  env, `days 0 → 7`; any destroy/replace line means stop). Objects ALREADY
+  in GLACIER_IR stay there: lifecycle rules never move objects back to
+  Standard, so only new — and not-yet-transitioned — objects get the 7-day
+  grace. No data movement, no restore, no cost spike; the only billing
+  change is ~$0.006/GB of prorated Standard per new object's first week,
+  traded against $0.03/GB retrieval on its early views.
+
+- **D60 [COST/EDGE 2026-08-27] FREE-tier behavior ceiling: the D58 layout
+  inverted — API on the DEFAULT behavior, albums web under the single
+  `/albums*` ordered behavior (2 cache behaviors total, hard ceiling 5).**
+  Motive: subscribing the D58-shaped distribution to the flat-rate FREE
+  pricing plan was refused with the exact error *"You're using configuration
+  not available in this tier: 17 cache behaviors (limit 5)"* — an
+  undocumented gate of the same family as D47's price-class and byte-match
+  gates. Per-route-prefix behaviors can never fit 15+ prefixes under 5, so
+  the design inverts rather than trims. Judgment calls:
+  - **DEFAULT behavior → the Lambda origin, byte-identical to the pre-D58
+    API edge settings** (CachingDisabled + AllViewerExceptHostHeader +
+    managed SecurityHeadersPolicy, all 7 methods, https-only, x-origin-secret
+    on the origin). Unknown paths reach the Lambda and 404 museum-shaped —
+    the pre-D58 posture, strictly better than D58's fall-through-to-HTML —
+    and a new app.ts route group needs NO infra change, ever. No
+    `default_root_object` (`/` belongs to the API).
+  - **`/albums*` → the web bucket (OAC)**: GET/HEAD, compress,
+    CachingOptimized + SecurityHeadersPolicy, and the SPA viewer-request
+    function moved to THIS behavior, rewriting extensionless URIs to
+    `/albums/index.html` (bare `/albums` and `/albums/` are extensionless —
+    last segment `albums` resp. `` — so the one rule covers them). The
+    assets live under the **`albums/` key prefix** in the bucket
+    (`make deploy-web` syncs there), so the viewer URI is the object key
+    verbatim — no origin_path, no prefix rewrite to drift. The
+    SourceArn-pinned bucket policy grants on `arn/*` and needed no change.
+  - **index.html freshness WITHOUT a dedicated behavior**: deploy-web
+    uploads `albums/index.html` with `Cache-Control: no-cache` metadata and
+    the hashed `/_next` assets with `public, max-age=31536000, immutable` —
+    CachingOptimized honors origin Cache-Control (no-cache pins a stale
+    index to the policy's 1s min TTL), so the D58 `/index.html` behavior's
+    job moved into object metadata and freed a behavior slot. Upload order:
+    assets first, index.html LAST; the `/*` invalidation stays the belt and
+    braces. A rejected third behavior (`/albums/index.html` →
+    CachingDisabled) remains available under the ceiling if the metadata
+    approach ever proves insufficient.
+  - **basePath: the pinned albums app is patched at build time.** Served
+    under /albums, the Next.js static export needs `basePath`/`assetPrefix`
+    = `/albums`; the pinned tag (photos-v1.3.61,
+    `web/apps/albums/next.config.js`) has **no env-based basePath support**
+    (checked: it spreads `ente-base/next.config.base.js`, which sets
+    neither). `make build-web` therefore runs
+    `scripts/patch-albums-basepath.ts` against the sparse clone before the
+    build: it anchors on the `...baseConfig,` spread (stable — the tag is
+    pinned), injects the two keys, is idempotent, and FAILS LOUDLY when the
+    anchor is missing or a foreign basePath appears (a tag bump that changes
+    the shape must break the build, never export an unprefixed app that
+    404s behind `/albums*`). Anchor logic unit-tested against the pinned
+    config's verbatim shape (test/unit/albums-basepath-patch.test.ts);
+    deploy-web additionally refuses to sync a build whose index.html lacks
+    `/albums/_next` (stale pre-D60 build tripwire).
+  - **ALBUMS_URL = `<server_url>/albums`** — the D58 albums_url_hint
+    mechanism unchanged, with the `/albums` suffix appended where the value
+    is composed (the env roots' coalesce; the edge module's `albums_url`
+    output too). Minted links are now
+    `https://<domain>/albums/?t=<token>`. A tfvars `albums_url` (custom
+    domain) still wins and passes through VERBATIM — no suffix; the fresh-env
+    sentinel is `https://albums-url-pending.invalid/albums`.
+  - **Guards inverted with the design** (test/infra/web.test.ts): the D58
+    app.ts↔api_path_patterns set-equality guard is obsolete (there are no
+    per-prefix behaviors) and is REPLACED by: total behaviors ≤ 5 with the
+    subscription error quoted (target shape pinned at 2, and
+    `api_path_patterns` must not reappear), default behavior → Lambda with
+    the faithful pre-D58 settings, `/albums*` the only ordered/web-facing
+    pattern, SPA function attached to `/albums*` only with the
+    `/albums/index.html` target, **no app.ts route under `/albums`** (the
+    namespace-collision guard — museum has none today; the behavior would
+    shadow it), no `default_root_object`, still exactly one distribution and
+    no `custom_error_response` anywhere, deploy-web's prefix + cache
+    metadata + ordering, build-web's patch step, and the deploy→pricing-plan
+    chain below.
+  - **`make deploy` now chains `make pricing-plan` post-apply** (user
+    request): the target is idempotent (already-subscribed → one-line
+    no-op), and a subscribe failure must NOT fail the deploy — IAM
+    propagation or the account's 3-distribution FREE budget can transiently
+    refuse — so it prints a loud multi-line WARNING telling the operator to
+    re-run `make pricing-plan` (the standalone target stays). Guard-tested
+    (non-fatal `|| {` + WARNING + standalone target present).
+  - **Expected migration plan, per starting point** (verified shape; not run
+    against the live envs from here):
+    - *from the D58 single-distribution layout* (test is here; prod may be):
+      **in-place update** of the one distribution (default behavior swaps
+      back to the Lambda origin, the 16 ordered behaviors collapse to
+      `/albums*`, default_root_object drops), the SPA **function code**
+      update, and the API Lambda's ALBUMS_URL env (`https://<domain>` →
+      `https://<domain>/albums`). Nothing else.
+    - *from the pre-D58 two-distribution layout*: the D58 migration and this
+      one land as ONE plan — 4 moved (module.web → module.edge), 1 add (SPA
+      function), in-place updates (main distribution to the D60 shape,
+      bucket policy SourceArn, Lambda ALBUMS_URL), 1 destroy (the standalone
+      albums distribution).
+    - Either way: **any `replace` on the distribution = ABORT** (a
+      replacement mints a new domain and breaks every configured client);
+      after deploy, `make build-web && make deploy-web` is REQUIRED (the
+      assets change — basePath rebuild + the new `albums/` prefix; the old
+      root-level objects become unreachable cruft, optionally cleaned with
+      `aws s3 rm` minus the `albums/` prefix), and `make pricing-plan` now
+      succeeds (≤ 5 behaviors) — the deploy chain runs it automatically.
+  - **Share-link caveat**: links minted while a D58-layout deploy was live
+    (root-path ALBUMS_URL) point at `https://<domain>/?t=...`, which now
+    reaches the API and 404s — tokens stay valid, re-copy each link from the
+    app (the standing D52 caveat pattern). Pre-D58 links already carried the
+    dead-domain caveat.
+  - Trade-offs accepted: `/albums` is carved out of the API's URL namespace
+    forever (guard-enforced; museum has no such group); D58's
+    fall-through-to-HTML trade-off is reverted (strictly better); deep-link
+    index.html responses ride CachingOptimized keyed per-URI with only
+    no-cache metadata + invalidation for freshness (same belt-and-braces as
+    D58 accepted); and the albums app now lives under a subpath, so any
+    upstream absolute-path asset reference that ignores basePath would 404 —
+    none known at the pinned tag; the D52 browser gate (NEXT-TASKS item 6,
+    now against `https://<domain>/albums/?t=...`) is where that proves out.
+
+- **D61 [SHARING/SYNC 2026-08-27] Museum-faithful tombstones: deleted
+  collections (and deleted diff links) keep their stored key material on the
+  wire — the D50 blanked-tombstone guess is REVERSED, confirmed by a live
+  client failure.** Evidence: the desktop ente-photos-web build (web commit
+  91cab1b) against the live test server wedged every sync with `Remote pull
+  failed: TypeError: ciphertext is too short at crypto_secretbox_open_easy`,
+  looping forever while uploads succeeded. Mechanism, verified in the
+  client source at that exact commit: `pullTrash`
+  (web/packages/new/photos/services/trash.ts) resolves a trashed file's
+  collection key via `getCollectionByID` → `decryptRemoteKeyAndCollection`
+  with **no isDeleted guard** (web/packages/new/photos/services/
+  collection.ts), so our blanked `encryptedKey: ''` on the deleted
+  collection's GET /collections/:id response fed a 0-byte ciphertext to
+  crypto_secretbox_open_easy; the pull aborts before saving its cursor and
+  retries the same tombstone on every sync. (The /collections/v2 path IS
+  guarded — `c.isDeleted ? undefined : decrypt` — which is why the feed
+  tombstone alone never crashed; the guard also prunes the collection
+  locally, guaranteeing the fatal getCollectionByID refetch.)
+  Museum shapes, verified 2026-08-27 from ente-io/ente main
+  (server/pkg/repo/collection.go, server/ente/collection.go,
+  server/pkg/controller/collections/collection.go + files_diff.go):
+  - **Owned feed + getById never blank deleted collections.** repo `Get` and
+    `GetCollectionsOwnedByUserV2` SELECT the stored row with no is_deleted
+    filter or scrub — encryptedKey, keyDecryptionNonce, encryptedName,
+    nameDecryptionNonce, type, attributes, magicMetadata, pubMagicMetadata
+    all emit with `isDeleted: true` (omitempty — live rows carry no flag);
+    sharees/publicURLs come back `[]` because their joins filter
+    cs.is_deleted/pct.is_disabled and the delete cascade flipped those.
+    `collectionToJson` now emits exactly that (single shape, tombstone branch
+    deleted; sharees/publicURLs default to [] on deleted rows, null on the
+    create response as before).
+  - **Sharee unshare/delete tombstones carry the share row's wrapped key.**
+    Museum has no tombstone row: `UnShareContext` only flips is_deleted +
+    updation_time on collection_shares, and `GetCollectionsSharedWithUser`
+    scans flipped rows like live ones — collection's stored name fields/type/
+    app/pubMagicMetadata, `encryptedKey` = the sharee's own sealed-box key,
+    keyDecryptionNonce ABSENT, attributes zero struct, sharedAt kept; only
+    owner.email, sharees and publicURLs are emptied. Our SHAREDTOMB rows now
+    store `encryptedKey` + `sharedAt` copied from the share row (removeSharee
+    re-reads a prior tombstone on repeated removes; removeAllSharees copies
+    per sharee) and `unsharedTombstoneToJson` emits the museum shape.
+  - **File diff tombstones are not blanked either.** repo `GetDiff` SELECTs
+    the stored collection_files + files columns for deleted links exactly
+    like live ones; museum's only "blank" flavour is the stale-entry patch
+    (files row kept with metadata "-"). `fileToDiffJson` merged to one shape
+    with `isDeleted: link.isDeleted`; the permanently-deleted-file fallback
+    (our files row is hard-deleted, museum's isn't) keeps blank file-side
+    fields — unrecoverable, and clients never read past isDeleted there.
+  - **Healing story for the live test env**: `deleteV3` has ALWAYS tombstoned
+    via `bumpCollection({ isDeleted: true })` — a spread that keeps every
+    stored field — so no owned-collection data was ever lost; existing
+    tombstones emit correctly on the next pull after deploy and the stuck
+    account recovers with NO data fix. The one backfill gap: SHAREDTOMB rows
+    written before D61 never stored the wrapped key and their pair rows are
+    deleted — those emit `encryptedKey: ''` forever (feed-only entries behind
+    the client's isDeleted guard; a re-share resurrects with a fresh key).
+  - Regression test: collections.test.ts "a deleted collection's feed +
+    getById entries carry DECRYPTABLE ciphertext" round-trips real libsodium
+    secretbox material through delete → feed/getById → the exact
+    crypto_secretbox_open_easy call that crashed the client.
+
+- **D62 [SHARING/SYNC 2026-08-27] Collection restamp on every file mutation
+  and public-link write — the invisible-collect-upload bug.** Field report
+  from the live test env: anonymous collect uploads committed fine (the guest
+  saw them in /public-collection/diff, the rows and pubMagicMetadata uploader
+  name were all there) but the owner's app never showed them; link-config
+  changes (enableDownload etc.) likewise never reached the owner's synced
+  view. Root cause: stock clients sync via `GET /collections/v2?sinceTime=`
+  and only re-diff collections whose updationTime advanced — and nothing in
+  our file-commit or link paths restamped the collection row. Museum bumps
+  collections.updation_time on EVERY collection_files mutation (repo/file.go
+  Create/Update/UpdateMagicAttributes/UpdateThumbnail; repo/collection.go
+  AddFiles/MoveFiles/RestoreFiles/RemoveFilesV3; repo/trash.go TrashFiles) —
+  and, invisible in the Go source, a Postgres trigger
+  (`fn_update_collections_updation_time_using_update_at`) bumps it on every
+  public_collection_tokens INSERT/UPDATE, i.e. share-url create, update and
+  disable. Oracle differential 2026-08-27 (scenario driven from inside the
+  compose network — uploads can't cross it, see the ORACLE-VERSION note):
+  museum re-emits the collection after a guest commit with updationTime ==
+  the new link's stamp EXACTLY, and re-emits after link create/update/
+  disable; our server emitted nothing in any of these cases (reproduced
+  against the live test deployment with a simulated stock-client sync).
+  - Fix: domain/collections.ts `bumpCollectionForward(collectionId, stamp)` —
+    forward-only like the trigger's `updation_time < NEW.updated_at` guard,
+    fresh row read, stamp = the mutation's own link updationTime (museum sets
+    equality; capture-visible). Call sites: files/commit.ts createFile (also
+    covers the public collect commit) and updateFileAttributes,
+    files/magicMetadata.ts, files/updateThumbnail.ts,
+    collections/fileActions.ts add/move/restore/removeV3 (upsertLink now
+    returns the written stamp; the idempotent re-add returns null and, like
+    museum's conflict-no-op INSERT, bumps nothing), domain/trash.ts trashFile,
+    collections/shareUrl.ts (create only — the return-existing path inserts
+    nothing, so no bump), updateShareUrl.ts, and unshareUrl.ts (only when a
+    link was actually disabled).
+  - Museum's Update also restamps TOMBSTONED links (`UPDATE collection_files
+    ... WHERE file_id` has no is_deleted filter) — ours keeps skipping
+    deleted links there; noted, not matched.
+  - NOT changed: enableDownload=false still 403s public original downloads.
+    The oracle run showed museum serves 200 there (the flag is client-honoured
+    UI, surfaced through /public-collection/info) — D51's deliberate
+    divergence stands, with the documented consequence that such links render
+    previews only in the viewer.
+  - Tests: collection-restamp.test.ts — 9 scenarios including the collect
+    flow, all link ops, stamp equality with the link, and the forward-only
+    guard.
+
+- **D64 [INFRA/OPS 2026-08-28] A dedicated operator role for the `tools/`
+  CLI, separate from the Lambda execution role.** The invite (D54) and
+  storage-pool (D55) CLIs run as a human operator against prod, and they need
+  one action the request path deliberately withholds: `dynamodb:Scan`, used by
+  every `list` subcommand and by `pool-requeue`'s queue drain. Rather than add
+  Scan to `ente-sl-<env>-api` (it is shared by both Lambdas — widening it
+  hands a runaway Scan to the request path, exactly the self-host footgun the
+  execution role avoids) or run the CLI as an unscoped admin, the tools get
+  their own least-privilege role, `ente-sl-<env>-operator`, in `modules/data`
+  (co-located with the table it grants on).
+  - Policy: table + `/index/*` with Get/Put/Update/Delete/Query/**Scan**, plus
+    `sts:AssumeRole` on `arn:aws:iam::*:role/ente-pool-*` (role-mode pool
+    validation assumes the pool's bucket role with the operator's creds — same
+    reach and confused-deputy rationale as the execution role's PoolAssumeRole,
+    D56). **No S3**: pool validation runs entirely with the pool's assumed-role
+    or static keys, and no CLI path touches the central objects bucket; a
+    keys-mode pool needs no IAM here at all.
+  - Trust: `operator_principal_arns` (new `modules/data` var, threaded through
+    both env roots) when set, else the **account root** — the self-host answer,
+    where the operator owns the account. Named `ente-sl-*` so the deployer
+    policy's `IamForExecutionRole` statement (`iam:CreateRole`/`PutRolePolicy`
+    on `arn:aws:iam::*:role/ente-sl-*`) manages it with no deployer-policy
+    change. Output `operator_role_arn` surfaces it for an AWS-profile `role_arn`.
+  - `tofu validate` + `fmt` clean; the role + inline policy plan as `1 to add`
+    (a full plan needs the deployer creds — a `-target` refresh under a limited
+    user 403s on `dynamodb:DescribeTable`, unrelated to the change).
+  - CLI ergonomics: the deployer principal has NO DynamoDB data-plane actions
+    (deployer-policy.json is control-plane only — `CreateTable`/`Describe*`/
+    `List*`/`UpdateTable`), so it cannot run the tools directly; it now carries
+    `sts:AssumeRole` on `arn:aws:iam::*:role/ente-sl-*-operator` (new Sid
+    `OperatorAssumeRole`) so it can assume the operator role instead. The
+    `deployer-policy.json` is a reference doc, not a tofu resource — re-apply it
+    to the deployer principal after this change.
+  - Make convenience: every invite/pool target runs through `$(OPS)` →
+    `tools/with-operator-role.sh $(TFDIR)`, which assumes the SELECTED env's
+    operator role (`make profile dev|test`) and exports the temp creds +
+    `TABLE_NAME` + region from `tofu output`, so `make invite EMAIL=...` needs
+    no `TABLE_NAME=`/`AWS_PROFILE=` prefix. It clears `AWS_PROFILE` + inherited
+    static keys before running the tool (the @aws-sdk chain prefers AWS_PROFILE
+    over the env key pair when both are set, which would otherwise run the tool
+    as the base user → `dynamodb:Scan` AccessDenied). It is a transparent
+    passthrough when `AWS_ENDPOINT_URL` is set, so the LocalStack flow
+    (`$(LOCALSTACK_ENV)`) is untouched — LocalStack has no role or STS.
+    `OPERATOR_PROFILE=<profile>`
+    picks which creds assume the role; new `region` output added to both env
+    roots (the tools default to us-east-1). HASHING_KEY stays the operator's to
+    supply for the hash-keyed subcommands.
+  - `make users` (tools/users.ts, 2026-08-28) rides this role: one paged Scan
+    joins USER#/META with USER#/USAGE and prints every account's email, state
+    (active/viewer/DELETED), usage bytes+files, limit (explicit override or
+    'default' — resolved per the deployment's FREE_PLAN_STORAGE_BYTES, which
+    this shell may not share; the footer says what it resolved), pool and
+    creation date; `JSON=1` emits raw JSON. No HASHING_KEY needed — user rows
+    carry the plaintext email. Observed on test: DELETED tombstones can keep a
+    non-zero USAGE row (the reaper sweeps objects, the counter row is
+    historical) — the live/total footer excludes them.
+
+- **D63 [SHARING/AUTHZ 2026-08-28] ADMIN sharee role honoured end to end —
+  the app's role-change / add-admin UI works.** Field report: changing a
+  participant's role and "add admin" failed from the app. The app has no
+  dedicated role endpoint — every role change re-POSTs /collections/share
+  with the new role string (mobile collection_share_gateway.share, role
+  serialized "VIEWER"/"COLLABORATOR"/"ADMIN"), and our zod refused ADMIN
+  (D49/D50 left it out: "nothing can honour an ADMIN row"). Oracle matrix
+  (2026-08-28, pinned image): owner grants/demotes ADMIN via re-share (200,
+  upsert); owner OR ADMIN sharee may share/unshare/change roles
+  (collectionForShareMutation — COLLABORATOR/VIEWER 403); ADMIN CanAdd()s
+  (add-files 200); remove-files v3: ADMIN removes any sharee-owned file, and
+  for OWNER-owned files gets the remove-SUGGESTION branch — 200 with links
+  UNTOUCHED; unshare of self/owner 403 even for ADMIN; public-link
+  mint/update/disable stay OWNER-only (admin 403); unknown role string 500s
+  upstream (Postgres enum) — our 400 stays, D50.
+  - Fix: ShareeRole += 'ADMIN' (domain/sharing.ts); share.ts + unshare.ts
+    actor gate is now owner-or-ADMIN via resolveCollectionAccess role;
+    fileActions.ts addFiles admits ADMIN, removeFilesV3 ports isRemoveAllowed
+    (ADMIN removes sharee-owned; owner-owned subset no-ops at 200 — museum's
+    suggestion lands in a store we stub empty, so the wire behaviour of the
+    remove call AND the /collection-actions/delete-suggestions inbox
+    ({"actions":[],"hasMore":false}) both match; only the diff's
+    delete-suggested marker is missing). minRole ADMIN on links already
+    ranked (D51 filter).
+  - Museum's oracle inbox also read empty right after a suggestion was
+    queued, so the stub is indistinguishable at this probe depth; a real
+    suggestion store (plus /collection-actions accept/reject) stays an open
+    follow-up, as does PUT /collections/sharee-magic-metadata (route absent
+    here; museum 400'd the naive probe body — unpinned).
+  - Tests: admin-role.test.ts (9 scenarios, the oracle matrix 1:1);
+    collection-share.test.ts's ADMIN-refused assertion flipped to the new
+    contract.
+
+- **D65 [GC 2026-08-28] Stale-object sweep — minted-but-never-committed keys
+  no longer leak.** Found live during the BYO pool E2E: a mint → presigned PUT
+  → failed commit (426 over-quota there; any validation error or client crash
+  equally) leaves unreferenced encrypted blobs in the central or pool bucket
+  forever — no file row, no OBJ# guard, and objectSweep only drains
+  explicitly queued deletions. Museum's answer is the temp_objects machinery
+  (pkg/repo/object_cleanup.go + pkg/controller/object_cleanup.go): every mint
+  INSERTs a temp row (controller/file.go getObjectURL → AddTempObjectKey;
+  multipart mints → AddMultipartTempObjectKey with the upload id), expiry =
+  now + 2 × PreSignedRequestValidityDuration (their presign validity is 7 d,
+  so 14 d); the COMMIT path removes nothing; a worker drains expired rows
+  (LIMIT 1000) and — the load-bearing check, removeUnreportedObject — skips
+  any key that has a DB entry (ObjectRepo.DoesObjectExist), else aborts the
+  multipart upload if any and deletes from S3, tolerating NoSuchKey/
+  NoSuchUpload.
+  - Port: domain/staleObjects.ts. recordTempObjects rides every mint (all six:
+    /files/upload-urls, /files/multipart-upload-urls, the V2 POST pair, and
+    both /public-collection mints — each already knows the pool it presigned
+    into, D55); rows land in a STALEQ partition shaped like PURGEQ (time-
+    ordered sk, no gsi — D48 discipline), expiry = 2 × presignPutExpirySeconds
+    (museum's formula on our constants: default 24 h presign → 48 h window;
+    the commit-races-sweep exposure is the same one museum accepts).
+    sweepStaleObjects runs as the trash-purge worker's third GC (F6-style
+    isolated), batch 1000, pool-aware with objectSweep's quarantine pattern.
+  - Two deliberate deviations, both server-internal: a CLAIMED key's row is
+    deleted rather than museum's "bump expiry +1 day and re-check forever"
+    loop (a committed object's later deletion already flows through PURGEQ),
+    and the claim check runs BEFORE resolving pool credentials (a claimed row
+    costs one GetItem, never an STS call). New Blobs.abortMultipart port
+    method (S3 AbortMultipartUploadCommand; NoSuchUpload tolerated) — the
+    uploadUrls.ts "no DB writes" citation was WRONG upstream and is corrected
+    (museum's mint does write temp_objects).
+  - The mint hot path gains one DynamoDB put per minted key (museum pays the
+    same INSERT); a temp-row write failure fails the mint, as upstream.
+  - Tests: stale-objects.test.ts — all six mints record, pre-expiry no-op,
+    claimed-key immunity, the 426-orphan delete, multipart abort, pool
+    routing + quarantine.
 
 ## Environment facts discovered while building
 

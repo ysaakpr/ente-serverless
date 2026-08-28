@@ -4,6 +4,7 @@ import { configFromEnv } from './config.ts';
 import type { Deps } from './deps.ts';
 import { DynamoDb } from './adapters/aws/db.dynamo.ts';
 import { S3Blobs } from './adapters/aws/blobs.s3.ts';
+import { S3BlobsResolver } from './adapters/aws/blobs.pool.ts';
 import { SesMail } from './adapters/aws/mail.ses.ts';
 import { RealRand, SystemClock } from './adapters/memory/system.memory.ts';
 import { IdGenerator } from './domain/ids.ts';
@@ -23,9 +24,11 @@ export const wireAwsDeps = async (): Promise<Deps> => {
   if (hashingKey.length !== 32) {
     throw new Error(`HASHING_KEY must decode to 32 bytes (got ${hashingKey.length})`);
   }
+  const blobs = new S3Blobs(config);
   return {
     db: new DynamoDb(config),
-    blobs: new S3Blobs(config),
+    blobs,
+    blobsResolver: new S3BlobsResolver(config, blobs),
     mail: new SesMail(config),
     clock,
     rand: new RealRand(),

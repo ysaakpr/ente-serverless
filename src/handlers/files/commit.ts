@@ -12,17 +12,22 @@ import { keys, gsi, padTime } from '../../domain/model.ts';
 import {
   assertQuota,
   assertSizesMatch,
+  filePoolPin,
   getFile,
   linkRow,
+  loadQuotaContext,
   objectGuardKey,
   resolveDuplicateCommit,
+  restampThumbPin,
+  thumbPoolPin,
   validateCommitShape,
   verifyObjects,
   type FileAttributes,
   type FileRow,
   type MagicMetadata,
 } from '../../domain/files.ts';
-import { getOwnedCollection } from '../../domain/collections.ts';
+import { blobsForPool, blobsForPoolId } from '../../domain/storagePools.ts';
+import { bumpCollectionForward, getOwnedCollection } from '../../domain/collections.ts';
 import { enqueueObjectDeletion } from '../../domain/objectSweep.ts';
 import { ConditionFailedError } from '../../ports/db.ts';
 import { errBadRequestSentinel, errPermissionDenied } from '../../lib/errors.ts';
@@ -58,16 +63,25 @@ export const commitSchema = z.object({
 type CommitBody = z.infer<typeof commitSchema>;
 
 export const createFile = async (deps: Deps, userId: number, body: CommitBody) => {
+  // Commit stays OWNER-ONLY even under sharing — museum file.go
+  // validateFileCreateOrUpdateReq: "Creating a file requires collection
+  // ownership, not shared access". A collaborator commits into a collection
+  // they own, then /collections/add-files it into the shared album (D49).
   const collection = await getOwnedCollection(deps, userId, body.collectionID);
 
-  const sizes = await verifyObjects(deps, body.file.objectKey!, body.thumbnail.objectKey!);
+  // New bytes land in the uploader's CURRENT pool (the mint presigned there);
+  // the commit stamps that pool as the file's PIN (H2, D55).
+  const ctx = await loadQuotaContext(deps, userId);
+  const blobs = await blobsForPool(deps, ctx.pool);
+  const sizes = await verifyObjects(blobs, blobs, body.file.objectKey!, body.thumbnail.objectKey!);
   assertSizesMatch(
     { file: body.file.size, thumb: body.thumbnail.size },
     sizes,
     deps.config.maxFileSizeBytes,
   );
   const totalBytes = sizes.fileSize + sizes.thumbSize;
-  await assertQuota(deps, userId, totalBytes);
+  await assertQuota(deps, userId, totalBytes, ctx);
+  const poolId = ctx.pool?.poolId;
 
   const now = deps.clock.nowMicros();
   // SECURITY-REVIEW-2 F3: mint-then-commit in a bounded retry. Server fileIDs
@@ -92,6 +106,7 @@ export const createFile = async (deps: Deps, userId: number, body: CommitBody) =
       },
       ...(body.magicMetadata ? { magicMetadata: body.magicMetadata as MagicMetadata } : {}),
       ...(body.pubMagicMetadata ? { pubMagicMetadata: body.pubMagicMetadata as MagicMetadata } : {}),
+      ...(poolId ? { storagePoolId: poolId } : {}),
       info: { fileSize: sizes.fileSize, thumbSize: sizes.thumbSize },
       updationTime: 0,
     };
@@ -109,6 +124,16 @@ export const createFile = async (deps: Deps, userId: number, body: CommitBody) =
           key: { pk: keys.userUsage(userId).pk, sk: 'USAGE' },
           deltas: { bytes: totalBytes, fileCount: 1 },
         },
+        // Pool usage mirrors the per-user counter atomically (H2, D55).
+        ...(poolId
+          ? [
+              {
+                kind: 'counter' as const,
+                key: { pk: keys.poolUsage(poolId).pk, sk: 'USAGE' },
+                deltas: { bytes: totalBytes, fileCount: 1 },
+              },
+            ]
+          : []),
       ]);
     } catch (err) {
       if (!(err instanceof ConditionFailedError)) throw err;
@@ -125,9 +150,13 @@ export const createFile = async (deps: Deps, userId: number, body: CommitBody) =
       if (attempt >= 5) throw err;
       continue;
     }
+    // Museum's Create transaction ends with the collection restamp (file.go);
+    // stamped to the link's updationTime, so the owner's next /collections/v2
+    // re-emits the collection and the client re-diffs it (D62).
+    await bumpCollectionForward(deps, body.collectionID, link.updationTime);
     // Tag the original so the GLACIER_IR lifecycle rule (tier=original) picks it
     // up; a tagging failure only costs storage class, never the commit.
-    await deps.blobs.setTags(body.file.objectKey!, { tier: 'original' }).catch(() => {});
+    await blobs.setTags(body.file.objectKey!, { tier: 'original' }).catch(() => {});
     return echoFile(deps, fileRowItem, body, collection.ownerID, now);
   }
 };
@@ -161,7 +190,24 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
   if (!existing) throw errBadRequestSentinel();
   if (existing.ownerID !== userId) throw errPermissionDenied();
 
-  const sizes = await verifyObjects(deps, body.file.objectKey!, body.thumbnail.objectKey!);
+  // Pool pins (H2, D55): a REPLACED object's new bytes were presigned into the
+  // owner's CURRENT pool, so its pin moves there; an UNCHANGED key keeps its
+  // old pin (its bytes never moved). Heads go to wherever each object lives.
+  const ctx = await loadQuotaContext(deps, userId);
+  const currentPoolId = ctx.pool?.poolId;
+  const oldFilePin = filePoolPin(existing);
+  const oldThumbPin = thumbPoolPin(existing);
+  const fileKeyChanged = existing.file.objectKey !== body.file.objectKey;
+  const thumbKeyChanged = existing.thumbnail.objectKey !== body.thumbnail.objectKey;
+  const newFilePin = fileKeyChanged ? currentPoolId : oldFilePin;
+  const newThumbPin = thumbKeyChanged ? currentPoolId : oldThumbPin;
+
+  const sizes = await verifyObjects(
+    await blobsForPoolId(deps, newFilePin),
+    await blobsForPoolId(deps, newThumbPin),
+    body.file.objectKey!,
+    body.thumbnail.objectKey!,
+  );
   assertSizesMatch(
     { file: body.file.size, thumb: body.thumbnail.size },
     sizes,
@@ -169,36 +215,54 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
   );
   const oldBytes = existing.info.fileSize + existing.info.thumbSize;
   const diff = sizes.fileSize + sizes.thumbSize - oldBytes;
-  await assertQuota(deps, userId, diff);
+
+  // Per-pool byte deltas: old bytes leave their pinned pools, new bytes land
+  // in theirs; the pool cap is charged only the CURRENT pool's net delta.
+  const poolDeltas = new Map<string, { bytes: number; fileCount: number }>();
+  const addPool = (pin: string | undefined, bytes: number, fileCount = 0) => {
+    if (!pin || (bytes === 0 && fileCount === 0)) return;
+    const cur = poolDeltas.get(pin) ?? { bytes: 0, fileCount: 0 };
+    poolDeltas.set(pin, { bytes: cur.bytes + bytes, fileCount: cur.fileCount + fileCount });
+  };
+  addPool(oldFilePin, -existing.info.fileSize, -1);
+  addPool(newFilePin, sizes.fileSize, 1);
+  addPool(oldThumbPin, -existing.info.thumbSize);
+  addPool(newThumbPin, sizes.thumbSize);
+  await assertQuota(deps, userId, diff, ctx, currentPoolId ? (poolDeltas.get(currentPoolId)?.bytes ?? 0) : diff);
 
   const updationTime = deps.ids.nextUpdationTime();
   const ops: Parameters<Deps['db']['transactWrite']>[0] = [];
 
-  // Replaced objects go to the deletion queue (sweep cron drains it — D6).
-  const replacedKeys: string[] = [];
-  for (const [attr, next] of [
-    [existing.file.objectKey, body.file.objectKey],
-    [existing.thumbnail.objectKey, body.thumbnail.objectKey],
+  // Replaced objects go to the deletion queue (sweep cron drains it — D6),
+  // each tagged with the pool its bytes are pinned to.
+  const replacedKeys: Array<{ objectKey: string; poolId?: string }> = [];
+  for (const [attr, next, pin] of [
+    [existing.file.objectKey, body.file.objectKey, oldFilePin],
+    [existing.thumbnail.objectKey, body.thumbnail.objectKey, oldThumbPin],
   ] as const) {
     if (attr && attr !== next) {
       ops.push({ kind: 'delete', key: { pk: `OBJ#${attr}`, sk: 'META' } });
-      replacedKeys.push(attr);
+      replacedKeys.push({ objectKey: attr, poolId: pin });
     }
   }
+  const updatedItem: FileRow = {
+    ...existing,
+    file: { objectKey: body.file.objectKey!, decryptionHeader: body.file.decryptionHeader },
+    thumbnail: { objectKey: body.thumbnail.objectKey!, decryptionHeader: body.thumbnail.decryptionHeader },
+    metadata: body.metadata.encryptedData
+      ? { encryptedData: body.metadata.encryptedData, decryptionHeader: body.metadata.decryptionHeader }
+      : existing.metadata,
+    info: { fileSize: sizes.fileSize, thumbSize: sizes.thumbSize },
+    updationTime,
+  };
+  // Re-stamp the pins; delete rather than write undefined (put replaces whole
+  // items). The thumb pin uses the shared helper: a thumb diverging into the
+  // CENTRAL bucket needs the explicit sentinel, not absence (D56).
+  delete updatedItem.storagePoolId;
+  if (newFilePin) updatedItem.storagePoolId = newFilePin;
+  restampThumbPin(updatedItem, newFilePin, newThumbPin);
   ops.push(
-    {
-      kind: 'put',
-      item: {
-        ...existing,
-        file: { objectKey: body.file.objectKey!, decryptionHeader: body.file.decryptionHeader },
-        thumbnail: { objectKey: body.thumbnail.objectKey!, decryptionHeader: body.thumbnail.decryptionHeader },
-        metadata: body.metadata.encryptedData
-          ? { encryptedData: body.metadata.encryptedData, decryptionHeader: body.metadata.decryptionHeader }
-          : existing.metadata,
-        info: { fileSize: sizes.fileSize, thumbSize: sizes.thumbSize },
-        updationTime,
-      },
-    },
+    { kind: 'put', item: updatedItem },
     { kind: 'put', item: { ...objectGuardKey(body.file.objectKey!), fileId: body.id, type: 'file' } },
     { kind: 'put', item: { ...objectGuardKey(body.thumbnail.objectKey!), fileId: body.id, type: 'thumbnail' } },
     {
@@ -207,10 +271,20 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
       deltas: { bytes: diff },
     },
   );
+  for (const [pin, deltas] of poolDeltas) {
+    if (deltas.bytes === 0 && deltas.fileCount === 0) continue;
+    ops.push({
+      kind: 'counter',
+      key: { pk: keys.poolUsage(pin).pk, sk: 'USAGE' },
+      deltas: { bytes: deltas.bytes, ...(deltas.fileCount ? { fileCount: deltas.fileCount } : {}) },
+    });
+  }
   await deps.db.transactWrite(ops);
   await enqueueObjectDeletion(deps, replacedKeys);
 
-  // Re-emit in every live collection diff.
+  // Re-emit in every live collection diff — and restamp each collection so
+  // the feed re-emits it too (museum Update bumps every containing
+  // collection, file.go).
   const links = await deps.db.query(`FILE-LINKS#${body.id}`, { index: 'gsi3' });
   for (const link of links) {
     if (link.isDeleted) continue;
@@ -220,6 +294,7 @@ export const updateFileAttributes = async (deps: Deps, userId: number, body: Com
       updationTime: stamped,
       gsi1sk: `${padTime(stamped)}#${body.id}`,
     });
+    await bumpCollectionForward(deps, link.collectionID as number, stamped);
   }
   return { id: body.id, updationTime };
 };

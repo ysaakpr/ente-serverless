@@ -51,10 +51,14 @@ const MILESTONES: Record<string, { milestone: string; tags: string }> = {
   'two-factor.test.ts': { milestone: 'M5', tags: '[AUTH-2FA] TOTP flow (gate finding D36)' },
   'file-data.test.ts': { milestone: 'M6', tags: '[FILE-DATA]' },
   'lifecycle.test.ts': { milestone: 'M7', tags: 'infra guards' },
+  'web.test.ts': { milestone: 'P3-F', tags: 'infra guards: albums web hosting (D52)' },
   'e2e.int.test.ts': { milestone: 'M1/M3', tags: 'integration (LocalStack)' },
   'db-counters.test.ts': { milestone: 'SEC', tags: 'F0 race-free capped counter (security review)' },
   'origin-lock.test.ts': { milestone: 'SEC', tags: 'origin lock (finding 4, D43)' },
   'presign-expiry.test.ts': { milestone: 'SEC', tags: 'presign expiry split (finding 5, D44)' },
+  'db-transact.test.ts': { milestone: 'P3-A', tags: 'transactWrite atomicity + 100-op cap (D48)' },
+  'sharing.test.ts': { milestone: 'P3-A', tags: '[SHARING] dual-write + link rows (D48)' },
+  'invites.test.ts': { milestone: 'H1', tags: '[INVITES] [QUOTA] invite gating + per-user storage (D54)' },
 };
 
 const rows: string[] = [];
@@ -76,12 +80,22 @@ const collect = (json: VitestJson) => {
 collect(run(['test/unit']));
 collect(run(['test/infra']));
 
+// Probe LocalStack first: vitest "runs" the integration suite either way and
+// a down stack would collect as failures — a lie the try/catch below never
+// caught (run() swallows the non-zero exit and parses the JSON anyway).
+const LOCALSTACK = process.env.AWS_ENDPOINT_URL ?? 'http://127.0.0.1:4567';
+const localstackUp = await fetch(`${LOCALSTACK}/_localstack/health`)
+  .then((r) => r.ok)
+  .catch(() => false);
+
 let intNote = 'not run (LocalStack down) — run `make up && make test-int && make ledger`';
-try {
-  collect(run(['test/integration']));
-  intNote = 'included';
-} catch {
-  /* LocalStack not running */
+if (localstackUp) {
+  try {
+    collect(run(['test/integration']));
+    intNote = 'included';
+  } catch {
+    /* LocalStack not running */
+  }
 }
 
 rows.sort();

@@ -1,13 +1,21 @@
 /**
  * The stateful half: the single table and the objects bucket.
- * Everything here carries prevent_destroy (pattern inherited from
- * immich-serverless infra-tofu — it earned its keep on the first deploy).
+ * Delete protection is variable-driven (D57): lifecycle prevent_destroy only
+ * takes literals, so the rails live at the AWS API level instead —
+ * deletion_protection_enabled on the table (blocks DeleteTable for everyone,
+ * console included) and force_destroy = !delete_protection on the buckets
+ * (protection on = destroy refuses while non-empty). The default (true)
+ * keeps the pattern inherited from immich-serverless infra-tofu — it earned
+ * its keep on the first deploy; a test env sets delete_protection = false so
+ * teardown is clean.
  *
- * Storage classes (build plan §1, GIR-only decision 2026-08-16):
- *  - originals -> GLACIER_IR at day 0, selected by OBJECT TAG tier=original.
- *    A prefix rule is impossible: museum's key layout puts originals and
- *    thumbnails under the same `userID/uuid` prefix, so the API tags the
- *    original at commit time instead.
+ * Storage classes (build plan §1, GIR-only decision 2026-08-16, days D59):
+ *  - originals -> GLACIER_IR after var.gir_transition_days (default 7),
+ *    selected by OBJECT TAG tier=original. A prefix rule is impossible:
+ *    museum's key layout puts originals and thumbnails under the same
+ *    `userID/uuid` prefix, so the API tags the original at commit time
+ *    instead. The grace week exists because fresh uploads are the
+ *    most-viewed and day-0 GIR billed $0.03/GB retrieval on those views.
  *  - thumbnails (untagged) and file-data (`userID/file-data/...`) stay
  *    Standard — the grid reads thumbs constantly, HLS needs hot segments.
  *  - NO Deep Archive anywhere. No restore workflow exists, by design.
@@ -25,7 +33,7 @@ resource "aws_dynamodb_table" "this" {
   billing_mode                = "PAY_PER_REQUEST"
   hash_key                    = "pk"
   range_key                   = "sk"
-  deletion_protection_enabled = true
+  deletion_protection_enabled = var.delete_protection
 
   attribute {
     name = "pk"
@@ -113,18 +121,15 @@ resource "aws_dynamodb_table" "this" {
   server_side_encryption {
     enabled = true
   }
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }
 
 resource "aws_s3_bucket" "objects" {
   bucket = "${local.prefix}-objects-${local.suffix}"
 
-  lifecycle {
-    prevent_destroy = true
-  }
+  # Protection on (prod): tofu refuses to destroy a non-empty bucket — every
+  # photo has to be deliberately emptied first. Protection off (test): destroy
+  # sweeps the contents too. Provider-side only; never sent to AWS on apply.
+  force_destroy = !var.delete_protection
 }
 
 /**
@@ -140,10 +145,6 @@ resource "aws_s3_bucket_versioning" "objects" {
 
   versioning_configuration {
     status = "Enabled"
-  }
-
-  lifecycle {
-    prevent_destroy = true
   }
 }
 
@@ -175,7 +176,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "objects" {
   bucket = aws_s3_bucket.objects.id
 
   # Originals only (tag applied by the API at commit). GLACIER_IR — never
-  # Deep Archive (guard-tested in test/infra).
+  # Deep Archive (guard-tested in test/infra). The transition waits
+  # gir_transition_days (default 7, D59) so the freshest — most-viewed —
+  # uploads serve from Standard instead of billing GIR retrieval.
   rule {
     id     = "originals-to-glacier-ir"
     status = "Enabled"
@@ -188,7 +191,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "objects" {
     }
 
     transition {
-      days          = 0
+      days          = var.gir_transition_days
       storage_class = "GLACIER_IR"
     }
   }

@@ -9,8 +9,10 @@ import { z } from 'zod';
 import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { padTime } from '../../domain/model.ts';
+import type { FileRow } from '../../domain/files.ts';
 import {
   fdStatusPartition,
+  fileDataBlobs,
   getFdRow,
   getOwnedFile,
   metadataKey,
@@ -22,9 +24,9 @@ import { badRequest } from '../../lib/errors.ts';
 
 const FETCH_TYPES = ['vid_preview', 'mldata'];
 
-const entityJson = async (deps: Deps, userId: number, row: FdRow) => {
+const entityJson = async (deps: Deps, userId: number, file: FileRow, row: FdRow) => {
   const metadata = await readMetadataObject(
-    deps,
+    await fileDataBlobs(deps, file), // file's pinned pool (H2, D55)
     metadataKey(row.fileID, userId, row.type, row.objectID),
   );
   if (!metadata) return null;
@@ -51,13 +53,13 @@ export const getFilesData = (deps: Deps) => async (c: Context) => {
   const errFileIDs = [];
   for (const fileId of body.fileIDs) {
     try {
-      await getOwnedFile(deps, userId, fileId);
+      const file = await getOwnedFile(deps, userId, fileId);
       const row = await getFdRow(deps, fileId, body.type as FdType);
       if (!row || row.isDeleted) {
         pendingIndexFileIDs.push(fileId);
         continue;
       }
-      const entity = await entityJson(deps, userId, row);
+      const entity = await entityJson(deps, userId, file, row);
       if (entity) data.push(entity);
       else errFileIDs.push(fileId);
     } catch {
@@ -74,11 +76,11 @@ export const getFileData = (deps: Deps) => async (c: Context) => {
     throw badRequest(`unsupported object type ${type}`);
   }
   const { userId } = auth(c);
-  await getOwnedFile(deps, userId, fileId);
+  const file = await getOwnedFile(deps, userId, fileId);
 
   const row = await getFdRow(deps, fileId, type as FdType);
   if (!row || row.isDeleted) return c.body(null, 204);
-  const entity = await entityJson(deps, userId, row);
+  const entity = await entityJson(deps, userId, file, row);
   if (!entity) return c.body(null, 204);
   return c.json({ data: entity });
 };

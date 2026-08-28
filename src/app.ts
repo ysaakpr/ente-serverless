@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { handler } from './lib/http.ts';
 import { requireAuth } from './middleware/auth.ts';
+import { requirePublicAccess } from './middleware/publicAccess.ts';
 import { cors } from './middleware/cors.ts';
 
 import { ping } from './handlers/health/ping.ts';
@@ -56,6 +57,22 @@ import { addFiles, moveFiles, removeFilesV3, restoreFiles } from './handlers/col
 import { renameCollection, updateCollectionMagicMetadata } from './handlers/collections/rename.ts';
 import { deleteCollectionV3 } from './handlers/collections/deleteV3.ts';
 import { getCollectionById } from './handlers/collections/getById.ts';
+import { shareCollection } from './handlers/collections/share.ts';
+import { unshareCollection } from './handlers/collections/unshare.ts';
+import { leaveCollection } from './handlers/collections/leave.ts';
+import { getCollectionSharees } from './handlers/collections/sharees.ts';
+import { shareUrl } from './handlers/collections/shareUrl.ts';
+import { updateShareUrl } from './handlers/collections/updateShareUrl.ts';
+import { unshareUrl } from './handlers/collections/unshareUrl.ts';
+import { joinLink } from './handlers/collections/joinLink.ts';
+import { publicCollectionInfo } from './handlers/public/info.ts';
+import { publicCollectionDiff } from './handlers/public/diff.ts';
+import { publicDownloadFile, publicDownloadFileUrlV3 } from './handlers/public/download.ts';
+import { publicPreviewFile, publicThumbnailUrlV3 } from './handlers/public/preview.ts';
+import { publicVerifyPassword } from './handlers/public/verifyPassword.ts';
+import { publicUploadUrl } from './handlers/public/uploadUrl.ts';
+import { publicMultipartUploadUrl } from './handlers/public/multipartUploadUrl.ts';
+import { publicCreateFile } from './handlers/public/file.ts';
 import { createEntityKey, ensureEntityKey, getEntityKey } from './handlers/entity/key.ts';
 import { createEntity, deleteEntity, entityDiff, updateEntity } from './handlers/entity/data.ts';
 import { getFeatureFlags, getRemoteStoreValue, updateRemoteStoreValue } from './handlers/stubs/remoteStore.ts';
@@ -196,6 +213,15 @@ export const buildApp = (deps: Deps): Hono => {
   app.post('/collections/move-files', authed, handler(moveFiles(deps)));
   app.post('/collections/restore-files', authed, handler(restoreFiles(deps)));
   app.post('/collections/v3/remove-files', authed, handler(removeFilesV3(deps)));
+  app.post('/collections/share', authed, handler(shareCollection(deps)));
+  app.post('/collections/unshare', authed, handler(unshareCollection(deps)));
+  app.post('/collections/leave/:collectionID', authed, handler(leaveCollection(deps)));
+  app.get('/collections/sharees', authed, handler(getCollectionSharees(deps)));
+  // [PUBLIC-LINKS] management (cmd/museum/main.go storageAPI share-url routes)
+  app.post('/collections/share-url', authed, handler(shareUrl(deps)));
+  app.put('/collections/share-url', authed, handler(updateShareUrl(deps)));
+  app.delete('/collections/share-url/:collectionID', authed, handler(unshareUrl(deps)));
+  app.post('/collections/join-link', authed, handler(joinLink(deps)));
   app.post('/collections/rename', authed, handler(renameCollection(deps)));
   app.put('/collections/magic-metadata', authed, handler(updateCollectionMagicMetadata(deps, false)));
   app.put('/collections/public-magic-metadata', authed, handler(updateCollectionMagicMetadata(deps, true)));
@@ -241,6 +267,24 @@ export const buildApp = (deps: Deps): Hono => {
   app.get('/collection-actions/delete-suggestions', authed, handler(deleteSuggestions(deps)));
   app.get('/contacts/diff', authed, handler(contactsDiff(deps)));
   app.get('/emergency-contacts/info', authed, handler(emergencyContactsInfo(deps))); // D35
+
+  // [PUBLIC-COLLECTION] the anonymous album surface, behind the access-token
+  // middleware (cmd/museum/main.go publicCollectionAPI group — the routes the
+  // pinned albums web app needs; social/comments/anon-identity and the
+  // files/data pair are deliberately unimplemented, D51). NEVER stub these
+  // empty: an empty diff on a real link is indistinguishable from a broken
+  // one (plan §3 caveat 5).
+  const linked = requirePublicAccess(deps);
+  app.get('/public-collection/info', linked, handler(publicCollectionInfo(deps)));
+  app.get('/public-collection/diff', linked, handler(publicCollectionDiff(deps)));
+  app.get('/public-collection/files/preview/:fileID', linked, handler(publicPreviewFile(deps)));
+  app.get('/public-collection/files/thumbnail/v3/:fileID', linked, handler(publicThumbnailUrlV3(deps)));
+  app.get('/public-collection/files/download/:fileID', linked, handler(publicDownloadFile(deps)));
+  app.get('/public-collection/files/download/v3/:fileID', linked, handler(publicDownloadFileUrlV3(deps)));
+  app.post('/public-collection/verify-password', linked, handler(publicVerifyPassword(deps)));
+  app.post('/public-collection/upload-url', linked, handler(publicUploadUrl(deps)));
+  app.post('/public-collection/multipart-upload-url', linked, handler(publicMultipartUploadUrl(deps)));
+  app.post('/public-collection/file', linked, handler(publicCreateFile(deps)));
 
   // [TRASH]
   app.post('/files/trash', authed, handler(trashFiles(deps)));

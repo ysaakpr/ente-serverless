@@ -43,7 +43,7 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
     }
   });
 
-  it('originals transition to GLACIER_IR at day 0, selected by tag tier=original', () => {
+  it('originals transition to GLACIER_IR after gir_transition_days, selected by tag tier=original (D59)', () => {
     const text = dataTf();
     expect(text).toContain('GLACIER_IR');
     const rule = text.slice(text.indexOf('originals-to-glacier-ir'));
@@ -51,8 +51,36 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
     expect(filterBlock).toMatch(/tag\s*{/);
     expect(filterBlock).toContain('"tier"');
     expect(filterBlock).toContain('"original"');
+    // D59: the days are var-driven, never a literal — a hardcoded 0 would
+    // silently reinstate day-0 GIR retrieval charges on fresh uploads.
     const transitionBlock = rule.slice(rule.indexOf('transition'), rule.indexOf('}', rule.indexOf('storage_class')));
-    expect(transitionBlock).toMatch(/days\s*=\s*0/);
+    expect(transitionBlock).toMatch(/days\s*=\s*var\.gir_transition_days/);
+  });
+
+  it('gir_transition_days defaults to 7 with a >= 0 validation (D59)', () => {
+    const vars = readTf('modules/data/variables.tf');
+    const at = vars.indexOf('variable "gir_transition_days"');
+    expect(at, 'no gir_transition_days variable').toBeGreaterThan(-1);
+    const block = vars.slice(at);
+    expect(block).toMatch(/type\s*=\s*number/);
+    // Default 7: fresh uploads are the most-viewed, and day-0 GIR billed
+    // $0.03/GB retrieval on exactly those views. Standard's ~$0.023/GB-mo
+    // prorated over a week is cheaper than one early full-res view.
+    expect(block).toMatch(/default\s*=\s*7/);
+    expect(block).toMatch(/condition\s*=\s*var\.gir_transition_days\s*>=\s*0/);
+  });
+
+  it('both env layers thread gir_transition_days through, defaulting 7 (D59)', () => {
+    for (const env of ['dev', 'test']) {
+      const main = readTf(`${env}/main.tf`);
+      expect(main, `${env} does not pass gir_transition_days`).toMatch(
+        /gir_transition_days\s*=\s*var\.gir_transition_days/,
+      );
+      const vars = readTf(`${env}/variables.tf`);
+      const at = vars.indexOf('variable "gir_transition_days"');
+      expect(at, `${env} lacks the variable`).toBeGreaterThan(-1);
+      expect(vars.slice(at)).toMatch(/default\s*=\s*7/);
+    }
   });
 
   it('exactly one transition rule — untagged thumbs/file-data stay Standard', () => {
@@ -71,13 +99,12 @@ describe('storage-class guards (GIR-only decision, 2026-08-16)', () => {
  * classes. Its paired expiry rule is what stops it costing forever.
  */
 describe('bucket versioning guards', () => {
-  it('the objects bucket is versioned, and the resource cannot be destroyed', () => {
+  it('the objects bucket is versioned', () => {
     const text = dataTf();
     const at = text.indexOf('resource "aws_s3_bucket_versioning"');
     expect(at, 'objects bucket is NOT versioned').toBeGreaterThan(-1);
     const block = text.slice(at, text.indexOf('\n}\n', at));
     expect(block).toMatch(/status\s*=\s*"Enabled"/);
-    expect(block).toContain('prevent_destroy = true');
   });
 
   it('noncurrent versions expire, so the safety net cannot bill forever', () => {
@@ -234,6 +261,47 @@ describe('deploy target guards', () => {
       expect(outputs, `${rel} lost web_acl_arn`).toContain('output "web_acl_arn"');
     }
   });
+
+  it('the tofu dir is profile-driven — no target can silently address dev (D57)', () => {
+    const text = makefile();
+    expect(text).toMatch(/TFDIR\s*=\s*src\/infra\/\$\(PROFILE\)/);
+    expect(text).toMatch(/TF\s*=\s*tofu -chdir=\$\(TFDIR\)/);
+    expect(text).toMatch(/STATE\s*=\s*\$\(TFDIR\)\/terraform\.tfstate/);
+    // dev is PRODUCTION: nothing may hardcode its dir back in.
+    expect(text).not.toMatch(/-chdir=src\/infra\/dev/);
+    expect(text).not.toMatch(/STATE\s*=\s*src\/infra\/dev/);
+    // No profile chosen must refuse, never default.
+    expect(text).toMatch(/NO_PROFILE_MSG\s*=\s*no profile chosen/);
+    expect(target('require-profile')).toContain('NO_PROFILE_MSG');
+    // The labels name what each env IS, not what its folder is called.
+    expect(text).toMatch(/PROFILE_LABEL_dev\s*=\s*PRODUCTION/);
+    expect(text).toMatch(/PROFILE_LABEL_test\s*=\s*TEST/);
+  });
+
+  it('profile-aware targets banner + fail fast; no typed gate, no -auto-approve (D57 addendum)', () => {
+    // D57 addendum 2026-08-27: the typed profile confirmation is gone. What
+    // stands in for it: the banner (require-profile) on every profile-aware
+    // target, the no-profile refusal, guard-account on the mutating path,
+    // tofu's own interactive approval on destroy, and deploy applying only a
+    // just-reviewed saved plan.
+    for (const name of ['plan', 'deploy', 'destroy', 'deploy-web', 'pricing-plan', 'build-web', 'infra-init', 'outputs', 'smoke']) {
+      expect(target(name), `${name} lacks require-profile (directly or via guard-account)`).toMatch(
+        new RegExp(`^${name}:.*(require-profile|guard-account)`),
+      );
+    }
+    // The banner is the profile visibility mechanism — it must survive.
+    expect(target('require-profile')).toContain('>>> profile:');
+    // The confirm-profile mechanism must stay gone, not half-removed.
+    // Assert over recipe/prerequisite lines only (comments may narrate both).
+    const code = makefile()
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(code).not.toContain('confirm-profile');
+    // tofu destroy's native interactive prompt IS the final confirmation:
+    // nothing may auto-approve it (and nothing else should auto-approve either).
+    expect(code, 'no target may pass -auto-approve').not.toContain('-auto-approve');
+  });
 });
 
 /**
@@ -362,9 +430,41 @@ describe('spend ceiling + edge hardening guards (findings 4/6)', () => {
   });
 });
 
+/**
+ * BYO storage pools (H2, D55): the one infra change is sts:AssumeRole on the
+ * shared execution role (API lambda + trash-purge worker use the same role,
+ * asserted here so a future role split cannot silently drop the worker's
+ * ability to purge pool objects). Since D56 the resource is SCOPED to the
+ * ente-pool-* naming convention, never "*" — a pool role trusted to its
+ * account root would otherwise be assumable by anything holding AssumeRole
+ * on "*"; the trust policy + ExternalId stays the real per-pool gate.
+ */
+describe('storage pool guards (H2, D55)', () => {
+  const iamTf = () => readTf('modules/compute/iam.tf');
+
+  it('the execution role can assume pool roles — scoped to the naming convention, not "*"', () => {
+    const iam = iamTf();
+    const at = iam.indexOf('"PoolAssumeRole"');
+    expect(at, 'no PoolAssumeRole statement').toBeGreaterThan(-1);
+    const block = iam.slice(at, iam.indexOf('}', at));
+    expect(block).toContain('"sts:AssumeRole"');
+    expect(block).toMatch(/resources\s*=\s*\["arn:aws:iam::\*:role\/ente-pool-\*"\]/);
+    expect(block).not.toMatch(/resources\s*=\s*\["\*"\]/);
+  });
+
+  it('both lambdas share the one role the statement lands on', () => {
+    // If this breaks, the trash-purge worker got its own role — it needs the
+    // PoolAssumeRole statement too (it deletes objects from pool buckets).
+    const compute = readTf('modules/compute/main.tf');
+    const roleRefs = compute.match(/role\s*=\s*aws_iam_role\.api\.arn/g) ?? [];
+    expect(roleRefs.length).toBeGreaterThanOrEqual(2);
+    expect(compute).not.toContain('resource "aws_iam_role" "trash_purge"');
+  });
+});
+
 describe('config/tofu default agreement (D11)', () => {
-  it('free_plan_storage_bytes matches the config.ts default (10 TiB)', () => {
-    const TEN_TIB = 10 * 1024 ** 4;
+  it('free_plan_storage_bytes matches the config.ts default (1 GiB)', () => {
+    const ONE_GIB = 1024 ** 3;
 
     const tf = readFileSync(join(INFRA, 'modules/compute/variables.tf'), 'utf8');
     const block = tf.slice(tf.indexOf('variable "free_plan_storage_bytes"'));
@@ -372,15 +472,30 @@ describe('config/tofu default agreement (D11)', () => {
 
     const config = readFileSync(join(import.meta.dirname, '../../src/config.ts'), 'utf8');
     const expr = config.match(/FREE_PLAN_STORAGE_BYTES\s*\?\?\s*([0-9*\s.]+)\)/)![1]!;
-    // The default is written as an expression (10 * 1024 ** 4); evaluate the
-    // literal arithmetic rather than duplicating the constant here.
+    // The default is written as an expression (1024 ** 3); evaluate the literal
+    // arithmetic rather than duplicating the constant here.
     const configDefault = Number(
       // eslint-disable-next-line no-new-func
       Function(`"use strict";return (${expr})`)(),
     );
 
-    expect(configDefault).toBe(TEN_TIB);
+    expect(configDefault).toBe(ONE_GIB);
     expect(tfDefault).toBe(configDefault);
+  });
+
+  it('signup_mode: tofu default matches config.ts ("open"), validates the enum, reaches the Lambda env (D54/D56)', () => {
+    const tf = readTf('modules/compute/variables.tf');
+    const block = tf.slice(tf.indexOf('variable "signup_mode"'));
+    expect(block).toMatch(/default\s*=\s*"open"/);
+    expect(block).toMatch(/contains\(\["open", "invite"\]/);
+
+    // config.ts: anything but the literal 'invite' resolves to 'open'.
+    const config = readFileSync(join(import.meta.dirname, '../../src/config.ts'), 'utf8');
+    expect(config).toContain("process.env.SIGNUP_MODE === 'invite' ? 'invite' : 'open'");
+
+    // and the var actually lands in the API Lambda's environment + dev passthrough
+    expect(readTf('modules/compute/main.tf')).toMatch(/SIGNUP_MODE\s*=\s*var\.signup_mode/);
+    expect(readTf('dev/main.tf')).toMatch(/signup_mode\s*=\s*var\.signup_mode/);
   });
 });
 
@@ -427,16 +542,43 @@ describe('table + compute guards', () => {
     expect(block).toMatch(/function_url_auth_type\s*=\s*"NONE"/);
   });
 
-  it('the table carries deletion protection', () => {
-    // The second, independent rail on the table: prevent_destroy stops tofu,
-    // deletion_protection_enabled stops everyone else including the console.
-    expect(dataTf()).toMatch(/deletion_protection_enabled\s*=\s*true/);
+  it('delete protection is var-driven and defaults ON (D57)', () => {
+    // The rails moved from lifecycle prevent_destroy (a literal tofu cannot
+    // parameterize, and one that only ever stopped tofu itself) to API-level
+    // equivalents: deletion_protection_enabled blocks DeleteTable for
+    // EVERYONE including the console, and !force_destroy makes the bucket
+    // destroy refuse while non-empty. Both must follow the one variable.
+    const text = dataTf();
+    expect(text).toMatch(/deletion_protection_enabled\s*=\s*var\.delete_protection/);
+    expect(text).toMatch(/force_destroy\s*=\s*!var\.delete_protection/);
+
+    const vars = readTf('modules/data/variables.tf');
+    const block = vars.slice(vars.indexOf('variable "delete_protection"'));
+    expect(block, 'no delete_protection variable').not.toBe('');
+    expect(block).toMatch(/type\s*=\s*bool/);
+    // Default true: an env that forgets to set it gets PROD-grade protection.
+    expect(block).toMatch(/default\s*=\s*true/);
   });
 
-  it('stateful resources carry prevent_destroy', () => {
-    const text = dataTf();
-    const count = (text.match(/prevent_destroy = true/g) ?? []).length;
-    expect(count).toBeGreaterThanOrEqual(2); // table + objects bucket
+  it('no lifecycle prevent_destroy remains in the data module (D57 replaced it)', () => {
+    // A leftover block would hard-refuse test-env teardown regardless of the
+    // variable — the whole point of the swap is that ONLY delete_protection
+    // decides. (stripComments means a commented-out block cannot satisfy or
+    // trip this either way.)
+    expect(dataTf()).not.toContain('prevent_destroy');
+  });
+
+  it('both env layers thread delete_protection through, defaulting ON (D57)', () => {
+    for (const env of ['dev', 'test']) {
+      const main = readTf(`${env}/main.tf`);
+      expect(main, `${env} does not pass delete_protection`).toMatch(
+        /delete_protection\s*=\s*var\.delete_protection/,
+      );
+      const vars = readTf(`${env}/variables.tf`);
+      const block = vars.slice(vars.indexOf('variable "delete_protection"'));
+      expect(block, `${env} lacks the variable`).not.toBe('');
+      expect(block).toMatch(/default\s*=\s*true/);
+    }
   });
 
   it('every deployer-policy statement uses only IAM-recognised keys', () => {

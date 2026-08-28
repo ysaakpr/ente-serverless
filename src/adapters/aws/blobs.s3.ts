@@ -1,6 +1,7 @@
 /** S3 implementation of the Blobs port (LocalStack + real AWS). */
 
 import {
+  AbortMultipartUploadCommand,
   CreateMultipartUploadCommand,
   DeleteObjectCommand,
   GetObjectCommand,
@@ -8,27 +9,56 @@ import {
   PutObjectCommand,
   PutObjectTaggingCommand,
   UploadPartCommand,
+  type S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { Blobs, BlobHead, MultipartUrls } from '../../ports/blobs.ts';
 import type { Config } from '../../config.ts';
 import { getS3Client } from './clients.ts';
 
+/**
+ * Pool overrides (H2, D55): the default instance keeps the singleton client
+ * and central bucket; blobs.pool.ts builds instances bound to a pool's bucket
+ * with per-pool credentials. `client` is a getter because role-mode pools
+ * rebuild the client whenever the STS session is refreshed.
+ */
+export interface S3BlobsOptions {
+  bucket?: string;
+  client?: () => Promise<S3Client>;
+  /**
+   * Upper bound on presign validity, seconds. Role-mode pools clamp every
+   * presign to the REMAINING AssumeRole session lifetime: a SigV4 URL signed
+   * with temporary credentials dies when the session does, whatever its
+   * X-Amz-Expires says — so an unclamped 24h PUT URL would silently expire
+   * within the hour. Clamping keeps the URL honest (D55).
+   */
+  maxPresignExpirySeconds?: () => number;
+}
+
 export class S3Blobs implements Blobs {
-  constructor(private config: Config) {}
+  constructor(private config: Config, private opts: S3BlobsOptions = {}) {}
 
   private get bucket() {
-    return this.config.bucketName;
+    return this.opts.bucket ?? this.config.bucketName;
+  }
+
+  private async client(): Promise<S3Client> {
+    return this.opts.client ? this.opts.client() : getS3Client(this.config);
+  }
+
+  private clampExpiry(expiresInSeconds: number): number {
+    const max = this.opts.maxPresignExpirySeconds?.();
+    return max === undefined ? expiresInSeconds : Math.min(expiresInSeconds, max);
   }
 
   async put(key: string, body: Buffer | Uint8Array): Promise<void> {
-    await getS3Client(this.config).send(
+    await (await this.client()).send(
       new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body }),
     );
   }
 
   async get(key: string): Promise<Buffer> {
-    const res = await getS3Client(this.config).send(
+    const res = await (await this.client()).send(
       new GetObjectCommand({ Bucket: this.bucket, Key: key }),
     );
     return Buffer.from(await res.Body!.transformToByteArray());
@@ -36,7 +66,7 @@ export class S3Blobs implements Blobs {
 
   async head(key: string): Promise<BlobHead | null> {
     try {
-      const res = await getS3Client(this.config).send(
+      const res = await (await this.client()).send(
         new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
       );
       return { contentLength: res.ContentLength ?? 0, etag: res.ETag ?? '' };
@@ -48,7 +78,7 @@ export class S3Blobs implements Blobs {
   }
 
   async setTags(key: string, tags: Record<string, string>): Promise<void> {
-    await getS3Client(this.config).send(
+    await (await this.client()).send(
       new PutObjectTaggingCommand({
         Bucket: this.bucket,
         Key: key,
@@ -58,7 +88,7 @@ export class S3Blobs implements Blobs {
   }
 
   async delete(key: string): Promise<void> {
-    await getS3Client(this.config).send(
+    await (await this.client()).send(
       new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
     );
   }
@@ -74,17 +104,17 @@ export class S3Blobs implements Blobs {
    */
   async presignPut(key: string, expiresInSeconds: number, contentMd5?: string): Promise<string> {
     return getSignedUrl(
-      getS3Client(this.config),
+      await this.client(),
       new PutObjectCommand({ Bucket: this.bucket, Key: key, ContentMD5: contentMd5 }),
-      { expiresIn: expiresInSeconds },
+      { expiresIn: this.clampExpiry(expiresInSeconds) },
     );
   }
 
   async presignGet(key: string, expiresInSeconds: number): Promise<string> {
     return getSignedUrl(
-      getS3Client(this.config),
+      await this.client(),
       new GetObjectCommand({ Bucket: this.bucket, Key: key }),
-      { expiresIn: expiresInSeconds },
+      { expiresIn: this.clampExpiry(expiresInSeconds) },
     );
   }
 
@@ -94,7 +124,8 @@ export class S3Blobs implements Blobs {
     expiresInSeconds: number,
     partMd5s?: readonly string[],
   ): Promise<MultipartUrls> {
-    const client = getS3Client(this.config);
+    const client = await this.client();
+    const expiresIn = this.clampExpiry(expiresInSeconds);
     const created = await client.send(
       new CreateMultipartUploadCommand({ Bucket: this.bucket, Key: key }),
     );
@@ -111,7 +142,7 @@ export class S3Blobs implements Blobs {
             // Per-part MD5 — the app sends one per part, so each must be signed.
             ContentMD5: partMd5s?.[i],
           }),
-          { expiresIn: expiresInSeconds },
+          { expiresIn },
         ),
       ),
     );
@@ -124,8 +155,21 @@ export class S3Blobs implements Blobs {
         Key: key,
         UploadId: uploadID,
       }),
-      { expiresIn: expiresInSeconds },
+      { expiresIn },
     );
     return { objectKey: key, uploadID, partUrls, completeUrl };
+  }
+
+  async abortMultipart(key: string, uploadID: string): Promise<void> {
+    const client = await this.client();
+    try {
+      await client.send(
+        new AbortMultipartUploadCommand({ Bucket: this.bucket, Key: key, UploadId: uploadID }),
+      );
+    } catch (err) {
+      // Completed or already-aborted upload — nothing left to abort (D65).
+      if ((err as { name?: string }).name === 'NoSuchUpload') return;
+      throw err;
+    }
   }
 }

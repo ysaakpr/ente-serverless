@@ -94,6 +94,12 @@
       "Resource": "arn:aws:iam::*:role/ente-sl-*"
     },
     {
+      "Sid": "OperatorAssumeRole",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/ente-sl-*-operator"
+    },
+    {
       "Sid": "Events",
       "Effect": "Allow",
       "Action": [
@@ -165,7 +171,17 @@
         "cloudfront:List*",
         "cloudfront:CreateResponseHeadersPolicy",
         "cloudfront:UpdateResponseHeadersPolicy",
-        "cloudfront:DeleteResponseHeadersPolicy"
+        "cloudfront:DeleteResponseHeadersPolicy",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:UpdateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:CreateInvalidation",
+        "cloudfront:CreateFunction",
+        "cloudfront:UpdateFunction",
+        "cloudfront:DeleteFunction",
+        "cloudfront:PublishFunction",
+        "cloudfront:DescribeFunction",
+        "cloudfront:TestFunction"
       ],
       "Resource": "*"
     },

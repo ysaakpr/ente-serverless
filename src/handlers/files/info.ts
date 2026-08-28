@@ -1,6 +1,12 @@
 /**
  * POST /files/info (auth) — src: pkg/controller/file.go GetFileInfo:
  * strict ownership (400 unknown ids / 403 foreign), -1 sizes for gone files.
+ *
+ * Re-verified against museum source at the Phase B authz seam: GetFileInfo
+ * gates on FileRepo.VerifyFileOwner — pure ownership, NOT shared-collection
+ * access — so a sharee asking about a shared file 403s in museum too. The
+ * PENDING-FEATURES-PLAN §1 audit note claiming museum "filters to accessible"
+ * was wrong; strict ownership stands, capture-gated (D49).
  */
 
 import type { Context } from 'hono';

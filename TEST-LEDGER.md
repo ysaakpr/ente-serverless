@@ -7,24 +7,43 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 |---|---|---|---|---|---|
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
+| admin-role.test.ts | ? | ? | 9 | 9 | ✅ |
+| albums-basepath-patch.test.ts | ? | ? | 5 | 5 | ✅ |
 | auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
-| collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 10 | 10 | ✅ |
+| collection-restamp.test.ts | ? | ? | 9 | 9 | ✅ |
+| collection-share.test.ts | ? | ? | 11 | 11 | ✅ |
+| collections.test.ts | [COLLECTIONS] [SYNC] | M4 | 11 | 11 | ✅ |
 | cors.test.ts | CORS preflight (gate finding D29) | M5 | 6 | 6 | ✅ |
 | db-counters.test.ts | F0 race-free capped counter (security review) | SEC | 4 | 4 | ✅ |
-| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 7 | 7 | ✅ |
+| db-transact.test.ts | transactWrite atomicity + 100-op cap (D48) | P3-A | 4 | 4 | ✅ |
+| e2e.int.test.ts | integration (LocalStack) | M1/M3 | 10 | 10 | ✅ |
 | entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
 | file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
-| lifecycle.test.ts | infra guards | M7 | 35 | 35 | ✅ |
+| invites.test.ts | [INVITES] [QUOTA] invite gating + per-user storage (D54) | H1 | 19 | 19 | ✅ |
+| join-link.test.ts | ? | ? | 4 | 4 | ✅ |
+| lifecycle.test.ts | infra guards | M7 | 45 | 45 | ✅ |
 | origin-lock.test.ts | origin lock (finding 4, D43) | SEC | 4 | 4 | ✅ |
 | ping.test.ts | [HEALTH] | M1 | 2 | 2 | ✅ |
+| pools.int.test.ts | ? | ? | 2 | 2 | ✅ |
 | presign-expiry.test.ts | presign expiry split (finding 5, D44) | SEC | 3 | 3 | ✅ |
 | presign-md5.test.ts | ? | ? | 5 | 5 | ✅ |
+| public-collect.test.ts | ? | ? | 5 | 5 | ✅ |
+| public-collection.test.ts | ? | ? | 11 | 11 | ✅ |
+| public-download.test.ts | ? | ? | 4 | 4 | ✅ |
+| public-password.test.ts | ? | ? | 5 | 5 | ✅ |
+| security-review-2.test.ts | ? | ? | 11 | 11 | ✅ |
 | send-ott.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
+| share-url.test.ts | ? | ? | 12 | 12 | ✅ |
+| sharing-authz.test.ts | ? | ? | 6 | 6 | ✅ |
+| sharing-feed.test.ts | ? | ? | 9 | 9 | ✅ |
+| sharing.test.ts | [SHARING] dual-write + link rows (D48) | P3-A | 10 | 10 | ✅ |
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
 | srp-endpoints.test.ts | [AUTH-SRP] | M1 | 24 | 24 | ✅ |
 | srp-math.test.ts | [AUTH-SRP] | M1 | 5 | 5 | ✅ |
+| stale-objects.test.ts | ? | ? | 5 | 5 | ✅ |
+| storage-pools.test.ts | ? | ? | 28 | 28 | ✅ |
 | stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 9 | 9 | ✅ |
 | subscription.test.ts | [BILLING] free-sub determinism (gate finding D30) | M5 | 7 | 7 | ✅ |
 | totp.test.ts | [AUTH-2FA] TOTP math (RFC 6238) | M5 | 11 | 11 | ✅ |
@@ -35,5 +54,6 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 5 | 5 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
+| web.test.ts | infra guards: albums web hosting (D52) | P3-F | 31 | 31 | ✅ |
 
-**Total: 271/271 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 485/485 passing.** CI must fail if any implemented endpoint is below 100%.

@@ -1,9 +1,12 @@
 # AWS-RESOURCES — what the first deploy creates
 
 Pre-deploy report for M7 (DECISIONS.md D4). Read alongside NEXT-TASKS.md §4.
-Derived from `src/infra` as of 2026-08-17; **no cloud deploy has happened yet**,
-so nothing below has been observed running — it is what `tofu apply` will
-attempt.
+Derived from `src/infra` as of 2026-08-17 (albums web hosting added
+2026-08-27, Phase F/D52, and consolidated onto the ONE distribution the same
+day, D58; the execution role's pool `sts:AssumeRole` statement added the same
+day, Phase H2/D55; the operator role for the `tools/` CLI added 2026-08-28,
+D64 — rows 7/8); **no cloud deploy has happened yet**, so nothing below
+has been observed running — it is what `tofu apply` will attempt.
 
 Names below are written as `ente-sl-dev-*` for continuity, but `region` and
 `env_name` now carry **no defaults** — both are required in `ente-sl.tfvars`, so
@@ -12,48 +15,92 @@ deployment in us-east-1. With `env_name = "prod"` every `-dev-` below reads
 `-prod-`. `<account>` is the 12-digit account ID, filled in at plan time from
 `aws_caller_identity`.
 
-## 1. The inventory — 22 managed resources
+## 1. The inventory — 29 managed resources
 
-### Stateful (`modules/data`) — carries `prevent_destroy`
+### Stateful (`modules/data`) — delete protection is variable-driven (D57)
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 1 | `aws_dynamodb_table` | `ente-sl-dev` | PAY_PER_REQUEST, `pk`/`sk`, **3 GSIs** (`gsi1` collection diff + purge due-index, `gsi2` collection feed, `gsi3` tokens/trash/entity/file-data), all `projection_type = ALL`. TTL on `ttl` (OTT expiry). PITR on. SSE on (AWS-owned key). `deletion_protection_enabled = true`. |
-| 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload. Account-ID suffix for global uniqueness. |
-| 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**, `prevent_destroy`. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
+| 1 | `aws_dynamodb_table` | `ente-sl-dev` | PAY_PER_REQUEST, `pk`/`sk`, **3 GSIs** (`gsi1` collection diff + purge due-index, `gsi2` collection feed, `gsi3` tokens/trash/entity/file-data), all `projection_type = ALL`. TTL on `ttl` (OTT expiry). PITR on. SSE on (AWS-owned key). `deletion_protection_enabled` follows the `delete_protection` variable (default **true** — blocks `DeleteTable` at the AWS API for everyone, console included; D57). |
+| 2 | `aws_s3_bucket` | `ente-sl-dev-objects-<account>` | Every encrypted byte the clients upload — except users attached to a BYO storage pool (D55), whose new uploads land in their pool's own bucket (not a managed resource; the file row pins which bucket holds it). Account-ID suffix for global uniqueness. `force_destroy = !delete_protection` (default: protection on — a destroy refuses while the bucket is non-empty; D57). |
+| 3 | `aws_s3_bucket_versioning` | ↑ | **Enabled**. Deletes become delete markers, so the object sweep (D6), a leaked token or a client mass-delete are all recoverable. Needs no IAM change — the role's `s3:DeleteObject` writes a marker, and it deliberately lacks `s3:DeleteObjectVersion`, so the API cannot destroy a photo. Guard-tested (mutation-checked). |
 | 4 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. |
 | 5 | `aws_s3_bucket_cors_configuration` | ↑ | `GET/PUT/POST/HEAD`, origins `*`, exposes `ETag` (multipart). For browser clients PUTting to presigned URLs. |
-| 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (day 0, filtered on object tag `tier=original` — D7), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
+| 6 | `aws_s3_bucket_lifecycle_configuration` | ↑ | Three rules: `originals-to-glacier-ir` (after `gir_transition_days`, default 7 — D7/D59; filtered on object tag `tier=original`), `abort-incomplete-multipart` (7 days), and `expire-noncurrent-versions` (30 days — the paid-for half of row 3). No DEEP_ARCHIVE anywhere; guard-tested in [test/infra/lifecycle.test.ts](test/infra/lifecycle.test.ts). |
+| 7 | `aws_iam_role` | `ente-sl-dev-operator` | The role the `tools/` CLI assumes — `invite.ts` (invite-gated signup + per-user storage, D54) and `storagePool.ts` (BYO-pool provisioning, D55). A **human** operator role, separate from the execution role, because these need `dynamodb:Scan` the request path deliberately lacks (D64). Trust: `operator_principal_arns` when set, else the **account root** (the self-host default). Named `ente-sl-*` so the deployer policy manages it with no change. |
+| 8 | `aws_iam_role_policy` | `ente-sl-dev-operator` | Inline. Scoped to the table + `/index/*` with `Get/Put/Update/Delete/Query/`**`Scan`** (Scan is the one action beyond the execution role's set — every `list` subcommand + pool-requeue's queue drain), plus `sts:AssumeRole` on `arn:aws:iam::*:role/ente-pool-*` for role-mode pool validation (same reach/rationale as the execution role's PoolAssumeRole). **No S3**: pool validation runs with the pool's own assumed-role or static keys, and no CLI path touches the central bucket. D64. |
 
 ### Stateless (`modules/compute`)
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 7 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
-| 8 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*`. |
-| 9 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
-| 10 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
-| 11 | `aws_lambda_permission` | `FunctionURLAllowPublicAccess` | Grants anonymous `lambda:InvokeFunctionUrl`. **Required** — auth NONE alone 403s every caller, CloudFront included. Guard-tested. |
-| 12 | `aws_lambda_function` | `ente-sl-dev-trash-purge` | nodejs22.x, arm64, 256 MB, 300 s. Drains the 30-day trash **and** the deferred object-sweep queue (D6). |
-| 13 | `aws_cloudwatch_event_rule` | `ente-sl-dev-trash-purge` | `rate(1 day)`. |
-| 14 | `aws_cloudwatch_event_target` | ↑ → the purge function | |
-| 15 | `aws_lambda_permission` | `AllowEventBridge` | Lets `events.amazonaws.com` invoke the purge function. |
-| 16 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-api` | 30-day retention. Created explicitly, so the role does **not** need `logs:CreateLogGroup`. |
-| 17 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-trash-purge` | 30-day retention. |
-| 18 | `aws_sns_topic` | `ente-sl-dev-alarms` | Alarm fan-out. |
-| 19 | `aws_sns_topic_subscription` | email → `alarm_email` (defaults to `mail_from`) | **Needs confirming from the inbox.** Until you click AWS's link the subscription stays pending and silently drops every alarm. |
-| 20 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-api-errors` | Lambda `Errors` > 0 over 5 min. |
-| 21 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-trash-purge-errors` | Lambda `Errors` > 0 over **86400 s** — a daily window for a daily cron. The failure this exists for: the purge drains the D6 object-sweep queue, so a silently dead cron means deleted bytes are never reclaimed and the bill grows with no other signal. |
+| 9 | `aws_iam_role` | `ente-sl-dev-api` | One execution role, **shared by both functions**. |
+| 10 | `aws_iam_role_policy` | `ente-sl-dev-api` | Inline. Scoped to the table + `/index/*`, the bucket + `/*`, `ses:SendEmail` on `*`, logs on `/aws/lambda/ente-sl-dev-*` — plus `sts:AssumeRole` on `*` for BYO pool buckets (D55): deliberate, because assuming a pool role also requires that role's trust policy to name this principal with the mandatory ExternalId, so enumerating pool ARNs would add churn, not security. Guard-tested. |
+| 11 | `aws_lambda_function` | `ente-sl-dev-api` | nodejs22.x, **arm64**, 512 MB, 30 s. Zip from `dist/lambda`. |
+| 12 | `aws_lambda_function_url` | on ↑ | `authorization_type = "NONE"` — deliberate (CloudFront is the canonical path; IAM auth breaks the POST body hash). |
+| 13 | `aws_lambda_permission` | `FunctionURLAllowPublicAccess` | Grants anonymous `lambda:InvokeFunctionUrl`. **Required** — auth NONE alone 403s every caller, CloudFront included. Guard-tested. |
+| 14 | `aws_lambda_function` | `ente-sl-dev-trash-purge` | nodejs22.x, arm64, 256 MB, 300 s. Drains the 30-day trash **and** the deferred object-sweep queue (D6). |
+| 15 | `aws_cloudwatch_event_rule` | `ente-sl-dev-trash-purge` | `rate(1 day)`. |
+| 16 | `aws_cloudwatch_event_target` | ↑ → the purge function | |
+| 17 | `aws_lambda_permission` | `AllowEventBridge` | Lets `events.amazonaws.com` invoke the purge function. |
+| 18 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-api` | 30-day retention. Created explicitly, so the role does **not** need `logs:CreateLogGroup`. |
+| 19 | `aws_cloudwatch_log_group` | `/aws/lambda/ente-sl-dev-trash-purge` | 30-day retention. |
+| 20 | `aws_sns_topic` | `ente-sl-dev-alarms` | Alarm fan-out. |
+| 21 | `aws_sns_topic_subscription` | email → `alarm_email` (defaults to `mail_from`) | **Needs confirming from the inbox.** Until you click AWS's link the subscription stays pending and silently drops every alarm. |
+| 22 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-api-errors` | Lambda `Errors` > 0 over 5 min. |
+| 23 | `aws_cloudwatch_metric_alarm` | `ente-sl-dev-trash-purge-errors` | Lambda `Errors` > 0 over **86400 s** — a daily window for a daily cron. The failure this exists for: the purge drains the D6 object-sweep queue, so a silently dead cron means deleted bytes are never reclaimed and the bill grows with no other signal. |
 
 `Errors` counts **failed invocations** — crashes, timeouts, OOM, init failures.
 It does *not* count application errors hono handles and returns, so the SES-500
 on `POST /users/ott` will not fire an alarm. That one is a log concern.
 
-### Edge (`modules/edge`)
+### Edge (`modules/edge`) — the ONE distribution (D58, layout D60) + albums web hosting (Phase F, D52)
+
+One CloudFront distribution per environment serves **both** the API and the
+pinned albums viewer (`ORACLE-VERSION` "albums web" line; built by
+`make build-web`, synced by `make deploy-web`). Consolidated by D58 from the
+former two-distribution layout: the FREE pricing plan allows at most **3
+distributions per account** and covers one distribution + one web ACL per
+subscription, so one per env is what lets prod AND test both ride the $0
+plan (2 of 3 used). The behavior layout is D60's: the FREE tier also caps a
+distribution at **5 cache behaviors** (subscribing the first D58 cut's 17
+was refused with "You're using configuration not available in this tier: 17
+cache behaviors (limit 5)"), so the API owns the DEFAULT behavior and the
+web app the single `/albums*` behavior — 2 of 5. Share links are
+`https://<server_url domain>/albums/?t=<token>` — `albums_url` is
+`server_url` + `/albums` now.
 
 | # | Type | Name / identifier | Notes |
 |---|---|---|---|
-| 22 | `aws_cloudfront_distribution` | comment `ente-sl-dev api` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert, no OAC (deliberate — same finding as immich-serverless). Managed **CachingDisabled** + **AllViewerExceptHostHeader** policies. All 7 methods allowed. Its domain is the `server_url` output the app gets pointed at. |
+| 24 | `aws_cloudfront_distribution` | comment `ente-sl-dev api + albums web` | `PriceClass_All` (FREE-plan requirement, D47; the old `PriceClass_200` analysis in §2.1 applies only on pay-as-you-go), IPv6 on, default `*.cloudfront.net` cert. **2 cache behaviors — the FREE plan caps them at 5 (D60, guard-tested)**. **DEFAULT behavior = the API**: the Lambda Function URL origin (no OAC there, deliberate — same finding as immich-serverless; `x-origin-secret` injected per-origin), managed **CachingDisabled** + **AllViewerExceptHostHeader**, all 7 methods, https-only — unknown paths 404 museum-shaped from the app, and new route groups need no edge change. **`/albums*`** → the web bucket via OAC (assets under the `albums/` key prefix, URI = object key): managed **CachingOptimized**, the row-23 SPA function, GET/HEAD only, compressed; index.html freshness is origin metadata (`Cache-Control: no-cache`, set by `make deploy-web` — no dedicated behavior). No `default_root_object` (`/` belongs to the API). **NO `custom_error_response`** — error responses are distribution-wide and would rewrite the API's museum-shaped 404/403 JSON into HTML (the D58 load-bearing constraint, guard-tested). Its domain is the `server_url` output the app gets pointed at; the Lambda's `ALBUMS_URL` is that domain + `/albums`. |
+| 25 | `aws_cloudfront_function` | `ente-sl-dev-spa-rewrite` | Viewer-request, cloudfront-js-2.0, attached to the **`/albums*` behavior only**: URIs whose last segment has no extension (bare `/albums` and `/albums/` included) rewrite to `/albums/index.html` (the SPA fallback that replaced `custom_error_response`); asset paths pass through. |
+| 26 | `aws_s3_bucket` | `ente-sl-dev-web-albums-<account>` | Build artifacts only — unconditionally `force_destroy = true` (not tied to `delete_protection`), **no** versioning: `make destroy` takes it down and `make build-web && make deploy-web` restores it. Never confuse with the objects bucket. |
+| 27 | `aws_s3_bucket_public_access_block` | ↑ | All four blocks on. The bucket is never public. |
+| 28 | `aws_s3_bucket_policy` | ↑ | `s3:GetObject` to the `cloudfront.amazonaws.com` service principal only, condition-pinned (`AWS:SourceArn`) to distribution 22. |
+| 29 | `aws_cloudfront_origin_access_control` | `ente-sl-dev-web-albums` | sigv4, `signing_behavior = always`. The repo's "no OAC" decision applies to the **Lambda** origin (IAM auth breaks the POST body hash); an S3 origin takes OAC cleanly and must have it. |
+
+Pricing consequences of the consolidation, all deliberate (D47/D58):
+
+- **Everything — API and albums assets — rides the one FREE-plan
+  subscription** (per environment; `make deploy` chains the idempotent
+  subscribe post-apply since D60, with `make pricing-plan` as the manual
+  fallback its WARNING names — an unsubscribed env silently pays ~$6/mo of
+  flat WAF fees on pay-as-you-go). The plan's soft allowances (1M requests / 100 GB per
+  month) see small JSON plus a few MB of static assets; photo bytes ride
+  presigned S3 and never cross the distribution. Account-wide FREE-plan
+  budget: **3 distributions max — prod + test = 2, one spare.**
+- **The WAF web ACL fronts both surfaces now.** Rate limiting for the
+  anonymous **`/public-collection/*` API surface** (plan §4.1a) is the
+  D47-reshaped 2000/5min/IP rule, which also counts (cached) web-asset hits
+  — WAF evaluates before the cache — erring only stricter. A *tighter,
+  path-scoped* rate rule is not possible under the FREE plan — scoping a rate
+  statement to the `/public-collection` prefix needs a byte-match scope-down,
+  exactly the feature the FREE tier gates — so the narrower bounds are
+  app-level and per-link instead (D51: token check as one `GetItem`
+  cheap-fail, verify-password attempt caps, per-link daily download/upload
+  ceilings, short public presigns), with reserved concurrency and the budget
+  alarms as the bill fuses. Restore the 300/5min scoped rule only if the plan
+  is ever cancelled back to pay-as-you-go.
 
 Everything carries default tags `Project=ente-serverless`, `Env=dev`,
 `ManagedBy=opentofu`.
@@ -124,7 +171,13 @@ These are the actual gating work for the first apply.
 3. **The deployer principal.** `src/infra/deployer-policy.json` is a policy
    document, not a resource — the IAM user/role that carries it is a manual
    bootstrap step. It is scoped to `ente-sl-*` and deliberately omits
-   `dynamodb:DeleteTable` and `s3:DeleteBucket`.
+   `dynamodb:DeleteTable` and `s3:DeleteBucket`. Its DynamoDB grant is
+   control-plane only (no `GetItem`/`Scan`/`PutItem`), so it cannot run the
+   `tools/` CLI directly; it carries `sts:AssumeRole` on
+   `ente-sl-*-operator` (Sid `OperatorAssumeRole`, D64) to assume the operator
+   role instead — `make invite`/`make pool-*` do this automatically via
+   `tools/with-operator-role.sh`. **Re-apply the policy to your principal after
+   pulling D64** (this is a doc, not a tofu-managed resource).
 
 4. **`src/infra/dev/ente-sl.tfvars`.** Gitignored, does not exist yet. Copy the
    example, generate `hashing_key` with `openssl rand -base64 32`, and **back
@@ -170,11 +223,12 @@ Ordered by how likely each is to bite on the first apply.
     cannot follow you.
 
 - **GLACIER_IR's 90-day minimum collides with the 30-day trash purge.** Objects
-  transition to GIR on day 0, and GIR bills a 90-day minimum duration (plus a
-  128 KB minimum billable size per object). A photo uploaded and then
-  trash-purged after 30 days is still charged for the remaining ~60 days. Not a
-  bug, but it means churn costs more than the storage line suggests, and it is
-  worth recording once real numbers exist.
+  transition to GIR after `gir_transition_days` (default 7 — D59), and GIR
+  bills a 90-day minimum duration (plus a 128 KB minimum billable size per
+  object). A photo uploaded and then trash-purged after 30 days is still
+  charged for most of the remaining minimum. Not a bug, but it means churn
+  costs more than the storage line suggests, and it is worth recording once
+  real numbers exist.
 
 - **Byte egress bypasses CloudFront.** Clients GET originals straight from S3
   via presigned URLs, so downloads are billed as **S3 internet egress**
@@ -188,7 +242,9 @@ Ordered by how likely each is to bite on the first apply.
   anyone with `lambda:GetFunctionConfiguration`, and stored unencrypted in the
   local tfstate. D4a covers *losing* it; it does not cover *at-rest exposure*.
   Acceptable for a single-owner account; Secrets Manager or an SSM SecureString
-  is the upgrade if this ever grows a second operator.
+  is the upgrade if this ever grows a second operator. Since D55 it also keys
+  the secretbox encryption of keys-mode pool credentials, so leaking it leaks
+  those too — one more reason it stays the deployment's single root secret.
 
 - **Auth tokens can travel in the query string.** Museum accepts `?token=` on
   every private route and the web/desktop client relies on it for thumbnails
@@ -223,16 +279,37 @@ Ordered by how likely each is to bite on the first apply.
   must vary on `Origin`, since `Access-Control-Allow-Origin` echoes the
   caller. The S3 bucket keeps its own separate CORS config (row 4).
 
-- **Teardown is deliberately hard, and the targets reflect that.**
-  `prevent_destroy` on the table and bucket, `deletion_protection_enabled` on
-  the table, no `force_destroy` on the bucket. So `make destroy` is scoped to
-  `module.compute` + `module.edge` only — it removes the lambdas, the cron, the
-  logs and the distribution, and cannot reach a photo. A bare `tofu destroy`
-  would fail on the rails anyway; `make destroy-data` refuses outright and
-  prints the four manual steps instead. Guard-tested so the scoping can't be
-  widened by an edit. **Re-applying after a destroy mints a new CloudFront
-  domain and a new function URL**, so every client needs re-pointing — that,
-  not data loss, is the real cost of tearing the stateless half down.
+- **Teardown is deliberately hard, and the rails are variable-driven (D57).**
+  The old lifecycle `prevent_destroy` blocks are gone — tofu only accepts
+  them as literals, so they could never vary per environment, and they only
+  ever stopped tofu itself. In their place one module variable,
+  `delete_protection` (default **true**), drives two API-level rails:
+  `deletion_protection_enabled` on the table (blocks `DeleteTable` for
+  everyone, console included — strictly stronger than `prevent_destroy`) and
+  `force_destroy = !delete_protection` on the objects bucket (protection on:
+  the destroy refuses while the bucket is non-empty — today's effective
+  behavior; the web-albums bucket in row 24 is build artifacts and stays
+  unconditionally `force_destroy`). `make destroy` is scoped to
+  `module.compute` + `module.edge` only — it removes the lambdas, the cron,
+  the logs, the distribution and the web bucket, and cannot reach a photo —
+  and since D57 it is also profile-aware: it banners
+  `>>> profile: <name> (ENV: PRODUCTION|TEST)`, and tofu's own interactive
+  approval prompt is the final confirmation (the extra typed-profile gate was
+  dropped 2026-08-27 — D57 addendum; nothing passes `-auto-approve`). On the
+  **test** profile with
+  `delete_protection = false` in its tfvars, full teardown is
+  `make profile test && make destroy` followed by the `destroy-data` steps —
+  which now amount to flipping the variable and destroying, no console
+  surgery. On **dev (= production)** `make destroy-data` still refuses
+  outright and prints the manual steps. Guard-tested so neither the scoping
+  nor the protection default can be widened by an edit. **Re-applying after a
+  destroy mints a new CloudFront domain and a new function URL**, so every
+  client needs re-pointing, the albums app needs rebuilding against the new
+  `server_url` (INSTALL C13), share links minted before the destroy point at
+  the dead domain (tokens stay valid — re-copy each link from the app), and
+  `ALBUMS_URL` needs the routine second plan/deploy to pick the new domain up
+  (the D58 hint reads the state) — that, not data loss, is the real cost of
+  tearing the stateless half down.
 
 - **The deployer policy is a privilege-escalation path if leaked.** It grants
   `iam:CreateRole` + `iam:PutRolePolicy` + `iam:PassRole` on `ente-sl-*` with no
@@ -293,11 +370,14 @@ Ordered by how likely each is to bite on the first apply.
 The execution role covers exactly what the code calls, no more. Adapters issue
 `Get/Put/Update/Delete/Query/TransactWrite` on DynamoDB (no `Scan`), and
 `GetObject / PutObject / DeleteObject / HeadObject / PutObjectTagging /
-CreateMultipartUpload` plus presigned multipart on S3, and `ses:SendEmail`.
-Every one has a matching statement; `HeadObject` rides on `s3:GetObject` and
-the client's presigned multipart calls ride on the role's `PutObject` +
-`AbortMultipartUpload` + `ListMultipartUploadParts`. No unused grant except the
-broad `ses:SendEmail` resource `*`, which could be narrowed to the identity ARN.
+CreateMultipartUpload` plus presigned multipart on S3, and `ses:SendEmail`,
+and (D55) `sts:AssumeRole` against pool roles. Every one has a matching
+statement; `HeadObject` rides on `s3:GetObject` and the client's presigned
+multipart calls ride on the role's `PutObject` + `AbortMultipartUpload` +
+`ListMultipartUploadParts`. The two broad resources are deliberate:
+`ses:SendEmail` on `*` (could be narrowed to the identity ARN) and
+`sts:AssumeRole` on `*` (the pool role's own trust policy + ExternalId is the
+real gate — see row 8).
 
 ## 4. Rough cost model
 
@@ -317,12 +397,15 @@ For a ~500 GB library with ~10 GB of thumbnails and personal-scale traffic:
 | WAF (web ACL + D43 rate rule) | $5 + $1 flat + $0.60/1M req | $0 under D47, else ≈ $6 |
 | CloudWatch Logs | 30-day retention, $0.50/GB ingest | < $1 |
 | SES | $0.10 / 1,000 mails | ~$0 |
+| Albums web (S3 bucket + the same distribution, D52/D58) | a few MB of assets riding the consolidated distribution's FREE plan | ~$0 |
 | **Baseline** | | **≈ $3–5** |
 
 The WAF line is the one worth understanding: on pay-as-you-go its flat fees
 dwarf every other line, so the distribution subscribes to the CloudFront
-flat-rate **FREE** pricing plan (`make pricing-plan`, D47), which covers the
-web ACL, the rule, and all CloudFront/WAF request fees for this distribution.
+flat-rate **FREE** pricing plan (once **per environment** — `make deploy`
+chains the idempotent subscribe post-apply, `make pricing-plan` is the
+manual fallback; D47/D58/D60), which covers the web ACL, the rule, and all
+CloudFront/WAF request fees for this distribution.
 Its 1M-request / 100 GB monthly allowances see only the small-JSON API path —
 photo bytes ride presigned S3 URLs straight to the bucket and never touch the
 distribution — and exceeding them never bills; AWS emails, and only sustained
@@ -333,6 +416,20 @@ Variable, and the part that actually matters: **GIR retrieval at $0.03/GB** plus
 **S3 egress at $0.09/GB** on every full-resolution download past the first
 100 GB/month. Browsing is cheap (thumbnails stay Standard); a full library
 restore is not — 500 GB out is roughly $15 retrieval + $36 egress.
+
+The `gir_transition_days` knob (default 7 — D59) trims the retrieval line
+where it bites hardest: fresh uploads are the most-viewed, so originals sit in
+Standard for their first week before moving to GIR. The math: a day in
+Standard costs ≈ $0.023/GB-month prorated (~$0.0008/GB/day, so the whole week
+adds ~$0.006/GB once, per object), while a single early full-res view under a
+day-0 transition billed $0.03/GB retrieval every time. Raise the knob if new
+photos get re-watched for weeks; 0 restores transition-at-once.
+
+BYO storage pools (D55) change whose bill the storage lines land on, not the
+totals: a pooled user's S3 storage, retrieval and egress bill to the
+household's own bucket account, leaving this account the control plane —
+roughly $1–3/month — plus storage for any users still on the central bucket
+(plan §7 records the cost outcome).
 
 ## 5. Prep checklist, in order
 
@@ -359,15 +456,24 @@ Steps 1–4 are the out-of-band work; from step 5 on it is all make targets.
    dropped by the repo split.
 6. **`make plan`** — rebuilds the bundles first (so `dist/` can never be stale
    at plan time), refuses with instructions if the tfvars file is missing, and
-   saves `tfplan`. Expect **22 to add, 0 to change, 0 to destroy**. Read it.
+   saves `tfplan`. Expect **27 to add, 0 to change, 0 to destroy** on a fresh
+   deploy (an existing pre-D58 deployment instead gets the consolidation
+   plan: 4 moved, 1 add, 3 in-place changes, 1 destroy — see INSTALL's
+   migration section; **any replace line on the main distribution means
+   stop**). Read it.
 7. **`make deploy`** — applies the *saved* plan, so what ships is what you
-   reviewed, then prints the outputs. CloudFront takes 5–15 minutes to reach
-   Deployed; the other 21 resources are quick. Then confirm the SNS
-   subscription email, or the alarms in rows 20-21 never reach you.
-8. **`make smoke`** — pings the function URL and the distribution. Two 200s
-   means the edge is live. A 403 on the function URL would mean row 10 went
-   missing; a guard makes that unlikely now, but the config is not the
-   deployment.
+   reviewed, then prints the outputs. The CloudFront distribution takes
+   5–15 minutes to reach Deployed; the other resources are quick. Then
+   confirm the SNS
+   subscription email, or the alarms in rows 20-21 never reach you. On a
+   fresh env, run `make plan && make deploy` once more afterwards so
+   `ALBUMS_URL` picks up the new distribution's domain (the D58 hint reads
+   it from the state the first apply just wrote).
+8. **`make smoke`** — pings the function URL and the distribution. Healthy is
+   **403 on the function URL** (the D43 origin lock refusing a direct call)
+   and **200 via CloudFront**. Both returning 403 would mean row 11's
+   public-invoke permission went missing or the origin secret is mismatched;
+   a guard makes that unlikely now, but the config is not the deployment.
 9. **Replay the M1–M6 gate scripts against `server_url`**, then the stock app
    over the internet (build plan M7).
 

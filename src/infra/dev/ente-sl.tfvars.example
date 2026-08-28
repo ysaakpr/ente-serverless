@@ -32,6 +32,33 @@ region = "ap-southeast-1"
 # Either way, CONFIRM the subscription link AWS sends, or alarms go nowhere.
 # alarm_email = "ops@example.com"
 
+# Optional. Where public album share links point (D52). Omit and links use the
+# web module's own CloudFront domain (the albums_url output), which is right
+# until a custom domain fronts the albums app. Origin only — no path, no
+# trailing slash: the server appends /?t=<token> itself.
+# albums_url = "https://albums.example.com"
+
+# Optional. Days originals stay in S3 Standard before moving to GLACIER_IR
+# (D59, default 7). The tradeoff: day N in Standard costs ≈ $0.023/GB-month
+# prorated (~$0.0008/GB per day), while GIR charges $0.03/GB retrieval — and
+# fresh uploads are exactly the ones people view. 0 = transition at once
+# (cheapest storage, pays retrieval on every early view); raise it if your
+# household re-watches new photos for weeks.
+# gir_transition_days = 7
+
+# Optional. Invite-gated signup (D54/D56): "invite" admits only emails invited
+# via `make invite`; omit for open signup (the default). Only account CREATION
+# is gated — login and existing accounts are untouched either way.
+# signup_mode = "invite"
+
+# Optional. Who may assume ente-sl-<env>-operator, the role the tools/ CLI runs
+# under (invite.ts, storagePool.ts — they need dynamodb:Scan the request path
+# lacks, D64). Omit to trust the ACCOUNT ROOT — the self-host default, where the
+# operator owns the account. Set it to specific IAM user / SSO-role ARNs to
+# narrow who can assume it. Point an AWS profile's role_arn at the role, then
+# run the make targets under it (`AWS_PROFILE=... make invite ...`).
+# operator_principal_arns = ["arn:aws:iam::<account>:user/ops"]
+
 # Names everything: table ente-sl-<env>, bucket ente-sl-<env>-objects-<account>,
 # both lambdas, the IAM role, the log groups, the Env tag. The deployer policy is
 # scoped to ente-sl-* so any value works.

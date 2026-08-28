@@ -51,6 +51,20 @@ resource "aws_lambda_function" "api" {
       MAIL_FROM               = var.mail_from
       INSTANCE_ID             = local.prefix
       FREE_PLAN_STORAGE_BYTES = tostring(var.free_plan_storage_bytes)
+      # Invite-gated signup (D54/D56): "open" leaves the surface byte-identical
+      # to pre-H1; "invite" gates account creation on an unconsumed invite row.
+      SIGNUP_MODE = var.signup_mode
+      # Public album links (Phase D/F, D51/D52): where minted links point —
+      # `<ALBUMS_URL>/?t=<token>` — since D58 the same domain as server_url
+      # (the one distribution serves both the API and the albums app; the env
+      # root wires the value via the make-injected albums_url_hint, because a
+      # direct reference to the distribution would be a dependency cycle).
+      ALBUMS_URL = var.albums_url
+      # Short public presign + the per-link daily ceilings (plan §4.1/§4.2).
+      PRESIGN_PUBLIC_GET_EXPIRY_SECONDS = tostring(var.presign_public_get_expiry_seconds)
+      PUBLIC_LINK_DAILY_DOWNLOADS       = tostring(var.public_link_daily_downloads)
+      PUBLIC_LINK_DAILY_UPLOADS         = tostring(var.public_link_daily_uploads)
+      PUBLIC_LINK_DAILY_DEVICES         = tostring(var.public_link_daily_devices)
       # Origin lock (finding 4): the app 403s any request not carrying this
       # value in x-origin-secret; CloudFront injects it at the origin, so the
       # public Function URL stops bypassing every edge control.

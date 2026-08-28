@@ -3,6 +3,14 @@ museum image: ghcr.io/ente/server@sha256:f646b68a1b8d27e3375a67e3719ed6af97e9501
                source the contract shapes were pinned against)
 app APK:      io.ente.photos — pin at M5 device-gate time: record the then-current
               Play Store version here before running the gate (decision D1b)
+albums web:   ente-io/ente tag photos-v1.3.61 (released 2026-08-11; the albums
+              viewer lives at web/apps/albums and rides the photos-v* tag family —
+              no tag family of its own). Pinned 2026-08-27 for Phase F (plan §4.5
+              "pin the albums web app too", decision D52). The Makefile's
+              ALBUMS_WEB_TAG must equal this tag (guard-tested); bump both
+              together, then rebuild + redeploy with build-web/deploy-web and
+              re-run the manual open-a-real-link checklist (RUNBOOK-M5 style)
+              before trusting the new build.
 Captures:     full capture-diff parity still pending (DECISIONS.md D2). Two targeted
               captures taken 2026-08-17 against the pinned image:
               1. CORS preflight + actual-response headers (OPTIONS/POST /users/ott,

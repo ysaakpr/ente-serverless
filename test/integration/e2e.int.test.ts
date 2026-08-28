@@ -201,6 +201,34 @@ describe('M1 gate on LocalStack', () => {
 
     await world.deps.db.delete(pk, 'META');
   });
+
+  /**
+   * Phase A (PENDING-FEATURES-PLAN §4.7): the sharing dual-writes assume a
+   * failing condition rolls back EVERY op in the batch on real DynamoDB —
+   * MemoryDb proves the port contract, this proves the adapter honours it.
+   */
+  it('DynamoDB rolls back the whole transactWrite batch on a failed condition', async () => {
+    const ns = `int-${randomUUID()}`;
+    await world.deps.db.put({ pk: `COL#${ns}`, sk: 'SHAREE#1', role: 'VIEWER' });
+    await world.deps.db.put({ pk: `COL#${ns}`, sk: 'LINK', tokenHash: 'existing' });
+
+    await expect(
+      world.deps.db.transactWrite([
+        { kind: 'put', item: { pk: `COL#${ns}`, sk: 'SHAREE#2', role: 'VIEWER' } },
+        { kind: 'delete', key: { pk: `COL#${ns}`, sk: 'SHAREE#1' } },
+        // Condition failure: the LINK pointer above already exists.
+        { kind: 'put', ifNotExists: true, item: { pk: `COL#${ns}`, sk: 'LINK', tokenHash: 'x' } },
+      ]),
+    ).rejects.toBeInstanceOf(ConditionFailedError);
+
+    // Put rolled back, delete rolled back, loser's pointer never landed.
+    expect(await world.deps.db.get(`COL#${ns}`, 'SHAREE#2')).toBeNull();
+    expect((await world.deps.db.get(`COL#${ns}`, 'SHAREE#1'))!.role).toBe('VIEWER');
+    expect((await world.deps.db.get(`COL#${ns}`, 'LINK'))!.tokenHash).toBe('existing');
+
+    await world.deps.db.delete(`COL#${ns}`, 'SHAREE#1');
+    await world.deps.db.delete(`COL#${ns}`, 'LINK');
+  });
 });
 
 describe('M3 gate on LocalStack (real presigned HTTP)', () => {
@@ -363,5 +391,181 @@ describe('SES delivery on LocalStack', () => {
     const mine = messages.messages.filter((m) => m.Destination.ToAddresses.includes(email));
     expect(mine.length).toBe(1);
     expect(mine[0]!.Subject).toMatch(/^Verification code: \d{6}$/);
+  });
+});
+
+describe('Phase C sharing on LocalStack (real transactWrite paths)', () => {
+  it('share -> sharee feed -> unshare tombstone -> re-share resurrection, on DynamoDB', async () => {
+    const ownerKeys = makeClientKeys();
+    const mateEmail = uniqueEmail();
+    const owner = await fullSignup(uniqueEmail(), ownerKeys);
+    const mate = await fullSignup(mateEmail, makeClientKeys());
+
+    const create = await world.request('POST', '/collections', {
+      token: owner.token,
+      body: {
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        encryptedName: b64(randomBytes(12)),
+        nameDecryptionNonce: b64(randomBytes(24)),
+        type: 'album',
+        attributes: { version: 0 },
+      },
+    });
+    expect(create.status).toBe(200);
+    const album = ((await create.json()) as { collection: { id: number } }).collection.id;
+
+    // Share (dual-write + tombstone-delete transaction on real DynamoDB).
+    const wrapped = b64(randomBytes(80));
+    const share = await world.request('POST', '/collections/share', {
+      token: owner.token,
+      body: { collectionID: album, email: mateEmail, encryptedKey: wrapped },
+    });
+    expect(share.status).toBe(200);
+    expect(((await share.json()) as { sharees: Array<{ id: number }> }).sharees.map((s) => s.id)).toEqual([mate.id]);
+
+    // Sharee feed: the entry carries THEIR wrapped key and the owner's email.
+    const getV2 = async (token: string, sinceTime = 0) => {
+      const res = await world.request('GET', `/collections/v2?sinceTime=${sinceTime}`, { token });
+      expect(res.status).toBe(200);
+      return ((await res.json()) as {
+        collections: Array<{ id: number; encryptedKey: string; isDeleted?: boolean; updationTime: number; owner: { email: string } }>;
+      }).collections;
+    };
+    const feed = await getV2(mate.token);
+    const entry = feed.find((c) => c.id === album)!;
+    expect(entry.encryptedKey).toBe(wrapped);
+    const synced = Math.max(...feed.map((c) => c.updationTime));
+
+    // Unshare (row deletes + tombstone put in ONE TransactWriteItems).
+    const unshare = await world.request('POST', '/collections/unshare', {
+      token: owner.token,
+      body: { collectionID: album, email: mateEmail },
+    });
+    expect(unshare.status).toBe(200);
+    const delta = await getV2(mate.token, synced);
+    expect(delta.find((c) => c.id === album)!.isDeleted).toBe(true);
+
+    // Re-share resurrects: the tombstone delete rides the same transaction.
+    const reshare = await world.request('POST', '/collections/share', {
+      token: owner.token,
+      body: { collectionID: album, email: mateEmail, encryptedKey: b64(randomBytes(80)) },
+    });
+    expect(reshare.status).toBe(200);
+    const back = await getV2(mate.token);
+    expect(back.filter((c) => c.id === album)).toHaveLength(1);
+    expect(back.find((c) => c.id === album)!.isDeleted).toBeUndefined();
+  });
+});
+
+describe('Phase D public link on LocalStack (anonymous end to end)', () => {
+  it('share-url -> info -> diff -> download bytes -> collect upload -> disable, all by raw token', async () => {
+    const { createHash } = await import('node:crypto');
+    const owner = await fullSignup(uniqueEmail(), makeClientKeys());
+
+    const create = await world.request('POST', '/collections', {
+      token: owner.token,
+      body: {
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        type: 'album',
+      },
+    });
+    const album = ((await create.json()) as { collection: { id: number } }).collection.id;
+
+    // Owner uploads one photo the normal way.
+    const cipher = randomBytes(64 * 1024);
+    const thumb = randomBytes(2048);
+    const urlsRes = await world.request('GET', '/files/upload-urls?count=2', { token: owner.token });
+    const { urls } = (await urlsRes.json()) as { urls: Array<{ objectKey: string; url: string }> };
+    expect((await fetch(urls[0]!.url, { method: 'PUT', body: cipher })).status).toBe(200);
+    expect((await fetch(urls[1]!.url, { method: 'PUT', body: thumb })).status).toBe(200);
+    const commit = await world.request('POST', '/files', {
+      token: owner.token,
+      body: {
+        id: 0,
+        collectionID: album,
+        encryptedKey: b64(randomBytes(48)),
+        keyDecryptionNonce: b64(randomBytes(24)),
+        file: { objectKey: urls[0]!.objectKey, decryptionHeader: b64(randomBytes(24)) },
+        thumbnail: { objectKey: urls[1]!.objectKey, decryptionHeader: b64(randomBytes(24)) },
+        metadata: { encryptedData: b64(randomBytes(64)), decryptionHeader: b64(randomBytes(24)) },
+      },
+    });
+    expect(commit.status).toBe(200);
+    const fileId = ((await commit.json()) as { id: number }).id;
+
+    // Mint the link; the token is only ever shown here.
+    const mint = await world.request('POST', '/collections/share-url', {
+      token: owner.token,
+      body: { collectionID: album, enableCollect: true },
+    });
+    expect(mint.status).toBe(200);
+    const { result } = (await mint.json()) as { result: { url: string } };
+    const accessToken = new URL(result.url).searchParams.get('t')!;
+    const anon = (method: string, path: string, body?: unknown) =>
+      world.request(method, path, {
+        body,
+        headers: { 'x-auth-access-token': accessToken },
+      });
+
+    // Anonymous info + diff on the real adapters (device admission writes a
+    // real transactWrite: device row + counter).
+    const info = await anon('GET', '/public-collection/info');
+    expect(info.status).toBe(200);
+    const { collection } = (await info.json()) as { collection: { id: number; owner: { email: string } } };
+    expect(collection.id).toBe(album);
+    expect(collection.owner.email).toBe('');
+    const diff = await anon('GET', '/public-collection/diff?sinceTime=0');
+    expect(diff.status).toBe(200);
+    expect(((await diff.json()) as { diff: Array<{ id: number }> }).diff.map((f) => f.id)).toContain(fileId);
+
+    // Anonymous download: presigned GET round-trips the exact bytes.
+    const dl = await anon('GET', `/public-collection/files/download/v3/${fileId}`);
+    expect(dl.status).toBe(200);
+    const { url } = (await dl.json()) as { url: string };
+    expect(Buffer.from(await (await fetch(url)).arrayBuffer())).toEqual(Buffer.from(cipher));
+
+    // Collect: anonymous presigned PUT (Content-MD5 is SIGNED — D23/D37) and
+    // commit; the file lands owned by the link owner.
+    const guestBytes = randomBytes(32 * 1024);
+    const guestThumb = randomBytes(1024);
+    const guestKeys: string[] = [];
+    for (const body of [guestBytes, guestThumb]) {
+      const md5 = createHash('md5').update(body).digest('base64');
+      const mintUrl = await anon('POST', '/public-collection/upload-url', {
+        contentLength: body.length,
+        contentMD5: md5,
+      });
+      expect(mintUrl.status).toBe(200);
+      const { objectKey, url: putUrl } = (await mintUrl.json()) as { objectKey: string; url: string };
+      const put = await fetch(putUrl, { method: 'PUT', body, headers: { 'Content-MD5': md5 } });
+      expect(put.status).toBe(200);
+      guestKeys.push(objectKey);
+    }
+    const guestCommit = await anon('POST', '/public-collection/file', {
+      id: 0,
+      collectionID: album,
+      encryptedKey: b64(randomBytes(48)),
+      keyDecryptionNonce: b64(randomBytes(24)),
+      file: { objectKey: guestKeys[0], decryptionHeader: b64(randomBytes(24)) },
+      thumbnail: { objectKey: guestKeys[1], decryptionHeader: b64(randomBytes(24)) },
+      metadata: { encryptedData: b64(randomBytes(64)), decryptionHeader: b64(randomBytes(24)) },
+    });
+    expect(guestCommit.status).toBe(200);
+    const collected = (await guestCommit.json()) as { id: number; ownerID: number };
+    expect(collected.ownerID).toBe(owner.id);
+    // ... and the owner's quota carries both uploads.
+    const details = await world.request('GET', '/users/details/v2', { token: owner.token });
+    expect(((await details.json()) as { usage: number }).usage).toBe(
+      cipher.length + thumb.length + guestBytes.length + guestThumb.length,
+    );
+
+    // Disable: the raw token dies immediately (410, museum's disabled shape).
+    const kill = await world.request('DELETE', `/collections/share-url/${album}`, { token: owner.token });
+    expect(kill.status).toBe(200);
+    const dead = await anon('GET', '/public-collection/info');
+    expect(dead.status).toBe(410);
+    expect(await dead.json()).toEqual({ error: 'disabled token' });
   });
 });

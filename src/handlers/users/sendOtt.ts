@@ -15,6 +15,7 @@ import type { Deps } from '../../deps.ts';
 import { appFromClientPackage } from '../../domain/apps.ts';
 import { emailHash, normalizeEmail } from '../../domain/tokens.ts';
 import { getSignUpState, getUserIdByEmail } from '../../domain/users.ts';
+import { hasUsableInvite } from '../../domain/invites.ts';
 import { generateOttCode, storeOtt } from '../../domain/ott.ts';
 import {
   errPermissionDenied,
@@ -42,6 +43,20 @@ export const sendOtt = (deps: Deps) => async (c: Context) => {
     if (body.purpose === 'signup' && state === 'complete') throw userAlreadyRegistered();
     if (body.purpose === 'login' && state === 'noAccount') throw userNotRegistered();
     if (body.purpose === 'login' && state === 'incomplete') throw userSignupIncomplete();
+    // Invite gate (D54, off-parity, capture-gated for the LAN gate): in invite
+    // mode an email with NO account and NO unconsumed invite gets no OTT.
+    // Placed AFTER the state checks so login/complete flows keep their exact
+    // museum errors: purpose 'login' can never reach here with state
+    // 'noAccount' (404'd above) — login is never gated. The gate keys on
+    // state, not purpose, because old clients send purpose "" at signup.
+    // 403 {} (errPermissionDenied) is museum's own family for a refused
+    // /users/ott — the change-purpose branch above already returns it — so
+    // the stock client renders its generic failure dialog rather than being
+    // steered into the wrong flow (409 flips it to login, 404 means
+    // "not registered" only on login).
+    if (deps.config.signupMode === 'invite' && state === 'noAccount') {
+      if (!(await hasUsableInvite(deps, email))) throw errPermissionDenied();
+    }
   }
 
   let code = generateOttCode(deps);

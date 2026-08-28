@@ -11,7 +11,7 @@ import type { Deps } from '../../deps.ts';
 import { auth } from '../../middleware/auth.ts';
 import { padTime } from '../../domain/model.ts';
 import { getFile, type MagicMetadata } from '../../domain/files.ts';
-import { assertBatchSize } from '../../domain/collections.ts';
+import { assertBatchSize, bumpCollectionForward } from '../../domain/collections.ts';
 import { errBadRequestSentinel, errPermissionDenied, SentinelError } from '../../lib/errors.ts';
 
 const bodySchema = z.object({
@@ -63,6 +63,8 @@ export const updateMagicMetadata = (deps: Deps, isPublic: boolean) => async (c: 
       if (link.isDeleted) continue;
       const stamped = deps.ids.nextUpdationTime();
       await deps.db.put({ ...link, updationTime: stamped, gsi1sk: `${padTime(stamped)}#${file.fileId}` });
+      // museum UpdateMagicAttributes bumps every containing collection (D62)
+      await bumpCollectionForward(deps, link.collectionID as number, stamped);
     }
   }
   return c.body(null, 200);

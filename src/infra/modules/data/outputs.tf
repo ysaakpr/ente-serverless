@@ -13,3 +13,9 @@ output "objects_bucket" {
 output "objects_bucket_arn" {
   value = aws_s3_bucket.objects.arn
 }
+
+# The role the tools/ CLI assumes (invite + storage-pool provisioning). Point
+# an AWS profile's role_arn at this, then run the make targets under it.
+output "operator_role_arn" {
+  value = aws_iam_role.operator.arn
+}
