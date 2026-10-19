@@ -157,7 +157,7 @@ describe('POST /collections/unshare', () => {
 
     expect(await getSharee(world.deps, album, mate.userId)).toBeNull();
     const gone = await world.request('GET', `/collections/${album}`, { token: mate.token });
-    expect(gone.status).toBe(403); // non-member again (D49: museum 404, ours 403)
+    expect(gone.status).toBe(404); // non-member again — museum 404 (D49 closed by D66)
   });
 
   it('tombstones the sharee\'s own files in the collection (museum UnShareContext collection_files update)', async () => {
@@ -183,7 +183,7 @@ describe('POST /collections/leave/:collectionID', () => {
 
     expect((await leave(mate.token)).status).toBe(200);
     expect(await getSharee(world.deps, album, mate.userId)).toBeNull();
-    expect((await world.request('GET', `/collections/${album}`, { token: mate.token })).status).toBe(403);
+    expect((await world.request('GET', `/collections/${album}`, { token: mate.token })).status).toBe(404);
     // museum Leave -> UnShare: the leaver's own files leave the collection.
     const diff = await ownerDiff();
     expect(diff.find((f) => f.id === up.fileId)!.isDeleted).toBe(true);
@@ -210,7 +210,7 @@ describe('GET /collections/sharees', () => {
     }
 
     const outsider = await signupAccount(world, 'sh-outsider@b.c');
-    expect((await world.request('GET', url, { token: outsider.token })).status).toBe(403);
+    expect((await world.request('GET', url, { token: outsider.token })).status).toBe(404); // museum: non-member 404 (D66)
     expect((await world.request('GET', '/collections/sharees?collectionID=junk', { token: owner.token })).status).toBe(404);
   });
 });

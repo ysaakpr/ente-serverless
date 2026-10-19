@@ -37,9 +37,10 @@ export interface UserRow {
   [attr: string]: unknown;
 }
 
+/** museum ente/user.go KeyAttributes — kekHash dropped upstream (eda8a14548):
+ * no longer accepted, stored, or sent. */
 export interface KeyAttributes {
   kekSalt: string;
-  kekHash: string;
   encryptedKey: string;
   keyDecryptionNonce: string;
   publicKey: string;
@@ -113,7 +114,10 @@ export const createUser = async (deps: Deps, email: string): Promise<number> => 
 
 export const getKeyAttributes = async (deps: Deps, userId: number): Promise<KeyAttributes | null> => {
   const row = await deps.db.get(keys.userKeys(userId).pk, 'KEYS');
-  return row ? (row.keyAttributes as KeyAttributes) : null;
+  if (!row) return null;
+  // Rows written before D66 still carry the legacy kekHash; never emit it.
+  const { kekHash: _legacy, ...attributes } = row.keyAttributes as KeyAttributes & { kekHash?: string };
+  return attributes;
 };
 
 export const putKeyAttributes = async (

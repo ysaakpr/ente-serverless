@@ -151,7 +151,7 @@ and sharing pieces** — roughly the ~60-route core plus magic metadata,
 | Push tokens, event reporting | 🟠 Stubbed | accept-and-drop | Tier 0 |
 | Social sync probes | 🟠 Stubbed | empty feeds: comments-reactions, collection-actions, contacts diff (D27) | Tier 2 |
 | Emergency contacts | 🟠 Stubbed | `info` returns empty (D35) | Tier 2 |
-| Album collaborators / viewers | 🟢 Done | `/collections/share`, `unshare`, `leave`, sharees list; VIEWER/COLLABORATOR roles, per-sharee wrapped keys, sharee sync feed + per-user unshare tombstones (D49/D50); capture-gated items pending oracle parity | Tier 1 (P3) |
+| Album collaborators / viewers | 🟢 Done | `/collections/share`, `unshare`, `leave`, sharees list, batch `share/batch` + `/users/public-keys` and bulk `unshare/bulk` (D66); VIEWER/COLLABORATOR roles, per-sharee wrapped keys, sharee sync feed + per-user unshare tombstones (D49/D50); capture-gated items pending oracle parity | Tier 1 (P3) |
 | Public album links | 🟢 Done (gate pending) | `share-url` create/update/delete, `join-link`, the `/public-collection/*` surface (info, diff, verify-password, previews/downloads, collect uploads), password links, device limits, per-link daily ceilings (D51); the manual open-a-real-link-in-the-pinned-albums-build gate (D52) is still outstanding. Deliberately absent: report-abuse (removed upstream), public HLS video-data (deferred) | Tier 1 (P3) |
 | Public single-file links | ⚪ Pending | `fileLinkApi` (7 routes) | Tier 1+ |
 | Shared memories | ⚪ Pending | memories + `publicMemoryAPI` (8 routes) | Tier 1 (P3) |

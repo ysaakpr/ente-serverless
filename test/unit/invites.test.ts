@@ -6,7 +6,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { lastOttCode, signupAccount, type Account } from '../helpers/client.ts';
 import { createAlbum, uploadAndCommit } from '../helpers/upload.ts';
@@ -153,7 +153,7 @@ describe('per-user storage quota (D54: 0 means ZERO)', () => {
       (
         await world.request('POST', '/files/upload-url', {
           token: zero.token,
-          body: { contentLength: 10, contentMD5: 'x' },
+          body: { contentLength: 10, contentMD5: createHash('md5').update('x').digest('base64') },
         })
       ).status,
     ).toBe(426);
@@ -281,7 +281,7 @@ describe('viewer accounts (D54)', () => {
       (
         await world.request('POST', '/files/upload-url', {
           token: viewer.token,
-          body: { contentLength: 10, contentMD5: 'x' },
+          body: { contentLength: 10, contentMD5: createHash('md5').update('x').digest('base64') },
         })
       ).status,
     ).toBe(426);
@@ -298,7 +298,7 @@ describe('viewer accounts (D54)', () => {
     expect((await world.request('GET', `/files/preview/v2/${fileId}`, { token: viewer.token })).status).toBe(200);
 
     expect((await world.request('POST', `/collections/leave/${album}`, { token: viewer.token })).status).toBe(200);
-    expect((await world.request('GET', `/files/download/v2/${fileId}`, { token: viewer.token })).status).toBe(404);
+    expect((await world.request('GET', `/files/download/v2/${fileId}`, { token: viewer.token })).status).toBe(403);
   });
 
   it('viewer subscription reports 0 storage (real number, museum shape)', async () => {

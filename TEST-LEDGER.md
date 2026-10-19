@@ -6,7 +6,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | Suite file | Tags | Milestone | Scenarios | Passing | |
 |---|---|---|---|---|---|
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
-| account.test.ts | [KEYS] [ACCOUNT] | M2 | 9 | 9 | ✅ |
+| account.test.ts | [KEYS] [ACCOUNT] | M2 | 10 | 10 | ✅ |
 | admin-role.test.ts | ? | ? | 9 | 9 | ✅ |
 | albums-basepath-patch.test.ts | ? | ? | 5 | 5 | ✅ |
 | auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
@@ -17,7 +17,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | db-counters.test.ts | F0 race-free capped counter (security review) | SEC | 4 | 4 | ✅ |
 | db-transact.test.ts | transactWrite atomicity + 100-op cap (D48) | P3-A | 4 | 4 | ✅ |
 | e2e.int.test.ts | integration (LocalStack) | M1/M3 | 10 | 10 | ✅ |
-| entity.test.ts | [ENTITY] | M5 | 8 | 8 | ✅ |
+| entity.test.ts | [ENTITY] | M5 | 12 | 12 | ✅ |
 | file-data.test.ts | [FILE-DATA] | M6 | 10 | 10 | ✅ |
 | file-meta.test.ts | [FILE-META] | M4 | 5 | 5 | ✅ |
 | file-read.test.ts | [FILE-READ] | M3 | 10 | 10 | ✅ |
@@ -33,10 +33,12 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | public-collection.test.ts | ? | ? | 11 | 11 | ✅ |
 | public-download.test.ts | ? | ? | 4 | 4 | ✅ |
 | public-password.test.ts | ? | ? | 5 | 5 | ✅ |
+| remote-state.test.ts | infra guards: remote state + split tfvars (D67) | M7 | 19 | 19 | ✅ |
 | security-review-2.test.ts | ? | ? | 11 | 11 | ✅ |
 | send-ott.test.ts | [AUTH-OTT] | M1 | 6 | 6 | ✅ |
+| share-batch.test.ts | [SHARING] batch public keys + batch share (D66) | UP-2610 | 7 | 7 | ✅ |
 | share-url.test.ts | ? | ? | 12 | 12 | ✅ |
-| sharing-authz.test.ts | ? | ? | 6 | 6 | ✅ |
+| sharing-authz.test.ts | ? | ? | 8 | 8 | ✅ |
 | sharing-feed.test.ts | ? | ? | 9 | 9 | ✅ |
 | sharing.test.ts | [SHARING] dual-write + link rows (D48) | P3-A | 10 | 10 | ✅ |
 | social-stubs.test.ts | social probes (gate finding D27) | M5 | 2 | 2 | ✅ |
@@ -44,16 +46,18 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | srp-math.test.ts | [AUTH-SRP] | M1 | 5 | 5 | ✅ |
 | stale-objects.test.ts | ? | ? | 5 | 5 | ✅ |
 | storage-pools.test.ts | ? | ? | 28 | 28 | ✅ |
-| stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 9 | 9 | ✅ |
+| stubs.test.ts | [CONFIG/BILLING/PUSH/BONUS-STUB] | M5 | 10 | 10 | ✅ |
 | subscription.test.ts | [BILLING] free-sub determinism (gate finding D30) | M5 | 7 | 7 | ✅ |
+| tfstate.int.test.ts | integration (LocalStack): remote-state wrong-account guards (D67) | M7 | 2 | 2 | ✅ |
 | totp.test.ts | [AUTH-2FA] TOTP math (RFC 6238) | M5 | 11 | 11 | ✅ |
 | trash-origin.test.ts | [TRASH] origin collection (gate finding D28) | M4/M5 | 3 | 3 | ✅ |
 | trash-purge.test.ts | [TRASH] cron | M4 | 2 | 2 | ✅ |
 | trash.test.ts | [TRASH] + M4 gate | M4 | 8 | 8 | ✅ |
 | two-factor.test.ts | [AUTH-2FA] TOTP flow (gate finding D36) | M5 | 19 | 19 | ✅ |
-| upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 5 | 5 | ✅ |
+| unshare-bulk.test.ts | [SHARING] bulk unshare (D66) | UP-2610 | 3 | 3 | ✅ |
+| upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 7 | 7 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
 | web.test.ts | infra guards: albums web hosting (D52) | P3-F | 31 | 31 | ✅ |
 
-**Total: 485/485 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 526/526 passing.** CI must fail if any implemented endpoint is below 100%.

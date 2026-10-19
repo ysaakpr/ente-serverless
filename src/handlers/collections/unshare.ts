@@ -27,7 +27,9 @@ export const unshareCollection = (deps: Deps) => async (c: Context) => {
 
   // museum collectionForShareMutation: the OWNER or an ADMIN sharee
   // (share.go; oracle-verified D63) — other members and non-members 403.
-  const { collection, role: actorRole } = await resolveCollectionAccess(deps, userId, body.collectionID);
+  const { collection, role: actorRole } = await resolveCollectionAccess(deps, userId, body.collectionID, {
+    nonMemberForbidden: true,
+  });
   if (actorRole !== 'OWNER' && actorRole !== 'ADMIN') throw errPermissionDenied();
 
   // museum shareeIndexForEmail over GetSharees: not a sharee -> 404.

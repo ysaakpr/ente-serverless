@@ -47,7 +47,9 @@ export const shareCollection = (deps: Deps) => async (c: Context) => {
   // collection 404, every other member and non-member 403. Museum's repo.Get
   // does not filter deleted collections; ours 404s them — a share onto a
   // deleted album is nonsense anyway (capture-gated, D50).
-  const { collection, role: actorRole } = await resolveCollectionAccess(deps, userId, body.collectionID);
+  const { collection, role: actorRole } = await resolveCollectionAccess(deps, userId, body.collectionID, {
+    nonMemberForbidden: true,
+  });
   if (actorRole !== 'OWNER' && actorRole !== 'ADMIN') throw errPermissionDenied();
 
   // museum AllowParticipantSharing (ente/collection.go): uncategorized may

@@ -20,6 +20,7 @@ import {
   getPublicCollectionRow,
 } from '../../domain/publicLinks.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
+import { normalizeMd5 } from '../../lib/md5.ts';
 
 const MIN_PART_SIZE = 5 * 1024 * 1024;
 const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
@@ -39,12 +40,15 @@ export const publicMultipartUploadUrl = (deps: Deps) => async (c: Context) => {
 
   if (body.contentLength <= 0) throw errBadRequestSentinel();
   if (body.contentLength > deps.config.maxFileSizeBytes) throw errBadRequestSentinel();
-  if (body.partLength < MIN_PART_SIZE || body.partLength > MAX_PART_SIZE) {
+  // museum ValidateMultipartPartLength (see files/uploadUrlV2.ts).
+  if (body.partLength <= 0 || body.partLength > MAX_PART_SIZE) throw errBadRequestSentinel();
+  if (body.contentLength > body.partLength && body.partLength < MIN_PART_SIZE) {
     throw errBadRequestSentinel();
   }
   const partCount = Math.ceil(body.contentLength / body.partLength);
   if (partCount > MAX_MULTIPART_PART_COUNT) throw errBadRequestSentinel();
   if (body.partMd5s.length !== partCount) throw errBadRequestSentinel();
+  const partMd5s = body.partMd5s.map(normalizeMd5); // before the daily ceiling
   // Collect mints presign into the LINK OWNER's current pool (H2, D55).
   const ctx = await assertQuota(deps, collection.ownerID, null);
   const blobs = await blobsForPool(deps, ctx.pool);
@@ -55,7 +59,7 @@ export const publicMultipartUploadUrl = (deps: Deps) => async (c: Context) => {
     objectKey,
     partCount,
     deps.config.presignPutExpirySeconds,
-    body.partMd5s,
+    partMd5s,
   );
   // museum AddMultipartTempObjectKey — the stale sweep aborts + deletes (D65)
   await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey, uploadID: multipart.uploadID }]);

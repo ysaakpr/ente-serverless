@@ -25,6 +25,7 @@ import { changeEmail } from './handlers/users/changeEmail.ts';
 import {
   getAccountsToken,
   getPublicKey,
+  getPublicKeys,
   setRecoveryKey,
   twoFactorRecoveryStatus,
   twoFactorStatus,
@@ -59,6 +60,8 @@ import { deleteCollectionV3 } from './handlers/collections/deleteV3.ts';
 import { getCollectionById } from './handlers/collections/getById.ts';
 import { shareCollection } from './handlers/collections/share.ts';
 import { unshareCollection } from './handlers/collections/unshare.ts';
+import { shareCollectionBatch } from './handlers/collections/shareBatch.ts';
+import { unshareCollectionsBulk } from './handlers/collections/unshareBulk.ts';
 import { leaveCollection } from './handlers/collections/leave.ts';
 import { getCollectionSharees } from './handlers/collections/sharees.ts';
 import { shareUrl } from './handlers/collections/shareUrl.ts';
@@ -177,6 +180,7 @@ export const buildApp = (deps: Deps): Hono => {
   app.post('/users/two-factor/remove', handler(removeTwoFactor(deps)));
   app.put('/users/recovery-key', authed, handler(setRecoveryKey(deps)));
   app.get('/users/public-key', authed, handler(getPublicKey(deps)));
+  app.post('/users/public-keys', authed, handler(getPublicKeys(deps)));
   app.get('/users/accounts-token', authed, handler(getAccountsToken(deps)));
   app.get('/users/delete-challenge', authed, handler(getDeleteChallenge(deps)));
   app.delete('/users/delete', authed, handler(deleteAccount(deps)));
@@ -215,6 +219,9 @@ export const buildApp = (deps: Deps): Hono => {
   app.post('/collections/v3/remove-files', authed, handler(removeFilesV3(deps)));
   app.post('/collections/share', authed, handler(shareCollection(deps)));
   app.post('/collections/unshare', authed, handler(unshareCollection(deps)));
+  // Upstream 2026-09/10 (D66): batch share + bulk unshare.
+  app.post('/collections/share/batch', authed, handler(shareCollectionBatch(deps)));
+  app.post('/collections/unshare/bulk', authed, handler(unshareCollectionsBulk(deps)));
   app.post('/collections/leave/:collectionID', authed, handler(leaveCollection(deps)));
   app.get('/collections/sharees', authed, handler(getCollectionSharees(deps)));
   // [PUBLIC-LINKS] management (cmd/museum/main.go storageAPI share-url routes)

@@ -83,7 +83,7 @@ describe('GET /collections/:collectionID', () => {
 
     const other = await signupAccount(world, 'origin-other@b.c');
     const otherAlbum = await createAlbum(world, other);
-    expect((await world.request('GET', `/collections/${otherAlbum}`, { token: account.token })).status).toBe(403);
+    expect((await world.request('GET', `/collections/${otherAlbum}`, { token: account.token })).status).toBe(404);
 
     // the param route must not shadow the static ones
     expect((await world.request('GET', '/collections/v2?sinceTime=0', { token: account.token })).status).toBe(200);

@@ -6,7 +6,7 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 	HASHING_KEY=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=
 
 .PHONY: test test-int typecheck up down bootstrap dev ledger oracle-up oracle-down infra-test \
-	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
+	build-lambda capture-diff upstream-up upstream-down differential lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
 	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage users \
 	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue \
 	profile require-profile state-bootstrap state-migrate tfvars-split tfvars-check \
@@ -188,6 +188,23 @@ oracle-up:
 
 oracle-down:
 	docker compose -f docker-compose.oracle.yml down
+
+# The UNPINNED parent (museum main, :8590) + the differential runner (D66).
+# `make differential` expects `make up`, `make upstream-up` and our server on
+# :8581 with HARDCODED_OTT_SUFFIX=@example.org HARDCODED_OTT_VALUE=123456.
+# Museum rate-limits /users/ott per IP, so the museum container is restarted
+# first (its limiter is in-memory; Postgres keeps the accounts).
+upstream-up:
+	docker compose -p ente-upstream -f docker-compose.upstream.yml pull museum
+	docker compose -p ente-upstream -f docker-compose.upstream.yml up -d --wait
+
+upstream-down:
+	docker compose -p ente-upstream -f docker-compose.upstream.yml down
+
+differential:
+	docker restart ente-upstream-museum >/dev/null
+	@for i in $$(seq 1 30); do curl -sf http://127.0.0.1:8590/ping >/dev/null && break; sleep 1; done
+	node --experimental-transform-types tools/differential.ts
 
 # Plan-time guard tests over the tofu config (storage classes, lifecycle).
 infra-test:

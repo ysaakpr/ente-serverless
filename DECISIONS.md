@@ -1977,6 +1977,67 @@ source says Y — source won).
     claimed-key immunity, the 426-orphan delete, multipart abort, pool
     routing + quarantine.
 
+- **D66 [PARITY 2026-10-19] Upstream-drift fixes, verified by a live
+  differential against museum main.** The audit in UPSTREAM-DRIFT.md
+  (ente main f4cdad4b7e vs our c762d70e6c pin) was turned into code and then
+  checked endpoint by endpoint with `tools/differential.ts` (`make
+  differential`): the same scenarios drive the unpinned museum
+  (`docker-compose.upstream.yml`, ghcr.io/ente/server:latest = 20fb631,
+  Postgres + Silo) and our server on LocalStack, diffing status + response
+  shape + chosen values. Result: 93 scenarios, 89 identical, 4 deliberate
+  (below), 0 unexplained. The pinned oracle (D1) is untouched.
+  - New routes: `POST /users/public-keys`, `POST /collections/share/batch`,
+    `POST /collections/unshare/bulk`; user-entity type `library_share`
+    (canonical `ls_<caller>_<other>` ids, create-or-restore with a live
+    duplicate = 409 ALREADY_EXISTS — smart_album now shares that rule —
+    and `expectedUpdatedAt` optimistic concurrency, mandatory for
+    library_share; a stale write is a bare 409 unless it is a no-op retry).
+    Batch share resolves every entry before writing, so a bad entry leaves
+    no partial share; the writes are one transaction per sharee rather than
+    museum's single SQL transaction — an infrastructure failure mid-batch can
+    leave a prefix applied, which a client retry converges. The entity
+    version check is read-then-write (the Db port has no conditional put):
+    two writers inside one round-trip can both land.
+  - Wire changes to match museum main: link device JWT sent as BOTH
+    `X-Ente-Link-Device-Token` and `X-Link-Device-Token` (both exposed in
+    CORS; drop the old name once ALBUMS_WEB_TAG passes photos-v1.3.63);
+    public-link 410s carry `code` LINK_DISABLED / LINK_EXPIRED; push token
+    accepts `apnsToken: null` + `platform` (fcmToken required);
+    `serverApiFlag` = 13 (UploadV2 | BackupOptions | VideoStreaming — mobile
+    now streams videos by default); sessions are listed by opaque
+    `th:<b64url sha256>` ids + `isCurrent`, DELETE takes either form and
+    refuses the current session (400 "use logout…"); `kekHash` is no longer
+    accepted, stored or emitted; upload-URL checksums go through museum's
+    NormalizeMD5 (padded base64 of 16 bytes, trimmed, else bare 400) and
+    multipart part length follows ValidateMultipartPartLength (a single
+    small part is legal); empty file-data status diff is `null`; entity-diff
+    limit errors are bare {}.
+  - Privacy redactions museum main applies: removed files in collection
+    diffs (authed + public) are blanked to ids + `"-"` metadata
+    (supersedes D61's "never blanked"); unshare tombstones are trimmed to
+    {id, owner:{id,email:""}, encryptedKey, type, attributes:{},
+    updationTime, isDeleted}; `GET /collections/:id` drops the owner's
+    private magicMetadata for non-owners; feeds never carry `objectKey`;
+    trash-diff `collectionOwnerID` is null.
+  - Status semantics settled by the live run (closes the D49 capture gate):
+    a non-member reading a collection (getById, diff, sharees, add-files,
+    remove-files) gets 404; share mutations (share, unshare, share/batch)
+    and owner-only routes stay 403. An existing file the caller cannot reach
+    is 403 on download/preview (unknown ids 404) — museum main computes
+    can_access in one query. This gives up the earlier enumeration-resistant
+    404: a 403 now confirms a file id exists. Accepted for parity; file ids
+    are not secrets and grant nothing without collection keys.
+  - Deliberate divergences (EXPECTED_DIVERGENCES in the runner):
+    serverApiFlag 13 vs museum 239; POST preview-upload v2 not implemented
+    (clients use it only behind bit 8, which stays off); GET
+    /users/deletion-summary not implemented (both clients treat 404 as
+    "unsupported"); unknown routes answer plain-text 404 — mobile's
+    share/batch fallback needs a non-JSON 404 body (guard-tested).
+  - Tests: share-batch.test.ts, unshare-bulk.test.ts, library_share block in
+    entity.test.ts, sharee redactions in sharing-authz.test.ts, checksum
+    rules in upload-v2.test.ts; existing suites updated where museum main
+    now disagrees.
+
 ## Environment facts discovered while building
 
 - **D22** LocalStack community has no SESv2 — the mail adapter uses SES v1

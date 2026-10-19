@@ -67,10 +67,10 @@ beforeEach(async () => {
 });
 
 describe('role gates on collection endpoints', () => {
-  it('non-member reads 403; VIEWER can getById + diff but cannot add/rename/meta/delete', async () => {
+  it('non-member reads 404; VIEWER can getById + diff but cannot add/rename/meta/delete', async () => {
     // Before the share: mate is a non-member.
-    expect((await world.request('GET', `/collections/${album}`, { token: mate.token })).status).toBe(403);
-    expect((await getDiff(mate.token)).status).toBe(403);
+    expect((await world.request('GET', `/collections/${album}`, { token: mate.token })).status).toBe(404);
+    expect((await getDiff(mate.token)).status).toBe(404);
 
     await share(mate.userId, 'VIEWER');
 
@@ -198,9 +198,9 @@ describe('remove-files v3 role matrix (museum isRemoveAllowed)', () => {
 });
 
 describe('sharee file access (getAccessibleFile sharee branch)', () => {
-  it('sharee downloads + previews a shared file; unshare revokes back to 404', async () => {
-    // Not shared yet: enumeration-resistant 404, not 403.
-    expect((await world.request('GET', `/files/download/v2/${ownerFile.fileId}`, { token: mate.token })).status).toBe(404);
+  it('sharee downloads + previews a shared file; unshare revokes back to 403', async () => {
+    // Not shared yet: museum main answers 403 for an existing, unreachable file (D66).
+    expect((await world.request('GET', `/files/download/v2/${ownerFile.fileId}`, { token: mate.token })).status).toBe(403);
 
     await share(mate.userId, 'VIEWER');
     const download = await world.request('GET', `/files/download/v2/${ownerFile.fileId}`, { token: mate.token });
@@ -210,7 +210,7 @@ describe('sharee file access (getAccessibleFile sharee branch)', () => {
     expect((await world.request('GET', `/files/preview/v2/${ownerFile.fileId}`, { token: mate.token })).status).toBe(200);
 
     await removeSharee(world.deps, album, mate.userId);
-    expect((await world.request('GET', `/files/download/v2/${ownerFile.fileId}`, { token: mate.token })).status).toBe(404);
+    expect((await world.request('GET', `/files/download/v2/${ownerFile.fileId}`, { token: mate.token })).status).toBe(403);
   });
 
   it('collection owner reads a collaborator-owned file; removal revokes the sharee path', async () => {
@@ -226,7 +226,7 @@ describe('sharee file access (getAccessibleFile sharee branch)', () => {
       token: owner.token,
       body: { collectionID: album, fileIDs: [mateFile.fileId] },
     });
-    expect((await world.request('GET', `/files/download/v2/${mateFile.fileId}`, { token: owner.token })).status).toBe(404);
+    expect((await world.request('GET', `/files/download/v2/${mateFile.fileId}`, { token: owner.token })).status).toBe(403);
     expect((await world.request('GET', `/files/download/v2/${mateFile.fileId}`, { token: mate.token })).status).toBe(200);
   });
 
@@ -237,5 +237,52 @@ describe('sharee file access (getAccessibleFile sharee branch)', () => {
       body: { fileIDs: [ownerFile.fileId] },
     });
     expect(info.status).toBe(403); // museum GetFileInfo -> VerifyFileOwner (D49)
+  });
+});
+
+describe('sharee-side redactions museum main applies (D66)', () => {
+  it('getById hides the owner\'s private magicMetadata from sharees, not from the owner', async () => {
+    const magic = { version: 1, count: 1, data: b64(randomBytes(32)), header: b64(randomBytes(24)) };
+    const set = await world.request('PUT', '/collections/magic-metadata', {
+      token: owner.token,
+      body: { id: album, magicMetadata: magic },
+    });
+    expect(set.status).toBe(200);
+    await share(mate.userId, 'VIEWER');
+    const asOwner = (await (await world.request('GET', `/collections/${album}`, { token: owner.token })).json()) as {
+      collection: Record<string, unknown>;
+    };
+    expect(asOwner.collection.magicMetadata).toBeDefined();
+    const asMate = (await (await world.request('GET', `/collections/${album}`, { token: mate.token })).json()) as {
+      collection: Record<string, unknown>;
+    };
+    expect(asMate.collection).not.toHaveProperty('magicMetadata');
+  });
+
+  it('a removed file reaches the sharee diff blanked; live entries never carry objectKey', async () => {
+    await share(mate.userId, 'VIEWER');
+    const keep = await uploadAndCommit(world, owner, album, new Uint8Array(randomBytes(64)), new Uint8Array(randomBytes(16)));
+    await world.request('POST', '/files/trash', {
+      token: owner.token,
+      body: { items: [{ fileID: ownerFile.fileId, collectionID: album }] },
+    });
+    const { diff } = (await (await getDiff(mate.token)).json()) as { diff: Record<string, unknown>[] };
+    const gone = diff.find((f) => f.id === ownerFile.fileId)!;
+    expect(gone).toEqual({
+      id: ownerFile.fileId,
+      ownerID: owner.userId,
+      collectionID: album,
+      collectionOwnerID: owner.userId,
+      encryptedKey: '',
+      keyDecryptionNonce: '',
+      file: { decryptionHeader: '', size: 0 },
+      thumbnail: { decryptionHeader: '', size: 0 },
+      metadata: { encryptedData: '-', decryptionHeader: '', size: 0 },
+      isDeleted: true,
+      updationTime: gone.updationTime,
+    });
+    const live = diff.find((f) => f.id === keep.fileId)!;
+    expect(live.file).not.toHaveProperty('objectKey');
+    expect(live.thumbnail).not.toHaveProperty('objectKey');
   });
 });

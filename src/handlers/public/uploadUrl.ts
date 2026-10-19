@@ -26,6 +26,7 @@ import {
   getPublicCollectionRow,
 } from '../../domain/publicLinks.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
+import { normalizeMd5 } from '../../lib/md5.ts';
 
 const bodySchema = z.object({
   contentLength: z.number(),
@@ -40,6 +41,8 @@ export const publicUploadUrl = (deps: Deps) => async (c: Context) => {
 
   if (body.contentLength <= 0) throw errBadRequestSentinel();
   if (body.contentLength > deps.config.maxFileSizeBytes) throw errBadRequestSentinel();
+  // museum NormalizeMD5 — before the daily ceiling, so junk cannot burn it.
+  const contentMD5 = normalizeMd5(body.contentMD5);
   // Collected bytes land in the LINK OWNER's current pool, like any other
   // owner-attributed upload (H2, D55); the commit stamps the pin as usual.
   const ctx = await assertQuota(deps, collection.ownerID, body.contentLength);
@@ -50,7 +53,7 @@ export const publicUploadUrl = (deps: Deps) => async (c: Context) => {
   const url = await blobs.presignPut(
     objectKey,
     deps.config.presignPutExpirySeconds,
-    body.contentMD5,
+    contentMD5,
   );
   await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey }]); // museum AddTempObjectKey (D65)
   return c.json({ objectKey, url });

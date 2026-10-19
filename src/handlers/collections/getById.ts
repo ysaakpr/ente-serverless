@@ -6,7 +6,9 @@
  * wrapped key in encryptedKey (museum GetWithSharingDetailsForUser swaps in
  * collection_shares.encrypted_key; the collection's own keyDecryptionNonce
  * rides along unchanged — a sealed box needs no nonce), and everyone gets the
- * full sharee list.
+ * full sharee list. Non-owners never see the owner's PRIVATE magicMetadata
+ * (archive/pin state — museum collections/collection.go GetCollection,
+ * upstream deecc64921); pubMagicMetadata still passes.
  */
 
 import type { Context } from 'hono';
@@ -36,7 +38,7 @@ export const getCollectionById = (deps: Deps) => async (c: Context) => {
   if (role !== 'OWNER') {
     const share = await getSharee(deps, collectionId, userId);
     if (!share) throw errNotFound(); // race: unshared between the two reads
-    row = { ...collection, encryptedKey: share.encryptedKey };
+    row = { ...collection, encryptedKey: share.encryptedKey, magicMetadata: undefined };
     publicURLs = filterPublicURLsForRole(publicURLs, role);
   }
   return c.json({

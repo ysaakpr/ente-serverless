@@ -566,6 +566,6 @@ describe('Phase D public link on LocalStack (anonymous end to end)', () => {
     expect(kill.status).toBe(200);
     const dead = await anon('GET', '/public-collection/info');
     expect(dead.status).toBe(410);
-    expect(await dead.json()).toEqual({ error: 'disabled token' });
+    expect(await dead.json()).toEqual({ code: 'LINK_DISABLED', error: 'disabled token' });
   });
 });

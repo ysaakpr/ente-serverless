@@ -39,7 +39,7 @@ describe('CORS', () => {
     );
     expect(res.headers.get('access-control-allow-headers')).toBe(ALLOW_HEADERS);
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'X-Request-Id, X-Ente-Link-Device-Token',
+      'X-Request-Id, X-Ente-Link-Device-Token, X-Link-Device-Token',
     );
     expect(res.headers.get('access-control-max-age')).toBe('1728000');
   });

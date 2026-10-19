@@ -260,7 +260,7 @@ describe('add-files / remove-files / delete', () => {
       token: other.token,
       body: { collectionID: a, fileIDs: [up.fileId] },
     });
-    expect(foreign.status).toBe(403); // not a member of the collection
+    expect(foreign.status).toBe(404); // not a member — museum 404 (D66)
   });
 
   it('delete v3: keepFiles=false trashes; keepFiles=true requires empty; specials undeletable', async () => {

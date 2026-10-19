@@ -130,21 +130,23 @@ describe('sharee /collections/v2 (query-time merge)', () => {
     expect(unshare.status).toBe(200);
 
     // The sharee's delta: exactly one tombstone for the album, no live entry.
-    // Museum's flipped share row keeps the collection's stored fields AND the
-    // share's wrapped key, blanking only owner email/sharees/publicURLs (D61).
+    // Museum main trims the tombstone to what the client needs to drop the
+    // album (upstream 211a6154b6, captured live 2026-10-19): the share's own
+    // wrapped key survives; name, pubMagicMetadata, sharees, publicURLs, app
+    // and sharedAt do not.
     const delta = await getV2(mate.token, synced);
     const tomb = delta.find((c) => c.id === album)!;
-    expect(tomb.isDeleted).toBe(true);
     expect(tomb.updationTime).toBeGreaterThan(synced);
     expect(delta.filter((c) => c.id === album)).toHaveLength(1);
-    expect(tomb.encryptedKey).toBe(wrappedKey);
-    expect('keyDecryptionNonce' in tomb).toBe(false); // omitempty, as on live sharee rows
-    expect(tomb.owner).toEqual({ id: owner.userId, email: '', name: '', role: '' });
-    expect((tomb.encryptedName as string).length).toBeGreaterThan(0);
-    expect(tomb.attributes).toEqual({ version: 0 });
-    expect(tomb.sharees).toEqual([]);
-    expect(tomb.publicURLs).toEqual([]);
-    expect(tomb.sharedAt).toBeGreaterThan(0);
+    expect(tomb).toEqual({
+      id: album,
+      owner: { id: owner.userId, email: '' },
+      encryptedKey: wrappedKey,
+      type: 'album',
+      attributes: {},
+      updationTime: tomb.updationTime,
+      isDeleted: true,
+    });
     // Full resync: the collection is gone except for the tombstone.
     const full = await getV2(mate.token);
     expect(full.filter((c) => c.id === album && !c.isDeleted)).toHaveLength(0);

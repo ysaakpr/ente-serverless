@@ -33,9 +33,10 @@ describe('GET /files/download', () => {
     expect(Buffer.from(await world.deps.blobs.downloadViaUrl(url))).toEqual(Buffer.from(up.file.cipher));
   });
 
-  it('non-member gets 404 (museum sql.ErrNoRows path)', async () => {
+  it('non-member gets 403, unknown id 404 (museum main can_access query, D66)', async () => {
     const res = await world.request('GET', `/files/download/v2/${up.fileId}`, { token: stranger.token });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
+    expect((await world.request('GET', '/files/download/v2/424242', { token: stranger.token })).status).toBe(404);
   });
 
   it('trashed file still downloadable by owner', async () => {
@@ -63,7 +64,7 @@ describe('GET /files/preview', () => {
   });
 
   it('authz mirrors download', async () => {
-    expect((await world.request('GET', `/files/preview/v2/${up.fileId}`, { token: stranger.token })).status).toBe(404);
+    expect((await world.request('GET', `/files/preview/v2/${up.fileId}`, { token: stranger.token })).status).toBe(403);
   });
 
   it('v1 preview is a 307 redirect', async () => {

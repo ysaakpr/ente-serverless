@@ -98,16 +98,18 @@ export interface CollectionAccess {
  * lookup (museum's VerifyOwner branch — a sharee still reads 403 on
  * owner-only routes); owner -> OWNER, else the sharee row's role (a single
  * GetItem, never a listing), else denied; deleted reads as 404 unless
- * `includeDeleted`. One divergence, deliberate: museum surfaces
- * non-membership as 404 (sql.ErrNoRows from GetCollectionShareeRole through
- * handler.go) — this throws 403 instead, matching the task contract and the
- * pre-sharing owner-only behaviour; capture-gated, D49.
+ * `includeDeleted`. A non-member is 404, as in museum (sql.ErrNoRows from
+ * GetCollectionShareeRole through handler.go) — settled by the 2026-10-19
+ * differential run against museum 20fb631 (diff, getById, sharees,
+ * add-files, remove-files all 404; D49 closed by D66). Share mutations pass
+ * `nonMemberForbidden`: museum's collectionForShareMutation maps the same
+ * ErrNoRows to ErrPermissionDenied (403).
  */
 export const resolveCollectionAccess = async (
   deps: Deps,
   userId: number,
   collectionId: number,
-  opts: { includeDeleted?: boolean; verifyOwner?: boolean } = {},
+  opts: { includeDeleted?: boolean; verifyOwner?: boolean; nonMemberForbidden?: boolean } = {},
 ): Promise<CollectionAccess> => {
   const collection = await getCollection(deps, collectionId);
   if (!collection) throw errNotFound();
@@ -117,7 +119,7 @@ export const resolveCollectionAccess = async (
     role = 'OWNER';
   } else {
     const sharee = await getSharee(deps, collectionId, userId);
-    if (!sharee) throw errPermissionDenied(); // museum: 404 via sql.ErrNoRows (D49)
+    if (!sharee) throw opts.nonMemberForbidden ? errPermissionDenied() : errNotFound();
     role = sharee.role;
   }
   if (collection.isDeleted && !opts.includeDeleted) throw errNotFound();
@@ -285,36 +287,26 @@ export const sharedCollectionToJson = async (
 
 /**
  * The SHAREE's unshare/delete tombstone as their /collections/v2 feed emits
- * it — museum GetCollectionsSharedWithUser scans flipped (is_deleted=TRUE)
- * collection_shares rows exactly like live ones: the collection's stored name
- * fields/type/app/pubMagicMetadata ride along, encryptedKey is the share
- * row's own wrapped key (UnShareContext only flips the flag — the key stays),
- * and only the former owner's email, sharees and publicURLs are emptied
- * (repo/collection.go). keyDecryptionNonce stays ABSENT, as on live sharee
- * entries (sealed boxes need no nonce), and attributes is the zero struct.
- * Pre-D61 SHAREDTOMB rows never stored the wrapped key — those emit
- * encryptedKey:'' (clients act on id+isDeleted before touching tombstone key
- * material; backfill gap noted in D61).
+ * it — museum main trims these to the bare minimum the client needs to drop
+ * the album (api/collection.go sharedCollectionResponses, upstream
+ * 211a6154b6; shape captured live from museum 20fb631, 2026-10-19):
+ * {id, owner:{id, email:""}, encryptedKey, type, attributes:{}, updationTime,
+ * isDeleted:true}. The collection's name, pubMagicMetadata, app, sharees and
+ * publicURLs no longer ride along — an unshared user keeps nothing it could
+ * still decrypt besides its own wrapped key. Pre-D61 SHAREDTOMB rows never
+ * stored the wrapped key and emit encryptedKey:''.
  */
 export const unsharedTombstoneToJson = (
   row: CollectionRow,
   tomb: SharedTombstoneRow,
 ): Record<string, unknown> => ({
   id: row.collectionId,
-  owner: { id: row.ownerID, email: '', name: '', role: '' },
+  owner: { id: row.ownerID, email: '' },
   encryptedKey: tomb.encryptedKey ?? '',
-  name: '',
-  encryptedName: row.encryptedName,
-  nameDecryptionNonce: row.nameDecryptionNonce,
   type: row.type,
-  attributes: { version: 0 },
-  sharees: [],
-  publicURLs: [],
+  attributes: {},
   updationTime: tomb.updationTime,
   isDeleted: true,
-  ...(tomb.sharedAt ? { sharedAt: tomb.sharedAt } : {}),
-  ...(row.pubMagicMetadata ? { pubMagicMetadata: row.pubMagicMetadata } : {}),
-  app: row.app,
 });
 
 /**

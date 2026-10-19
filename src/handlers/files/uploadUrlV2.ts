@@ -23,6 +23,7 @@ import { assertQuota, MAX_MULTIPART_PART_COUNT } from '../../domain/files.ts';
 import { recordTempObjects } from '../../domain/staleObjects.ts';
 import { blobsForPool } from '../../domain/storagePools.ts';
 import { errBadRequestSentinel } from '../../lib/errors.ts';
+import { normalizeMd5 } from '../../lib/md5.ts';
 
 const MIN_PART_SIZE = 5 * 1024 * 1024;
 const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
@@ -42,6 +43,7 @@ export const getUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
   if (body.contentLength <= 0) throw errBadRequestSentinel();
   if (body.contentLength > deps.config.maxFileSizeBytes) throw errBadRequestSentinel();
+  const contentMD5 = normalizeMd5(body.contentMD5); // museum NormalizeMD5, before the quota check
   const ctx = await assertQuota(deps, userId, body.contentLength);
   const blobs = await blobsForPool(deps, ctx.pool); // current pool (H2, D55)
 
@@ -49,7 +51,7 @@ export const getUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const url = await blobs.presignPut(
     objectKey,
     deps.config.presignPutExpirySeconds,
-    body.contentMD5,
+    contentMD5,
   );
   await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey }]); // museum AddTempObjectKey (D65)
   return c.json({ objectKey, url });
@@ -66,12 +68,17 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
   if (body.contentLength <= 0) throw errBadRequestSentinel();
   if (body.contentLength > deps.config.maxFileSizeBytes) throw errBadRequestSentinel();
-  if (body.partLength < MIN_PART_SIZE || body.partLength > MAX_PART_SIZE) {
+  if (body.partMd5s && body.partMd5s.length === 0) throw errBadRequestSentinel();
+  // museum ValidateMultipartPartLength: 1 B..5 GiB, and >= 5 MiB only when
+  // more than one part is needed (a single small part is fine).
+  if (body.partLength <= 0 || body.partLength > MAX_PART_SIZE) throw errBadRequestSentinel();
+  if (body.contentLength > body.partLength && body.partLength < MIN_PART_SIZE) {
     throw errBadRequestSentinel();
   }
   const partCount = Math.ceil(body.contentLength / body.partLength);
   if (partCount > MAX_MULTIPART_PART_COUNT) throw errBadRequestSentinel();
   if (body.partMd5s && body.partMd5s.length !== partCount) throw errBadRequestSentinel();
+  const partMd5s = body.partMd5s?.map(normalizeMd5);
   const ctx = await assertQuota(deps, userId, null);
   const blobs = await blobsForPool(deps, ctx.pool); // current pool (H2, D55)
 
@@ -80,7 +87,7 @@ export const getMultipartUploadUrlV2 = (deps: Deps) => async (c: Context) => {
     objectKey,
     partCount,
     deps.config.presignPutExpirySeconds,
-    body.partMd5s ?? undefined,
+    partMd5s,
   );
   // museum AddMultipartTempObjectKey — the stale sweep aborts + deletes (D65)
   await recordTempObjects(deps, ctx.pool?.poolId, [{ objectKey, uploadID: multipart.uploadID }]);

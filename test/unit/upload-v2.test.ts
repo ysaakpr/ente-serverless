@@ -17,6 +17,9 @@ beforeEach(async () => {
   account = await signupAccount(world, 'v2@b.c');
 });
 
+
+const VALID_MD5 = createHash('md5').update('x').digest('base64');
+
 describe('GET /files/upload-eligibility', () => {
   it('200 empty when under quota; 426 when over; auth required', async () => {
     const ok = await world.request('GET', '/files/upload-eligibility', { token: account.token });
@@ -66,9 +69,44 @@ describe('POST /files/upload-url (V2)', () => {
     world.deps.config.freePlanStorageBytes = 100;
     const overQuota = await world.request('POST', '/files/upload-url', {
       token: account.token,
-      body: { contentLength: 200, contentMD5: 'x' },
+      body: { contentLength: 200, contentMD5: VALID_MD5 },
     });
     expect(overQuota.status).toBe(426);
+  });
+});
+
+describe('checksum + part-length validation (museum NormalizeMD5 / ValidateMultipartPartLength, D66)', () => {
+  it('contentMD5 must be padded base64 of exactly 16 bytes', async () => {
+    for (const contentMD5 of ['x', 'AAAA', `${VALID_MD5}A`, VALID_MD5.replace('==', '')]) {
+      const res = await world.request('POST', '/files/upload-url', {
+        token: account.token,
+        body: { contentLength: 10, contentMD5 },
+      });
+      expect(res.status, contentMD5).toBe(400);
+      expect(await res.json()).toEqual({});
+    }
+    const padded = await world.request('POST', '/files/upload-url', {
+      token: account.token,
+      body: { contentLength: 10, contentMD5: ` ${VALID_MD5} ` }, // trimmed, like museum
+    });
+    expect(padded.status).toBe(200);
+  });
+
+  it('a single small part is fine; small parts are refused once more than one is needed; partMd5s validated', async () => {
+    const one = await world.request('POST', '/files/multipart-upload-url', {
+      token: account.token,
+      body: { contentLength: 1024, partLength: 2048, partMd5s: [VALID_MD5] },
+    });
+    expect(one.status).toBe(200);
+    for (const body of [
+      { contentLength: 4096, partLength: 2048, partMd5s: [VALID_MD5, VALID_MD5] },
+      { contentLength: 1024, partLength: 2048, partMd5s: [] },
+      { contentLength: 1024, partLength: 2048, partMd5s: ['nope'] },
+      { contentLength: 1024, partLength: 0 },
+    ]) {
+      const res = await world.request('POST', '/files/multipart-upload-url', { token: account.token, body });
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
   });
 });
 
@@ -78,7 +116,7 @@ describe('POST /files/multipart-upload-url (V2)', () => {
     const contentLength = partLength + 1024; // 2 parts
     const res = await world.request('POST', '/files/multipart-upload-url', {
       token: account.token,
-      body: { contentLength, partLength, partMd5s: ['a', 'b'] },
+      body: { contentLength, partLength, partMd5s: [VALID_MD5, VALID_MD5] },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { objectKey: string; partURLs: string[]; completeURL: string };

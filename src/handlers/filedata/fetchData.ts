@@ -110,5 +110,7 @@ export const fileDataStatusDiff = (deps: Deps) => async (c: Context) => {
       size: r.size,
       updatedAt: r.updatedAt,
     }));
-  return c.json({ diff });
+  // museum returns a nil slice when nothing changed, serialized as null
+  // (captured live 2026-10-19) — clients already handle it.
+  return c.json({ diff: diff.length ? diff : null });
 };

@@ -66,9 +66,11 @@ describe('GET /public-collection/info', () => {
     expect(body.referralCode).toBe(''); // storage-bonus stub, D51
   });
 
-  it('hands the browser a link-device token in X-Ente-Link-Device-Token (frozen-oracle header name)', async () => {
+  it('hands the browser a link-device token under both header names (frozen-oracle + upstream 9413f24ed0)', async () => {
     const res = await info(link.token);
-    expect(res.headers.get('x-ente-link-device-token')).toBeTruthy();
+    const token = res.headers.get('x-ente-link-device-token');
+    expect(token).toBeTruthy();
+    expect(res.headers.get('x-link-device-token')).toBe(token);
   });
 });
 
@@ -101,10 +103,21 @@ describe('GET /public-collection/diff', () => {
     expect(kept.encryptedKey).toBeTruthy();
     const tomb = body.diff.find((f) => f.id === gone.fileId)!;
     expect(tomb.isDeleted).toBe(true);
-    // Tombstones keep their stored fields — museum's diff SELECT never blanks
-    // deleted links; only the isDeleted flag flips (D61).
-    expect(tomb.encryptedKey).toBeTruthy();
-    expect(tomb.keyDecryptionNonce).toBeTruthy();
+    // Removed entries are blanked to ids + "-" metadata (museum main
+    // scrubDeletedFiles, d321d76008 — supersedes D61's "never blanks").
+    expect(tomb).toEqual({
+      id: gone.fileId,
+      ownerID: owner.userId,
+      collectionID: album,
+      collectionOwnerID: owner.userId,
+      encryptedKey: '',
+      keyDecryptionNonce: '',
+      file: { decryptionHeader: '', size: 0 },
+      thumbnail: { decryptionHeader: '', size: 0 },
+      metadata: { encryptedData: '-', decryptionHeader: '', size: 0 },
+      isDeleted: true,
+      updationTime: tomb.updationTime,
+    });
   });
 
   it('missing/garbage sinceTime is a 400 BAD_REQUEST ApiError (museum ParseInt, unlike the authed diff)', async () => {
@@ -139,8 +152,8 @@ describe('middleware negative parity (enumeration resistance as a property)', ()
     const cases: Array<[string | undefined, number, Record<string, unknown>]> = [
       [undefined, 401, { error: 'missing accessToken', context: 'album_link' }],
       ['GARBAGE123', 401, { error: 'invalid token' }],
-      [disabled, 410, { error: 'disabled token' }],
-      [expired, 410, { error: 'expired token' }],
+      [disabled, 410, { code: 'LINK_DISABLED', error: 'disabled token' }],
+      [expired, 410, { code: 'LINK_EXPIRED', error: 'expired token' }],
     ];
     for (const path of ['/public-collection/info', '/public-collection/diff?sinceTime=0']) {
       for (const [token, status, body] of cases) {
@@ -288,6 +301,6 @@ describe('device limit', () => {
     world.deps.clock.advance(2 * MICROS_PER_HOUR);
     const after = await info(link.token);
     expect(after.status).toBe(410);
-    expect(await after.json()).toEqual({ error: 'expired token' });
+    expect(await after.json()).toEqual({ code: 'LINK_EXPIRED', error: 'expired token' });
   });
 });

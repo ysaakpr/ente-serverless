@@ -249,7 +249,7 @@ describe('DELETE /collections/share-url/:collectionID', () => {
       accessToken: first.token,
     });
     expect(dead.status).toBe(410);
-    expect(await dead.json()).toEqual({ error: 'disabled token' });
+    expect(await dead.json()).toEqual({ code: 'LINK_DISABLED', error: 'disabled token' });
 
     // Deleting again is still 200 (museum's UPDATE matches zero rows).
     expect((await remove(album)).status).toBe(200);

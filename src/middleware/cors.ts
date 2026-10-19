@@ -41,7 +41,8 @@ const ALLOW_HEADERS = [
 ].join(', ');
 
 const ALLOW_METHODS = 'POST, OPTIONS, GET, PUT, PATCH, DELETE';
-const EXPOSE_HEADERS = 'X-Request-Id, X-Ente-Link-Device-Token';
+// Both device-token names — see publicAccess.ts (upstream 9413f24ed0 renamed it).
+const EXPOSE_HEADERS = 'X-Request-Id, X-Ente-Link-Device-Token, X-Link-Device-Token';
 const MAX_AGE = '1728000';
 
 export const cors = () => async (c: Context, next: Next) => {

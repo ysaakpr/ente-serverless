@@ -704,7 +704,7 @@ describe('privacy: the pool is invisible to authorization (the user requirement)
       `/files/preview/v2/${up.fileId}`,
     ]) {
       const res = await world.request('GET', path, { token: bob.token });
-      expect(res.status, path).toBe(404);
+      expect(res.status, path).toBe(403); // existing but unreachable — museum 403 (D66)
     }
     // file info: strict ownership 403 on a foreign id (museum semantics)
     const info = await world.request('POST', '/files/info', {
@@ -718,7 +718,7 @@ describe('privacy: the pool is invisible to authorization (the user requirement)
       `/collections/v2/diff?collectionID=${album}&sinceTime=0`,
       { token: bob.token },
     );
-    expect(diff.status).toBe(403);
+    expect(diff.status).toBe(404); // non-member — museum 404 (D66)
 
     // an EXPLICIT share is the only thing that opens access
     const share = await world.request('POST', '/collections/share', {

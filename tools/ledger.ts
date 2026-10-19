@@ -61,6 +61,8 @@ const MILESTONES: Record<string, { milestone: string; tags: string }> = {
   'db-transact.test.ts': { milestone: 'P3-A', tags: 'transactWrite atomicity + 100-op cap (D48)' },
   'sharing.test.ts': { milestone: 'P3-A', tags: '[SHARING] dual-write + link rows (D48)' },
   'invites.test.ts': { milestone: 'H1', tags: '[INVITES] [QUOTA] invite gating + per-user storage (D54)' },
+  'share-batch.test.ts': { milestone: 'UP-2610', tags: '[SHARING] batch public keys + batch share (D66)' },
+  'unshare-bulk.test.ts': { milestone: 'UP-2610', tags: '[SHARING] bulk unshare (D66)' },
 };
 
 const rows: string[] = [];

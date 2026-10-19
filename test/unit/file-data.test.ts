@@ -162,7 +162,7 @@ describe('status-diff', () => {
       token: account.token,
       body: { lastUpdatedAt: cursor },
     });
-    expect(((await diff2.json()) as { diff: unknown[] }).diff).toHaveLength(0);
+    expect(((await diff2.json()) as { diff: unknown[] | null }).diff).toBeNull(); // museum: nil slice -> null (D66)
 
     const invalid = await world.request('POST', '/files/data/status-diff', {
       token: account.token,

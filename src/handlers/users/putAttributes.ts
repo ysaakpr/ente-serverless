@@ -16,7 +16,6 @@ const MIN_MEM_LIMIT = 128 * 1024 * 1024;
 
 const keyAttributesSchema = z.object({
   kekSalt: z.string().min(1),
-  kekHash: z.string().optional().default(''),
   encryptedKey: z.string().min(1),
   keyDecryptionNonce: z.string().min(1),
   publicKey: z.string().min(1),

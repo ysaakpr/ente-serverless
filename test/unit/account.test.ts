@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { makeWorld, type TestWorld } from '../helpers/deps.ts';
 import { makeClientKeys, signupAccount, srpLogin } from '../helpers/client.ts';
+import { tokenHash } from '../../src/domain/tokens.ts';
 
 describe('PUT /users/attributes', () => {
   let world: TestWorld;
@@ -84,9 +85,14 @@ describe('session lifecycle (M2 gate)', () => {
     const list = await world.request('GET', '/users/sessions', { token: account.token });
     expect(list.status).toBe(200);
     const { sessions } = (await list.json()) as { sessions: Array<Record<string, unknown>> };
+    // Opaque ids, never bearer tokens (museum main 0e2d6b2473).
+    const sid = (t: string) => `th:${Buffer.from(tokenHash(t), 'hex').toString('base64url')}`;
     const tokens = sessions.map((s) => s.token);
-    expect(tokens).toContain(account.token);
-    expect(tokens).toContain(second.token);
+    expect(tokens).toContain(sid(account.token));
+    expect(tokens).toContain(sid(second.token));
+    expect(tokens).not.toContain(account.token);
+    expect(sessions.find((s) => s.token === sid(account.token))!.isCurrent).toBe(true);
+    expect(sessions.find((s) => s.token === sid(second.token))!.isCurrent).toBe(false);
     for (const s of sessions) {
       expect(typeof s.creationTime).toBe('number');
       expect(typeof s.lastUsedTime).toBe('number');
@@ -95,12 +101,31 @@ describe('session lifecycle (M2 gate)', () => {
       expect(s).toHaveProperty('ip');
     }
 
-    // remote revoke of the second device
+    // The current session cannot be ended this way — museum points at logout.
+    const self = await world.request('DELETE', `/users/session?token=${encodeURIComponent(sid(account.token))}`, {
+      token: account.token,
+    });
+    expect(self.status).toBe(400);
+    expect(await self.json()).toEqual({ code: 'BAD_REQUEST', message: 'use logout to terminate the current session' });
+    const malformed = await world.request('DELETE', '/users/session?token=th:not-32-bytes', { token: account.token });
+    expect(malformed.status).toBe(400);
+
+    // remote revoke of the second device, by its opaque id
     const del = await world.request(
       'DELETE',
-      `/users/session?token=${encodeURIComponent(second.token)}`,
+      `/users/session?token=${encodeURIComponent(sid(second.token))}`,
       { token: account.token },
     );
+    expect(del.status).toBe(200);
+    expect((await world.request('GET', '/users/session-validity/v2', { token: second.token })).status).toBe(401);
+  });
+
+  it('legacy clients may still revoke by raw token', async () => {
+    const account = await signupAccount(world, 'legacy@b.c');
+    const second = await srpLogin(world, 'legacy@b.c', account.keys);
+    const del = await world.request('DELETE', `/users/session?token=${encodeURIComponent(second.token)}`, {
+      token: account.token,
+    });
     expect(del.status).toBe(200);
     expect((await world.request('GET', '/users/session-validity/v2', { token: second.token })).status).toBe(401);
   });

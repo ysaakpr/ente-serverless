@@ -48,6 +48,15 @@ describe('feature-flags', () => {
     }
   });
 
+  it('serverApiFlag advertises exactly UploadV2 | BackupOptions | VideoStreaming (D66)', async () => {
+    const res = await world.request('GET', '/remote-store/feature-flags', { token: account.token });
+    const { serverApiFlag } = (await res.json()) as { serverApiFlag: number };
+    expect(serverApiFlag).toBe(13);
+    // Comments 1<<1, CastSessionsV2 1<<5, LibrarySharing 1<<7, PreviewUploadV2
+    // 1<<8 must stay off until their routes are real.
+    for (const bit of [1, 5, 7, 8]) expect(serverApiFlag & (1 << bit)).toBe(0);
+  });
+
   it('requires auth', async () => {
     expect((await world.request('GET', '/remote-store/feature-flags')).status).toBe(401);
   });
@@ -102,6 +111,17 @@ describe('bonus / push / events', () => {
       body: { fcmToken: 'x' },
     });
     expect(push.status).toBe(200);
+
+    // Android (upstream 4d99556783) registers with apnsToken null + platform.
+    const android = await world.request('POST', '/push/token', {
+      token: account.token,
+      body: { fcmToken: 'y', apnsToken: null, platform: 'android' },
+    });
+    expect(android.status).toBe(200);
+    for (const body of [{}, { fcmToken: 'z', platform: 'web' }]) {
+      const bad = await world.request('POST', '/push/token', { token: account.token, body });
+      expect(bad.status).toBe(400);
+    }
 
     const event = await world.request('POST', '/users/event', {
       token: account.token,

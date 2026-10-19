@@ -10,8 +10,11 @@
  *     "context":"album_link"}
  *   - unknown token -> 401 {"error":"invalid token"}   (ONE GetItem — the
  *     cheap-fail demanded by plan §4.1b: an invalid token costs one read)
- *   - disabled     -> 410 {"error":"disabled token"}
- *   - expired      -> 410 {"error":"expired token"}    (validTill 0 = never)
+ *   - disabled     -> 410 {"code":"LINK_DISABLED","error":"disabled token"}
+ *   - expired      -> 410 {"code":"LINK_EXPIRED","error":"expired token"}
+ *     (validTill 0 = never). The `code` field arrived upstream in 44d9f97965;
+ *     current mobile shows "expired" only on LINK_EXPIRED. LINK_UNAVAILABLE
+ *     (owner has no active subscription) never fires — billing is stubbed.
  *   - passworded link, no/invalid X-Auth-Access-Token-JWT -> 401 {"error":{}}
  *     (museum aborts with gin.H{"error": err} where err is a plain Go error —
  *     json.Marshal renders it as {}), EXCEPT the whitelisted paths
@@ -21,8 +24,11 @@
  *     browser entry points): admitted device (ip+ua seen before, or a valid
  *     X-Auth-Link-Device-Token JWT) passes; a new device over the limit gets
  *     403 {"code":"LINK_DEVICE_LIMIT_EXCEEDED",...}; an admitted device is
- *     handed a fresh device JWT in the X-Ente-Link-Device-Token response
- *     header (the frozen-oracle header name; current main renamed it).
+ *     handed a fresh device JWT in the response headers. Sent under BOTH
+ *     names: X-Ente-Link-Device-Token (the frozen-oracle name, read by the
+ *     pinned albums photos-v1.3.61) and X-Link-Device-Token (upstream
+ *     9413f24ed0; albums reads only this from photos-v1.3.63). Drop the old
+ *     name once ALBUMS_WEB_TAG is past v1.3.63 everywhere.
  *
  * Deliberately NOT ported: the owner-subscription check (billing is stubbed
  * active) and the custom-domain Origin validation (no custom domains here).
@@ -55,6 +61,11 @@ const PASSWORD_WHITELIST = ['/public-collection/info', '/public-collection/verif
 /** museum shouldCheckCollectionLinkDeviceLimit. */
 const DEVICE_LIMIT_PATHS = ['/public-collection/info', '/public-collection/diff'];
 
+const setLinkDeviceToken = (c: Context, token: string): void => {
+  c.header('X-Ente-Link-Device-Token', token);
+  c.header('X-Link-Device-Token', token);
+};
+
 export const requirePublicAccess = (deps: Deps) => async (c: Context, next: Next) => {
   const accessToken = c.req.header('X-Auth-Access-Token') || c.req.query('accessToken');
   if (!accessToken) {
@@ -62,9 +73,9 @@ export const requirePublicAccess = (deps: Deps) => async (c: Context, next: Next
   }
   const link = await getLinkByTokenHash(deps, tokenHash(accessToken));
   if (!link) return c.json({ error: 'invalid token' }, 401);
-  if (link.isDisabled) return c.json({ error: 'disabled token' }, 410);
+  if (link.isDisabled) return c.json({ code: 'LINK_DISABLED', error: 'disabled token' }, 410);
   if (link.validTill > 0 && link.validTill < deps.clock.nowMicros()) {
-    return c.json({ error: 'expired token' }, 410);
+    return c.json({ code: 'LINK_EXPIRED', error: 'expired token' }, 410);
   }
 
   const path = c.req.path;
@@ -84,7 +95,7 @@ export const requirePublicAccess = (deps: Deps) => async (c: Context, next: Next
       if (presentedExp !== null) {
         // Already admitted via JWT; refresh it when inside the renewal window.
         if (presentedExp - deps.clock.nowMicros() < LINK_DEVICE_REFRESH_BEFORE_MICROS) {
-          c.header('X-Ente-Link-Device-Token', newLinkDeviceToken(deps, link));
+          setLinkDeviceToken(c, newLinkDeviceToken(deps, link));
         }
       } else {
         const { admitted } = await admitDevice(deps, link, ip, userAgent);
@@ -92,7 +103,7 @@ export const requirePublicAccess = (deps: Deps) => async (c: Context, next: Next
           const err = linkDeviceLimitExceeded();
           return c.json(err.body(), err.httpStatus as 403);
         }
-        c.header('X-Ente-Link-Device-Token', newLinkDeviceToken(deps, link));
+        setLinkDeviceToken(c, newLinkDeviceToken(deps, link));
       }
     } catch (err) {
       // The daily admission ceiling (P2-1, D53) surfaces as the same bare-429

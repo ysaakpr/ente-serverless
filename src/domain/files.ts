@@ -290,13 +290,16 @@ export const assertSizesMatch = (
   if (claimed.thumb && claimed.thumb !== actual.thumbSize) throw errBadRequestSentinel();
 };
 
-/** The stored File row projected into museum's File JSON for one collection
- * link. Tombstones (link.isDeleted) are NOT blanked: museum's diff SELECT
- * reads the stored collection_files + files columns for deleted links exactly
- * like live ones (repo/collection.go GetDiff) — only the isDeleted flag
- * distinguishes them (D61; the old blanked tombstone was this repo's
- * invention). Clients guard on isDeleted before decrypting diff entries, but
- * the wire shape matches museum field for field either way. */
+/** File/thumbnail attributes as museum emits them in feeds: the S3 objectKey
+ * is never on the wire (museum's diff/trash SELECTs do not read it; captured
+ * live 2026-10-19 — {decryptionHeader, size} only). */
+export const wireAttributes = (attrs: FileAttributes, size: number): Record<string, unknown> => {
+  const { objectKey: _objectKey, ...rest } = attrs;
+  return { ...rest, size };
+};
+
+/** The stored File row projected into museum's File JSON for one live
+ * collection link. Removed links go through deletedFileJson instead. */
 export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: number): Record<string, unknown> => ({
   id: file.fileId,
   ownerID: file.ownerID,
@@ -305,14 +308,40 @@ export const fileToDiffJson = (file: FileRow, link: LinkRow, collectionOwnerID: 
   collectionAddedAt: link.createdAt,
   encryptedKey: link.encryptedKey,
   keyDecryptionNonce: link.keyDecryptionNonce,
-  file: { ...file.file, size: file.info.fileSize },
-  thumbnail: { ...file.thumbnail, size: file.info.thumbSize },
+  file: wireAttributes(file.file, file.info.fileSize),
+  thumbnail: wireAttributes(file.thumbnail, file.info.thumbSize),
   metadata: { size: 0, ...file.metadata },
   isDeleted: link.isDeleted,
   updationTime: link.updationTime,
   ...(file.magicMetadata ? { magicMetadata: file.magicMetadata } : {}),
   ...(file.pubMagicMetadata ? { pubMagicMetadata: file.pubMagicMetadata } : {}),
   info: { fileSize: file.info.fileSize, thumbSize: file.info.thumbSize },
+});
+
+/** A removed link in a collection diff, blanked the way museum main does it
+ * (collections/files_diff.go scrubDeletedFiles, upstream d321d76008): only
+ * the ids, the "-" metadata marker, isDeleted and updationTime survive — the
+ * rest is Go's zero-valued ente.File as gin serializes it (captured live from
+ * museum 20fb631, 2026-10-19). Supersedes D61's "tombstones are NOT blanked":
+ * key material and metadata of a removed file no longer reach sharees or
+ * public viewers. */
+export const deletedFileJson = (
+  fileId: number,
+  ownerID: number,
+  link: LinkRow,
+  collectionOwnerID: number,
+): Record<string, unknown> => ({
+  id: fileId,
+  ownerID,
+  collectionID: link.collectionID,
+  collectionOwnerID,
+  encryptedKey: '',
+  keyDecryptionNonce: '',
+  file: { decryptionHeader: '', size: 0 },
+  thumbnail: { decryptionHeader: '', size: 0 },
+  metadata: { encryptedData: '-', decryptionHeader: '', size: 0 },
+  isDeleted: true,
+  updationTime: link.updationTime,
 });
 
 /** One page of a collection's diff feed — the shared spine of
@@ -348,32 +377,18 @@ export const collectionDiffPage = async (
   return { links, hasMore };
 };
 
-/** Link -> museum File JSON, with the permanently-deleted-file fallback: the
- * file row is gone but the link still tombstones in the feed (museum's
- * stale-entry isDeleted patch in files_diff.go; there the files row survives
- * with metadata "-", here it is deleted outright, so the file-side fields of
- * this one tombstone flavour are blank — unrecoverable, and clients never
- * read past isDeleted on it). The link-side fields (encryptedKey,
- * keyDecryptionNonce, collectionAddedAt) are stored and emit real values. */
+/** Link -> museum File JSON for the diff feeds (GET /collections/v2/diff and
+ * GET /public-collection/diff). A removed link — or a live link whose file
+ * row was permanently deleted (museum's stale-entry isDeleted patch) — emits
+ * the blanked deletedFileJson shape. */
 export const diffJsonForLink = async (
   deps: Deps,
   link: LinkRow,
   collectionOwnerID: number,
 ): Promise<Record<string, unknown>> => {
   const file = await getFile(deps, link.fileID);
-  if (!file) {
-    return fileToDiffJson(
-      {
-        fileId: link.fileID,
-        ownerID: collectionOwnerID,
-        info: { fileSize: 0, thumbSize: 0 },
-        file: { decryptionHeader: '' },
-        thumbnail: { decryptionHeader: '' },
-        metadata: { decryptionHeader: '' },
-      } as never,
-      { ...link, isDeleted: true },
-      collectionOwnerID,
-    );
+  if (!file || link.isDeleted) {
+    return deletedFileJson(link.fileID, file?.ownerID ?? collectionOwnerID, link, collectionOwnerID);
   }
   return fileToDiffJson(file, link, collectionOwnerID);
 };
@@ -384,8 +399,10 @@ export const diffJsonForLink = async (
  * owner or sharee of a collection that still LINKS the file (museum's SQL:
  * live collection_files row joined to a live collection_shares row). Trashed
  * files remain readable by the owner — their links are tombstoned, but the
- * owner branch never consults links. Non-members and unknown ids both read
- * as 404 (the sql.ErrNoRows path) — membership is never disclosed as 403.
+ * owner branch never consults links. Unknown ids read 404 (sql.ErrNoRows);
+ * an existing file the caller cannot reach is 403 — museum main's single
+ * query computes can_access and returns ErrPermissionDenied (verified live
+ * against museum 20fb631, 2026-10-19; D66).
  */
 export const getAccessibleFile = async (deps: Deps, userId: number, fileId: number): Promise<FileRow> => {
   const file = await getFile(deps, fileId);
@@ -402,7 +419,7 @@ export const getAccessibleFile = async (deps: Deps, userId: number, fileId: numb
     const collection = await deps.db.get(keys.collection(link.collectionID).pk, 'META');
     if (collection?.ownerID === userId) return file;
   }
-  throw errNotFound();
+  throw errPermissionDenied();
 };
 
 /** museum VerifyFileOwnership: 400 when ids are unknown, 403 on foreign files. */

@@ -7,7 +7,7 @@
 import type { Deps } from '../deps.ts';
 import { keys, gsi, padTime } from './model.ts';
 import { MICROS_PER_DAY } from '../lib/time.ts';
-import { filePoolPin, getFile, restampLink, thumbPoolPin, type FileRow, type LinkRow } from './files.ts';
+import { filePoolPin, getFile, restampLink, thumbPoolPin, wireAttributes, type FileRow, type LinkRow } from './files.ts';
 import { bumpCollectionForward, getCollection } from './collections.ts';
 import { purgeQueueRow } from './objectSweep.ts';
 
@@ -207,11 +207,13 @@ export const trashToJson = async (deps: Deps, row: TrashRow): Promise<Record<str
         id: file.fileId,
         ownerID: file.ownerID,
         collectionID: originCollection,
-        collectionOwnerID: file.ownerID,
+        // museum's trash diff never joins the collection owner: null
+        // (captured live from museum 20fb631, 2026-10-19; D66).
+        collectionOwnerID: null,
         encryptedKey: link?.encryptedKey ?? (file.encryptedKey as string) ?? '',
         keyDecryptionNonce: link?.keyDecryptionNonce ?? (file.keyDecryptionNonce as string) ?? '',
-        file: { ...file.file, size: file.info.fileSize },
-        thumbnail: { ...file.thumbnail, size: file.info.thumbSize },
+        file: wireAttributes(file.file, file.info.fileSize),
+        thumbnail: wireAttributes(file.thumbnail, file.info.thumbSize),
         metadata: { size: 0, ...file.metadata },
         isDeleted: false,
         updationTime: file.updationTime,

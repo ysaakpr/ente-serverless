@@ -1,0 +1,66 @@
+# The UPSTREAM parent: current museum main (ghcr.io/ente/server:latest) +
+# Postgres + Silo (upstream compose switched from MinIO to Silo in
+# e3f2d954da). Runs on :8590 next to the pinned oracle (:8580). Used by
+# `make differential` (tools/differential.ts) to diff our API against what
+# today's museum answers (D66). Unpinned on purpose: it tracks upstream.
+services:
+  museum:
+    # Deliberately :latest — this stack tracks upstream main (D66).
+    image: ghcr.io/ente/server:latest
+    container_name: ente-upstream-museum
+    ports:
+      - '8590:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    environment:
+      ENTE_DB_HOST: postgres
+      ENTE_DB_PORT: 5432
+      ENTE_DB_NAME: ente_db
+      ENTE_DB_USER: pguser
+      ENTE_DB_PASSWORD: pgpass
+      ENTE_S3_ARE_LOCAL_BUCKETS: 'true'
+      ENTE_S3_B2_EU_CEN_KEY: minioadmin
+      ENTE_S3_B2_EU_CEN_SECRET: minioadmin
+      ENTE_S3_B2_EU_CEN_ENDPOINT: http://minio:3200
+      ENTE_S3_B2_EU_CEN_REGION: eu-central-2
+      ENTE_S3_B2_EU_CEN_BUCKET: b2-eu-cen
+      # Underscores, NOT hyphens: museum's viper replacer maps both '.' and '-'
+      # in the config key (internal.hardcoded-ott.local-domain-suffix) to '_'.
+      # The hyphenated spelling silently does not bind — museum then mails a
+      # random OTT and every scripted capture 401s (D31).
+      ENTE_INTERNAL_HARDCODED_OTT_LOCAL_DOMAIN_SUFFIX: '@example.org'
+      ENTE_INTERNAL_HARDCODED_OTT_LOCAL_DOMAIN_VALUE: '123456'
+
+  postgres:
+    image: postgres:15
+    container_name: ente-upstream-postgres
+    environment:
+      POSTGRES_USER: pguser
+      POSTGRES_PASSWORD: pgpass
+      POSTGRES_DB: ente_db
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-q', '-d', 'ente_db', '-U', 'pguser']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: pgsty/silo
+    container_name: ente-upstream-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --address ":3200" --console-address ":3201"
+
+  minio-provision:
+    image: pgsty/silo
+    depends_on:
+      - minio
+    entrypoint: |
+      sh -c '
+      while ! mc alias set h0 http://minio:3200 minioadmin minioadmin 2>/dev/null; do sleep 0.5; done;
+      mc mb -p h0/b2-eu-cen || true
+      '

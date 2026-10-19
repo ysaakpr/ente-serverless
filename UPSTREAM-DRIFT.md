@@ -8,8 +8,15 @@ ORACLE-VERSION). Compared against upstream `main` at `f4cdad4b7e`
 (`mobile/apps/photos`, `mobile/packages`) and web (`web/packages`,
 `web/apps/{photos,albums,cast}`) Photos clients.
 
-Nothing here has been fixed yet — this is the record that the follow-up
-work (NEXT-TASKS items 11–15) is cut from.
+> **Status (2026-10-19, same day): §2, §3 and §5 are FIXED** — DECISIONS.md
+> D66. Verified with a live differential (`make differential`,
+> tools/differential.ts) against museum main 20fb631: 93 scenarios, 89
+> identical, 4 deliberate divergences, 0 unexplained. The run also settled
+> D49 (non-member reads are 404) and found three more gaps that are fixed in
+> the same change: download of an unreachable file is 403, upload-URL MD5s
+> are validated, and the current session cannot be deleted via
+> DELETE /users/session. §7 (storage class) and §8's ops-visibility gap
+> remain open (NEXT-TASKS 14–15).
 
 ## 1. Verdict
 

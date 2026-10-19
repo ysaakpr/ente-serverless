@@ -40,6 +40,8 @@ export const updateRemoteStoreValue = (deps: Deps) => async (c: Context) => {
   return c.body(null, 200);
 };
 
+export const SERVER_API_FLAG = (1 << 0) | (1 << 2) | (1 << 3);
+
 export const getFeatureFlags = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
   return c.json({
@@ -52,7 +54,13 @@ export const getFeatureFlags = (deps: Deps) => async (c: Context) => {
     internalUser: false,
     betaUser: false,
     enableMobMultiPart: true,
-    serverApiFlag: 0,
+    // Only the bits this server can honour (D66): UploadV2 (1<<0, unread by
+    // current clients), BackupOptions (1<<2, unread by Photos), and
+    // VideoStreaming (1<<3 — mobile streams videos by default; the
+    // vid_preview path is implemented). Comments, CastSessionsV2,
+    // LibrarySharing and PreviewUploadV2 stay off: their routes are stubs or
+    // absent. Museum main sends 239 (+256 for internal users).
+    serverApiFlag: SERVER_API_FLAG,
     castUrl: '',
     embedUrl: '',
   });

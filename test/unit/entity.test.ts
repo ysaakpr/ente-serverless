@@ -151,3 +151,83 @@ describe('user-entity data + diff', () => {
     expect(diff.diff).toHaveLength(0);
   });
 });
+
+describe('library_share entity type (D66, upstream e77dbe548b)', () => {
+  let recipient: Account;
+  const ls = (extra: Record<string, unknown> = {}) => ({
+    type: 'library_share',
+    encryptedData: b64(randomBytes(40)),
+    header: b64(randomBytes(24)),
+    ...extra,
+  });
+  const lsId = () => `ls_${account.userId}_${recipient.userId}`;
+  const create = (body: unknown) => world.request('POST', '/user-entity/entity', { token: account.token, body });
+  const update = (body: unknown) => world.request('PUT', '/user-entity/entity', { token: account.token, body });
+
+  beforeEach(async () => {
+    recipient = await signupAccount(world, 'ls-recipient@b.c');
+  });
+
+  it('accepts the type for keys and data; ids must be ls_<caller>_<other> in canonical form', async () => {
+    const key = await world.request('POST', '/user-entity/key', {
+      token: account.token,
+      body: { type: 'library_share', encryptedKey: b64(randomBytes(48)), header: b64(randomBytes(24)) },
+    });
+    expect(key.status).toBe(200);
+    for (const id of [
+      undefined,
+      `ls_${recipient.userId}_${account.userId}`, // foreign owner
+      `ls_${account.userId}_${account.userId}`, // self
+      `ls_${account.userId}_0${recipient.userId}`, // non-canonical
+      `ls_${account.userId}_0`,
+      `sa_${account.userId}_${recipient.userId}`,
+    ]) {
+      expect((await create(ls(id ? { id } : {}))).status, String(id)).toBe(400);
+    }
+    const ok = await create(ls({ id: lsId() }));
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { id: string }).id).toBe(lsId());
+  });
+
+  it('live duplicate is 409 ALREADY_EXISTS; a deleted one is revived in place', async () => {
+    const first = (await (await create(ls({ id: lsId() }))).json()) as { createdAt: number };
+    const dup = await create(ls({ id: lsId() }));
+    expect(dup.status).toBe(409);
+    expect(await dup.json()).toEqual({ code: 'ALREADY_EXISTS', message: 'Entity already exists' });
+
+    await world.request('DELETE', `/user-entity/entity?id=${lsId()}`, { token: account.token });
+    const revived = await create(ls({ id: lsId() }));
+    expect(revived.status).toBe(200);
+    const body = (await revived.json()) as { isDeleted: boolean; createdAt: number };
+    expect(body.isDeleted).toBe(false);
+    expect(body.createdAt).toBe(first.createdAt);
+  });
+
+  it('update needs expectedUpdatedAt; stale is a bare 409 unless the write is a no-op retry', async () => {
+    const created = (await (await create(ls({ id: lsId() }))).json()) as { updatedAt: number };
+    const fresh = ls({ id: lsId() });
+
+    const missing = await update(fresh);
+    expect(missing.status).toBe(400);
+    expect(((await missing.json()) as { message: string }).message).toBe(
+      'expectedUpdatedAt is required for LibraryShare entity type',
+    );
+
+    const stale = await update({ ...fresh, expectedUpdatedAt: created.updatedAt - 1 });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({});
+
+    const ok = await update({ ...fresh, expectedUpdatedAt: created.updatedAt });
+    expect(ok.status).toBe(200);
+    // Same payload again against the now-old version: museum treats it as done.
+    const retry = await update({ ...fresh, expectedUpdatedAt: created.updatedAt });
+    expect(retry.status).toBe(200);
+  });
+
+  it('smart_album shares the create-or-restore rule', async () => {
+    const id = `sa_${account.userId}_x`;
+    const body = { type: 'smart_album', id, encryptedData: b64(randomBytes(40)), header: b64(randomBytes(24)) };
+    expect((await create(body)).status).toBe(200);
+    expect((await create(body)).status).toBe(409);
+  });
+});

@@ -97,7 +97,7 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
     and the file's pin, and (b) decide the img_preview story once a client
     generates it (capture-first, D8). Until then a pool's counter can read
     slightly HIGH after fd deletions — the safe direction for a shared cap.
-11. **Upstream-drift soft spots (UPSTREAM-DRIFT.md §2).** (a) emit + expose
+11. **DONE 2026-10-19 (D66) — Upstream-drift soft spots (UPSTREAM-DRIFT.md §2).** (a) emit + expose
     both `X-Ente-Link-Device-Token` and `X-Link-Device-Token` — required
     before any ALBUMS_WEB_TAG bump past photos-v1.3.61; (b) accept the
     `library_share` entity type and add `POST /collections/unshare/bulk`
@@ -106,11 +106,11 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
     (e) implement `POST /users/public-keys` + `POST /collections/share/batch`,
     or guard-test that unknown routes keep a plain-text 404 (mobile's share
     fallback depends on it).
-12. **Privacy redactions upstream now applies (UPSTREAM-DRIFT.md §3):**
+12. **DONE 2026-10-19 (D66) — Privacy redactions upstream now applies (UPSTREAM-DRIFT.md §3):**
     blank removed-file diff entries, trim unshare tombstones, drop owner
     `magicMetadata` for non-owners on `GET /collections/:id`, opaque `th:`
     session identifiers + `isCurrent`. Revisit D61's tombstone note.
-13. **serverApiFlag → 13** (UploadV2 | BackupOptions | VideoStreaming) so
+13. **DONE 2026-10-19 (D66) — serverApiFlag → 13** (UploadV2 | BackupOptions | VideoStreaming) so
     mobile streams videos by default (UPSTREAM-DRIFT.md §5).
 14. **Originals storage class:** evaluate Intelligent-Tiering (no archive
     tiers) in place of GLACIER_IR for new uploads, and whether a one-time
@@ -119,9 +119,14 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
 15. **Ops visibility:** the `ente-deployer` principal cannot read CloudWatch
     metrics, logs, or list buckets. Add a read-only ops profile; confirm SES
     production access for the configured mail identity.
-17. **Finish the D67 remote-state move (operator, on the machine holding the
-    state):** the bucket exists (2026-10-19). Per profile: `make tfvars-split`,
-    `git diff` the committed config.tfvars, `make secrets-push`,
-    `make state-migrate`, `make plan` (expect no infra changes), back up and
-    delete the local state copies + ente-sl.tfvars, commit config.tfvars.
-    INSTALL.md C4 "Moving an existing deployment off local state".
+16. **Re-run `make differential` before every deploy and after any upstream
+    bump** (D66). It drives museum main (`make upstream-up`, :8590) and our
+    server side by side; a non-zero exit means a new unexplained divergence.
+    Extend its scenario list when a handler changes. Still worth adding:
+    POST preview-upload v2 and GET /users/deletion-summary if a client ever
+    depends on them (both EXPECTED today).
+17. **D67 remote-state move — DONE 2026-10-21.** Both profiles' state and
+    secrets are in the state bucket; config.tfvars committed. Verified from a
+    second machine (tofu 1.12.5, same as the migrating machine): prod plans
+    "No changes"; test plans only the alarm e-mail subscription, which SNS
+    had dropped because its confirmation link was never clicked.

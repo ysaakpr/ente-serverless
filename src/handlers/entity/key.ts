@@ -12,7 +12,21 @@ import { auth } from '../../middleware/auth.ts';
 import { keys } from '../../domain/model.ts';
 import { badRequest, errNotFound, ApiError } from '../../lib/errors.ts';
 
-export const ENTITY_TYPES = ['location', 'person', 'cgroup', 'smart_album', 'memory', 'contact', 'space'];
+export const ENTITY_TYPES = [
+  'location',
+  'person',
+  'cgroup',
+  'smart_album',
+  'memory',
+  'contact',
+  'space',
+  // Upstream e77dbe548b — library-sharing state. Mobile's "Unshare and Hide"
+  // syncs this type even with the LibrarySharing flag off (D66).
+  'library_share',
+];
+
+/** museum EntityType.CanRestoreDeletedData: create on a tombstoned id revives it. */
+export const RESTORABLE_ENTITY_TYPES = ['smart_album', 'library_share'];
 
 const keySchema = z.object({
   type: z.string(),

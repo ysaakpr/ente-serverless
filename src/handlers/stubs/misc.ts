@@ -23,16 +23,22 @@ export const storageBonusDetails = (_deps: Deps) => async (c: Context) =>
 // overwrite an arbitrary row. Museum's push registration carries only these
 // device-token fields, and the row is never read back, so stripping the rest
 // is behaviour-neutral. NEVER spread raw `c.req.json()` into a `db.put`.
+// Shape per museum ente/push.go PushTokenRequest (upstream main 2026-10):
+// fcmToken binding-required; Android registers with `apnsToken: null` and
+// `platform: "android"` (platform defaults to "ios", oneof ios|android).
 const pushSchema = z.object({
-  fcmToken: z.string().optional(),
-  apnsToken: z.string().optional(),
+  fcmToken: z.string().min(1),
+  apnsToken: z.string().nullish(),
+  platform: z.enum(['ios', 'android']).default('ios'),
   pushToken: z.string().optional(),
 });
 
 export const pushToken = (deps: Deps) => async (c: Context) => {
   const { userId } = auth(c);
   const body = pushSchema.parse(await c.req.json().catch(() => ({})));
-  await deps.db.put({ ...keys.pushToken(userId), ...body });
+  // DynamoDB rejects nothing here, but keep the row free of explicit nulls.
+  const { apnsToken, ...rest } = body;
+  await deps.db.put({ ...keys.pushToken(userId), ...rest, ...(apnsToken ? { apnsToken } : {}) });
   return c.json({});
 };
 
