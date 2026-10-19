@@ -11,6 +11,11 @@ and 6 below are its release gates; the README feature-table rows stay
 gate-annotated until they pass. Same day, Phase H deployment controls —
 invite-gated signup + per-user quotas + BYO storage pools, D54/D55, plan §7;
 its device checks ride item 4 and its cloud check is item 9.)
+(2026-10-19: item 5's deploy is DONE — `prod` (ap-south-1) and `test`
+(ap-southeast-1) were applied 2026-08-27/28 and prod is in daily use; the
+prod bundle matches `b050725`. Upstream drift audit against ente main
+recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
+`test` before `prod` — prod holds live user data.)
 
 1. **Write the capture script + run it (D2, deferred by decision).** Bring up
    the pinned oracle (`make oracle-up`), drive the synthetic client
@@ -45,7 +50,8 @@ its device checks ride item 4 and its cloud check is item 9.)
    exactly this); and a viewer account (`make invite … VIEWER=1`) must boot,
    sync, browse a share, and favorite a shared photo without tripping on the
    426/403 refusals.
-5. **M7 deploy (D4):** `make build-lambda`, fill `src/infra/dev/ente-sl.tfvars`
+5. **M7 deploy (D4) — DEPLOYED 2026-08-27/28 (see UPSTREAM-DRIFT.md §8); the
+   post-apply gate replay below is still unrecorded:** `make build-lambda`, fill `src/infra/dev/ente-sl.tfvars`
    from the example (BACK UP hashing_key), `tofu apply`, replay gates against
    the real URL, then the app over the internet. Still open: account/region +
    SES-verified mail_from. Post-apply: the FREE pricing-plan subscription is
@@ -91,3 +97,25 @@ its device checks ride item 4 and its cloud check is item 9.)
     and the file's pin, and (b) decide the img_preview story once a client
     generates it (capture-first, D8). Until then a pool's counter can read
     slightly HIGH after fd deletions — the safe direction for a shared cap.
+11. **Upstream-drift soft spots (UPSTREAM-DRIFT.md §2).** (a) emit + expose
+    both `X-Ente-Link-Device-Token` and `X-Link-Device-Token` — required
+    before any ALBUMS_WEB_TAG bump past photos-v1.3.61; (b) accept the
+    `library_share` entity type and add `POST /collections/unshare/bulk`
+    (mobile "Unshare and Hide" errors today); (c) `/push/token` accepts
+    `apnsToken: null` + `platform`; (d) public-link 410s carry `code`;
+    (e) implement `POST /users/public-keys` + `POST /collections/share/batch`,
+    or guard-test that unknown routes keep a plain-text 404 (mobile's share
+    fallback depends on it).
+12. **Privacy redactions upstream now applies (UPSTREAM-DRIFT.md §3):**
+    blank removed-file diff entries, trim unshare tombstones, drop owner
+    `magicMetadata` for non-owners on `GET /collections/:id`, opaque `th:`
+    session identifiers + `isCurrent`. Revisit D61's tombstone note.
+13. **serverApiFlag → 13** (UploadV2 | BackupOptions | VideoStreaming) so
+    mobile streams videos by default (UPSTREAM-DRIFT.md §5).
+14. **Originals storage class:** evaluate Intelligent-Tiering (no archive
+    tiers) in place of GLACIER_IR for new uploads, and whether a one-time
+    copy-in-place of existing GIR originals pays back (UPSTREAM-DRIFT.md §7).
+    Needs the storage-class split first — see item 15.
+15. **Ops visibility:** the `ente-deployer` principal cannot read CloudWatch
+    metrics, logs, or list buckets. Add a read-only ops profile; confirm SES
+    production access for the configured mail identity.

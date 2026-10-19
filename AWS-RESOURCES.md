@@ -5,8 +5,10 @@ Derived from `src/infra` as of 2026-08-17 (albums web hosting added
 2026-08-27, Phase F/D52, and consolidated onto the ONE distribution the same
 day, D58; the execution role's pool `sts:AssumeRole` statement added the same
 day, Phase H2/D55; the operator role for the `tools/` CLI added 2026-08-28,
-D64 — rows 7/8); **no cloud deploy has happened yet**, so nothing below
-has been observed running — it is what `tofu apply` will attempt.
+D64 — rows 7/8); **deployed 2026-08-27/28** as two environments — `prod`
+(ap-south-1) and `test` (ap-southeast-1); live status as of 2026-10-19 is in
+[UPSTREAM-DRIFT.md](UPSTREAM-DRIFT.md) §8. The inventory below is what
+`tofu apply` creates per environment.
 
 Names below are written as `ente-sl-dev-*` for continuity, but `region` and
 `env_name` now carry **no defaults** — both are required in `ente-sl.tfvars`, so

@@ -86,7 +86,7 @@ make pools         # operator CLI, D55 — also: pool-create / pool-attach /
                    #   pool-detach / pool-set-quota / pool-disable / pool-enable
 ```
 
-Deploy (dev, NOT yet performed — session scope excluded it):
+Deploy (performed 2026-08-27/28 as `prod` + `test`; status in UPSTREAM-DRIFT.md §8):
 
 ```bash
 make build-lambda
@@ -106,9 +106,11 @@ Option-1 deployment controls (invite-gated signup, per-user quotas, BYO
 storage pools — H1/H2, D54/D55, plan §7). Pending,
 in order: capture runs → capture-diff parity (D2, now also covering the
 sharing/public surfaces), the stock-app LAN gate (M5, needs a device; re-run
-with a shared album), first cloud deploy (M7, excluded from the build
-session) + the manual albums-link browser gate (D52), remaining [ACCOUNT]
-routes (capture-first, M7 completeness pass).
+with a shared album), the manual albums-link browser gate (D52), remaining
+[ACCOUNT] routes (capture-first, M7 completeness pass). The M7 cloud deploy
+is done (2026-08-27/28, `prod` + `test`) and prod is in daily use. The
+2026-10-19 upstream drift audit (ente main vs the pin) is in
+[UPSTREAM-DRIFT.md](UPSTREAM-DRIFT.md); its fix list is NEXT-TASKS 11–15.
 
 ## Feature report — implemented vs museum parity
 
