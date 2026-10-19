@@ -1,7 +1,11 @@
-# Copy to ente-sl.tfvars (gitignored) and fill in. BACK UP hashing_key:
-# losing it orphans every email->user mapping (decision D4a).
-# Generate once:  openssl rand -base64 32
-hashing_key = "REPLACE-ME-base64-32-bytes"
+# COMMITTED settings for the PRODUCTION (dev profile) deployment (D67). Safe for a public repo:
+# nothing private lives here. hashing_key, mail_from, alarm_email and
+# operator_principal_arns are kept in s3://ente-sl-tfstate-<account>/secrets/dev.tfvars
+# and fetched by `make plan` for the run only (make secrets-pull / secrets-push).
+# `make tfvars-check` (and the infra tests) refuse this file if a private value
+# lands in it. Values below were read off the live deployment on 2026-10-19.
+
+# hashing_key = <private: secrets/<env>.tfvars in the state bucket — make secrets-pull>
 
 # Any SES-verified identity in `region` below. A plain ADDRESS is fine — you do
 # NOT need a domain. Verify your own inbox in the SES console for that region
@@ -19,18 +23,18 @@ hashing_key = "REPLACE-ME-base64-32-bytes"
 #
 # Misconfiguration shows up at runtime, not at apply: SES rejecting the send
 # makes POST /users/ott return 500 with the code already stored but undelivered.
-mail_from = "you@example.com"
+# mail_from = <private: secrets/<env>.tfvars in the state bucket — make secrets-pull>
 
 # The single source of truth for where this deploys. `make plan` / `make deploy`
 # pass only -var-file, so plan and apply can never disagree on the region — and
 # your AWS CLI's own configured region is irrelevant to tofu, which reads this.
 # Moving it later means a SECOND deployment, not a migration: the table and
 # bucket carry prevent_destroy.
-region = "ap-southeast-1"
+region = "ap-south-1"
 
 # Optional. Where CloudWatch alarms are mailed; omit and it follows mail_from.
 # Either way, CONFIRM the subscription link AWS sends, or alarms go nowhere.
-# alarm_email = "ops@example.com"
+# alarm_email = <private when set: secrets/<env>.tfvars>
 
 # Optional. Where public album share links point (D52). Omit and links use the
 # web module's own CloudFront domain (the albums_url output), which is right
@@ -49,7 +53,7 @@ region = "ap-southeast-1"
 # Optional. Invite-gated signup (D54/D56): "invite" admits only emails invited
 # via `make invite`; omit for open signup (the default). Only account CREATION
 # is gated — login and existing accounts are untouched either way.
-# signup_mode = "invite"
+signup_mode = "invite"
 
 # Optional. Who may assume ente-sl-<env>-operator, the role the tools/ CLI runs
 # under (invite.ts, storagePool.ts — they need dynamodb:Scan the request path
@@ -57,7 +61,7 @@ region = "ap-southeast-1"
 # operator owns the account. Set it to specific IAM user / SSO-role ARNs to
 # narrow who can assume it. Point an AWS profile's role_arn at the role, then
 # run the make targets under it (`AWS_PROFILE=... make invite ...`).
-# operator_principal_arns = ["arn:aws:iam::<account>:user/ops"]
+# operator_principal_arns = <private when set: secrets/<env>.tfvars>
 
 # Names everything: table ente-sl-<env>, bucket ente-sl-<env>-objects-<account>,
 # both lambdas, the IAM role, the log groups, the Env tag. The deployer policy is
@@ -66,3 +70,5 @@ region = "ap-southeast-1"
 # the bucket, which forces a replacement that prevent_destroy will refuse —
 # recovering from that means editing the module and doing `tofu state mv`.
 env_name = "prod"
+
+api_reserved_concurrency = 100

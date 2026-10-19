@@ -118,6 +118,16 @@ Everything carries default tags `Project=ente-serverless`, `Env=dev`,
 
 These are the actual gating work for the first apply.
 
+0. **The state bucket `ente-sl-tfstate-<account>`** (ap-south-1, D67) — created
+   by `make state-bootstrap`, deliberately outside tofu (it holds the state).
+   Versioned, SSE-S3 with a bucket key, BucketOwnerEnforced, all public access
+   blocked, a bucket policy denying non-TLS access and `s3:DeleteObjectVersion`
+   / `s3:DeleteBucket`, lifecycle keeping a year (and at least the 50 newest) of
+   noncurrent state versions. Holds `state/<profile>/terraform.tfstate` (+ the
+   transient `.tflock`) and `secrets/<profile>.tfvars`. Created for the live
+   account on 2026-10-19; the deployer policy already covers it
+   (`arn:aws:s3:::ente-sl-*`).
+
 1. **The AWS account and region.** Still open per D4. The region choice binds
    Lambda, DynamoDB, S3 and — critically — **SES**: the mail adapter uses the
    Lambda's own `AWS_REGION`, so the verified identity must live in the same
@@ -451,11 +461,13 @@ Steps 1–4 are the out-of-band work; from step 5 on it is all make targets.
    The IAM console may warn that `cloudfront:CreateDistributionWithTags` is an
    unrecognized action — that is a validator quirk, the action is real and
    `default_tags` means the provider needs it. Save anyway; don't remove it.
-4. **`cp src/infra/dev/ente-sl.tfvars.example src/infra/dev/ente-sl.tfvars`**,
-   fill in `region`, `mail_from` and `hashing_key`, and **back the key up
-   off-machine before applying** (D4a).
-5. **`make infra-init`** — regenerates `.terraform/` and the lock file, both
-   dropped by the repo split.
+4. **`make state-bootstrap`**, then settings (D67): non-private values in the
+   committed `src/infra/<profile>/config.tfvars`; `hashing_key` and
+   `mail_from` in the private `secrets.tfvars`, pushed with `make secrets-push`
+   to `s3://ente-sl-tfstate-<account>/secrets/<profile>.tfvars`. **Back the key
+   up off-machine before applying** (D4a).
+5. **`make infra-init`** — points the dir at its remote state and regenerates
+   `.terraform/` and the lock file.
 6. **`make plan`** — rebuilds the bundles first (so `dist/` can never be stale
    at plan time), refuses with instructions if the tfvars file is missing, and
    saves `tfplan`. Expect **27 to add, 0 to change, 0 to destroy** on a fresh

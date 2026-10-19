@@ -201,7 +201,7 @@ same region you deploy to. Pick once; moving later is a fresh deployment, not
 a migration (the bucket name embeds the account ID and the table carries
 API-level deletion protection, D57).
 
-Note: OpenTofu reads the region from `ente-sl.tfvars` (step C4), **not** from
+Note: OpenTofu reads the region from the env's `config.tfvars` (step C4), **not** from
 your AWS CLI config. `aws configure get region` tells you nothing about where
 this deploys.
 
@@ -257,27 +257,92 @@ Confirm the account ID is the one you decided on in C1. A `guard-account`
 check in the Makefile will also refuse plan/deploy/destroy if your credentials
 ever point at a different account than the one recorded in state.
 
-### C4. Create and fill in the tfvars
+### C4. Settings: committed config + private secrets in S3 (D67)
+
+Each env's variables live in two places:
+
+| Where | What | In git? |
+|---|---|---|
+| `src/infra/<profile>/config.tfvars` | `region`, `env_name`, `signup_mode`, limits, lifecycle days, `delete_protection` … | **yes** — the repo is public, so `make tfvars-check` (and the infra tests) refuse it if a private value lands in it |
+| `s3://ente-sl-tfstate-<account>/secrets/<profile>.tfvars` | `hashing_key`, `mail_from`, and `alarm_email` / `operator_principal_arns` when set | no — `make plan` fetches it for the run and deletes it afterwards |
+
+The state lives in the same bucket (`state/<profile>/terraform.tfstate`, locked
+with OpenTofu's native S3 lock file — **OpenTofu >= 1.10**). Create the bucket
+once per account (idempotent — re-running re-applies its settings: versioning,
+SSE-S3, public access blocked, TLS-only, permanent version deletes denied):
 
 ```bash
-cp src/infra/dev/ente-sl.tfvars.example src/infra/dev/ente-sl.tfvars
+AWS_PROFILE=ente-sl make state-bootstrap
 ```
 
-Fill in all four values (the file is gitignored):
+A brand-new env: edit its `config.tfvars`, then write the private file and push it:
+
+```bash
+make profile dev
+cat > src/infra/dev/secrets.tfvars <<'EOF'
+hashing_key = "<openssl rand -base64 32>"
+mail_from   = "you@example.com"
+EOF
+chmod 600 src/infra/dev/secrets.tfvars
+AWS_PROFILE=ente-sl make secrets-push      # refuses to CHANGE an existing hashing_key without FORCE=1
+rm src/infra/dev/secrets.tfvars             # the S3 copy is the record now
+```
 
 | Variable | Value |
 |---|---|
-| `hashing_key` | `openssl rand -base64 32` — generate once, see warning below |
-| `mail_from` | the SES-verified address from C2 |
-| `region` | the region from C1, e.g. `ap-southeast-1` |
-| `env_name` | e.g. `prod` — names every resource; **set before the first apply and never change it** (changing it renames the table and bucket, which plans a replacement of the photo store — the delete-protection rails refuse it, but stop and fix the value rather than fighting them) |
-| `alarm_email` | optional; defaults to `mail_from` |
-| `delete_protection` | optional, default `true` (D57) — API-level deletion protection on the table + no `force_destroy` on the objects bucket. **Leave it true here**; only a test env's tfvars sets `false` |
+| `hashing_key` | private — `openssl rand -base64 32`, generated once, see warning below |
+| `mail_from` | private — the SES-verified address from C2 |
+| `region` | config — the region from C1, e.g. `ap-southeast-1` |
+| `env_name` | config — e.g. `prod` — names every resource; **set before the first apply and never change it** (changing it renames the table and bucket, which plans a replacement of the photo store — the delete-protection rails refuse it, but stop and fix the value rather than fighting them) |
+| `alarm_email` | private, optional; defaults to `mail_from` |
+| `delete_protection` | config, optional, default `true` (D57) — API-level deletion protection on the table + no `force_destroy` on the objects bucket. **Leave it true here**; only a test env sets `false` |
 
-> **BACK UP `hashing_key` off-machine before applying.** It keys the
-> email→user mapping; losing it orphans every account (decision D4a). The
-> local `terraform.tfstate` also contains it in cleartext and is the only
-> deployment record — back that up too after the first apply.
+To change a private value later: `make secrets-pull` (writes
+`secrets.tfvars`, mode 0600, gitignored), edit, `make secrets-push`, delete
+the local copy. `make secrets-status` says whether the env's secrets exist
+without printing them.
+
+> **Keep an offline copy of `hashing_key`.** It keys the email→user mapping;
+> losing it orphans every account (decision D4a). The bucket is versioned and
+> refuses permanent version deletes, so an overwritten or deleted secrets file
+> or state is recoverable — but the bucket is one account's single point; a
+> copy outside AWS is the real backup. The state holds `hashing_key` too (it is
+> in the Lambda's environment), so treat the bucket as secret as a whole.
+
+#### Moving an existing deployment off local state (one time)
+
+On **the machine that holds `terraform.tfstate` and `ente-sl.tfvars`**, after
+pulling this change, per profile:
+
+```bash
+export AWS_PROFILE=ente-sl
+make state-bootstrap                 # once per account
+make profile dev                     # then repeat everything below for `test`
+make tfvars-split                    # ente-sl.tfvars -> config.tfvars + secrets.tfvars
+git diff src/infra/dev/config.tfvars # compare with the committed values (read off the live deployment)
+make secrets-push                    # secrets.tfvars -> S3
+make state-migrate                   # local state -> S3, verified, local file parked
+make plan                            # must say "No changes" (apart from a pending code update)
+rm src/infra/dev/secrets.tfvars src/infra/dev/ente-sl.tfvars   # after an offline backup
+git add src/infra/dev/config.tfvars && git commit
+```
+
+`state-migrate` keeps `terraform.tfstate.pre-s3-<timestamp>` and parks the
+old file as `terraform.tfstate.migrated-to-s3` (both gitignored; both hold
+`hashing_key` — move one offline and delete the rest). It checks the S3 copy
+against the local one (serial, resource count, hash of resources + outputs)
+before parking anything. Until it has run, `make infra-init` refuses while a
+local state file exists, so no machine can fork the deployment record.
+
+Any other machine afterwards needs only the repo and the deployer credentials:
+`make profile <env>`, `make infra-init`, `make plan`.
+
+Rehearsing on LocalStack: `STATE_BUCKET=<name>` (LocalStack has no STS here)
+plus `BACKEND_EXTRA='-backend-config=use_path_style=true
+-backend-config=skip_credentials_validation=true
+-backend-config=skip_requesting_account_id=true'` and the usual
+`AWS_ENDPOINT_URL`; `SECRETS_FILE=<path>` makes `plan` use a local private file
+instead of S3.
 
 ### C4a. Choose the deployment profile
 
@@ -299,7 +364,7 @@ with `no profile chosen — choose: make profile dev | make profile test`.
 Every profile-aware target banners which env it is about to touch, e.g.
 `>>> profile: dev (ENV: PRODUCTION)`, before acting. There is no extra typed
 confirmation beyond that (dropped 2026-08-27, see D57 addendum): profiles are
-fully disjoint (state, tfvars, and the account guard are all per-profile),
+fully disjoint (state key, config, secrets, and the account guard are all per-profile),
 `deploy` only ever applies a plan you just reviewed, and `destroy` ends at
 tofu's own interactive approval prompt. Bare `make profile` prints the
 current choice.
@@ -307,11 +372,16 @@ current choice.
 ### C5. Initialize OpenTofu
 
 ```bash
-make infra-init
+AWS_PROFILE=ente-sl make infra-init
 ```
 
-Regenerates `.terraform/` and the provider lock file (of the selected
-profile's dir).
+Points the selected profile's dir at its remote state
+(`state/<profile>/terraform.tfstate` in `ente-sl-tfstate-<account>`) and
+regenerates `.terraform/` and the provider lock file. The bucket name comes
+from the caller's account, so credentials for the wrong account find no bucket
+and init fails instead of planning a fresh deployment. Never passes
+`-reconfigure`: if the backend arguments ever change, tofu stops and asks
+rather than quietly switching to a different state.
 
 ### C6. Plan
 
@@ -326,7 +396,9 @@ This target:
 2. runs `make build-lambda` first (esbuild zips into `dist/`, so the bundles
    can never be stale at plan time),
 3. runs the account guard,
-4. refuses with instructions if the profile dir's `ente-sl.tfvars` is missing,
+4. refuses if the profile dir's `config.tfvars` is missing or carries a private
+   value, fetches the env's private tfvars from S3 for this run only (deleted
+   on exit, success or not),
 5. saves the plan to `tfplan`.
 
 On a first deploy expect **27 to add, 0 to change, 0 to destroy**. **Read the
@@ -571,7 +643,7 @@ users:
 
 1. **Set `SIGNUP_MODE=invite` in the API Lambda's environment.** Locally
    that is `SIGNUP_MODE=invite make dev` (or `make lan`). On AWS, set
-   `signup_mode = "invite"` in `src/infra/dev/ente-sl.tfvars` and run the
+   `signup_mode = "invite"` in `src/infra/dev/config.tfvars` and run the
    plan/deploy cycle (the var validates to `open|invite` and defaults to
    open). Only account *creation* is gated: login and change-email always work, and
    existing accounts are untouched. A non-invited signup gets a bare 403 the
@@ -876,17 +948,19 @@ Then, for both starting points:
 
 ## A second environment (test)
 
-`src/infra/test` is a complete second env dir — same modules, its own tfvars
-and state — so you can rehearse a change (or this whole install) against a
+`src/infra/test` is a complete second env dir — same modules, its own
+config.tfvars, secrets and state key — so you can rehearse a change (or this whole install) against a
 disposable stack without ever pointing a command at production. The whole
 workflow is the profile switcher (C4a):
 
 ```bash
 make profile test                 # every target now addresses src/infra/test
-cp src/infra/test/ente-sl.tfvars.example src/infra/test/ente-sl.tfvars
-# fill it in: env_name = "test", delete_protection = false, and a FRESH
-# hashing_key (openssl rand -base64 32) — NEVER paste production's key
-make infra-init
+# config.tfvars is committed (env_name = "test", delete_protection = false);
+# the private file needs a FRESH hashing_key — NEVER paste production's key
+printf 'hashing_key = "%s"\nmail_from = "you@example.com"\n' "$(openssl rand -base64 32)" \
+  > src/infra/test/secrets.tfvars && chmod 600 src/infra/test/secrets.tfvars
+AWS_PROFILE=ente-sl make secrets-push && rm src/infra/test/secrets.tfvars
+AWS_PROFILE=ente-sl make infra-init
 AWS_PROFILE=ente-sl make plan     # banner: >>> profile: test (ENV: TEST)
 AWS_PROFILE=ente-sl make deploy   # applies the saved plan you just reviewed
 ```
@@ -896,7 +970,7 @@ Notes:
 - **`delete_protection = false`** (D57) is what makes the env disposable: the
   table skips API-level deletion protection and the objects bucket gets
   `force_destroy`, so teardown deletes everything cleanly. Production's
-  tfvars leaves it at the default `true`.
+  config.tfvars leaves it at the default `true`.
 - **`hashing_key` must be fresh.** It derives the email→user mapping; reusing
   prod's key links every test account to a production identity and makes the
   test key as sensitive as the real one.
@@ -915,7 +989,9 @@ Notes:
 make profile test
 AWS_PROFILE=ente-sl make destroy            # stateless half — tofu asks for a "yes"
 # then the data (test only — delete_protection is already false):
-AWS_PROFILE=ente-sl tofu -chdir=src/infra/test destroy -var-file=ente-sl.tfvars
+AWS_PROFILE=ente-sl make secrets-pull
+AWS_PROFILE=ente-sl tofu -chdir=src/infra/test destroy -var-file=config.tfvars -var-file=secrets.tfvars
+rm src/infra/test/secrets.tfvars
 ```
 
 Switch back with `make profile dev` when you return to production — nothing
@@ -960,7 +1036,11 @@ Two things to know:
 | Symptom | Cause / fix |
 |---|---|
 | `no profile chosen — choose: make profile dev \| make profile test` | Do step C4a — the make targets refuse to guess which env they address. |
-| `make plan` fails: `missing src/infra/<profile>/ente-sl.tfvars` | Do step C4 (or the test-env copy step) for the selected profile. |
+| `make plan` fails: `missing src/infra/<profile>/config.tfvars` | The committed settings file is missing — restore it from git (step C4). |
+| `tfstate: no secrets at s3://…/secrets/<profile>.tfvars` | Push the env's private file once (step C4: `make secrets-push`). |
+| `local state found … move it to S3 first: make state-migrate` | This machine still holds pre-D67 local state — do the one-time move in step C4. |
+| `… is not initialised — run: make infra-init` / `Backend initialization required` | Run `AWS_PROFILE=ente-sl make infra-init` for the selected profile. |
+| `Error acquiring the state lock` | Another run (another machine) holds the lock — wait for it. Only if that run is known dead: `tofu -chdir=src/infra/<profile> force-unlock <ID>`. |
 | `ACCOUNT MISMATCH — refusing to continue` | Your credentials point at a different AWS account than the one in the selected profile's state. Use `AWS_PROFILE=ente-sl`. |
 | Plan wants to destroy/replace the bucket or table | Wrong account (see above) or `env_name` changed. Stop; do not apply. |
 | `archive_file` error at plan time | `dist/` missing or stale — `make plan` runs `build-lambda` for you, but a bare `tofu plan` does not. |

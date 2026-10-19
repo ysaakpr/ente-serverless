@@ -52,6 +52,7 @@ const MILESTONES: Record<string, { milestone: string; tags: string }> = {
   'file-data.test.ts': { milestone: 'M6', tags: '[FILE-DATA]' },
   'lifecycle.test.ts': { milestone: 'M7', tags: 'infra guards' },
   'web.test.ts': { milestone: 'P3-F', tags: 'infra guards: albums web hosting (D52)' },
+  'remote-state.test.ts': { milestone: 'M7', tags: 'infra guards: remote state + split tfvars (D67)' },
   'e2e.int.test.ts': { milestone: 'M1/M3', tags: 'integration (LocalStack)' },
   'db-counters.test.ts': { milestone: 'SEC', tags: 'F0 race-free capped counter (security review)' },
   'origin-lock.test.ts': { milestone: 'SEC', tags: 'origin lock (finding 4, D43)' },

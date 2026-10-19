@@ -269,7 +269,7 @@ describe('deploy target guards', () => {
     const text = makefile();
     expect(text).toMatch(/TFDIR\s*=\s*src\/infra\/\$\(PROFILE\)/);
     expect(text).toMatch(/TF\s*=\s*tofu -chdir=\$\(TFDIR\)/);
-    expect(text).toMatch(/STATE\s*=\s*\$\(TFDIR\)\/terraform\.tfstate/);
+    expect(text).toMatch(/LOCAL_STATE\s*=\s*\$\(TFDIR\)\/terraform\.tfstate/);
     // dev is PRODUCTION: nothing may hardcode its dir back in.
     expect(text).not.toMatch(/-chdir=src\/infra\/dev/);
     expect(text).not.toMatch(/STATE\s*=\s*src\/infra\/dev/);

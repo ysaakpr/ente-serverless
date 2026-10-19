@@ -1995,3 +1995,44 @@ source says Y — source won).
   `verify-email` with `123456` → 200. Museum logs OTTs to **stderr**
   (`Skipping sending email to …: Verification code: NNNNNN`), so a capture
   script reading `docker logs` must merge stderr, not just stdout.
+
+- **D67 [INFRA 2026-10-19] Remote tofu state + split tfvars in one S3 bucket.**
+  State and the private settings moved off the operator's laptop into
+  `ente-sl-tfstate-<account>` (ap-south-1): `state/<profile>/terraform.tfstate`
+  with OpenTofu's native S3 lock file (`use_lockfile`, tofu >= 1.10 — no
+  DynamoDB lock table), and `secrets/<profile>.tfvars`. The rest of each env's
+  settings is committed as `src/infra/<profile>/config.tfvars`.
+  - Why: two machines had already diverged (the deploy record lived on one,
+    work happened on another), and a single local file was the only copy of
+    the deployment record and of `hashing_key`.
+  - Private = `hashing_key` (the one secret proper) + `mail_from`,
+    `alarm_email`, `operator_principal_arns` (personal or account-identifying;
+    the repo is PUBLIC). `tools/tfstate.ts` owns the list (`PRIVATE_KEYS`);
+    `make tfvars-check`, `make plan` and test/infra/remote-state.test.ts refuse
+    a committed tfvars that assigns one, or that carries an email address, a
+    12-digit account id or an IAM ARN.
+  - The bucket is created by a script (`make state-bootstrap`), not tofu: a
+    root owning its own state bucket would need yet another state. Hardening is
+    re-applied idempotently: versioning, SSE-S3 + bucket key, owner-enforced,
+    public access blocked, deny non-TLS, deny `s3:DeleteObjectVersion` and
+    `s3:DeleteBucket` for every principal (plain deletes only add a marker, so
+    everything stays recoverable); lifecycle keeps a year / the 50 newest
+    noncurrent state versions and clears expired delete markers left by the
+    lock file.
+  - Backend config is PARTIAL (`backend "s3" {}`), filled by `make infra-init`
+    from the caller's account — no account id committed, and wrong-account
+    credentials find no bucket instead of an empty state. infra-init never
+    passes `-reconfigure`, and refuses while a pre-D67 local state file exists.
+  - `make plan` / `destroy` fetch the private file for that run only
+    (`.secrets.tfvars`, 0600, removed by an EXIT trap). `secrets-push` refuses to
+    change an existing `hashing_key` without FORCE=1.
+  - Migration (`make state-migrate`) verifies the S3 copy by serial + resource
+    count + a hash of the canonical resources and outputs — NOT lineage:
+    rehearsed on LocalStack, OpenTofu 1.13 gives the migrated copy a new
+    lineage and empties the local file itself. guard-account now reads
+    `tofu state pull` (or the local file while one still exists).
+  - Rehearsed end to end on LocalStack with the real make targets (legacy
+    machine -> split/push/migrate; fresh checkout -> init/plan "No changes"
+    /deploy; cross-machine lock; wrong-account refusal; missing secrets;
+    smuggled private value). The live migration itself has to run on the
+    machine holding the state.

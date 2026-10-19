@@ -119,3 +119,9 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
 15. **Ops visibility:** the `ente-deployer` principal cannot read CloudWatch
     metrics, logs, or list buckets. Add a read-only ops profile; confirm SES
     production access for the configured mail identity.
+17. **Finish the D67 remote-state move (operator, on the machine holding the
+    state):** the bucket exists (2026-10-19). Per profile: `make tfvars-split`,
+    `git diff` the committed config.tfvars, `make secrets-push`,
+    `make state-migrate`, `make plan` (expect no infra changes), back up and
+    delete the local state copies + ente-sl.tfvars, commit config.tfvars.
+    INSTALL.md C4 "Moving an existing deployment off local state".

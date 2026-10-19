@@ -4,10 +4,16 @@ dist/
 # src/infra (dev, test, and any future one) — never re-scope them to one dir.
 *.tfstate
 *.tfstate.backup
+# state-migrate's backups/parked copies (D67): full state, hashing_key included.
+*.tfstate.*
 .terraform/
 .terraform.lock.hcl
 tfplan
+# Every tfvars is private by default (legacy ente-sl.tfvars, secrets.tfvars,
+# the per-run .secrets.tfvars) EXCEPT the committed per-env settings file,
+# which `make tfvars-check` keeps free of private values (D67).
 *.tfvars
+!config.tfvars
 # Which env the make targets address (make profile dev|test, D57) — operator-
 # local by nature, and committing it would silently pick an env for everyone.
 .tf-profile

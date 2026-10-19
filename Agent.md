@@ -61,9 +61,11 @@ which is stronger than a spec but is not a capture.
 All commands run from the repo root. Nothing above needs an AWS account.
 
 Two things did not survive the split, by design: `src/infra/dev/.terraform/` and its lock file
-(run `tofu init` to regenerate), and any real `src/infra/dev/ente-sl.tfvars` — it carries
-`hashing_key`, which is a secret and never belongs in git. Copy `ente-sl.tfvars.example` and fill
-it in; **back the key up**, because losing it orphans every email→user mapping (DECISIONS.md D4a).
+(run `make infra-init` to regenerate). Settings are split (D67): `src/infra/<profile>/config.tfvars`
+is committed and must stay free of private values (`make tfvars-check`); `hashing_key` and the
+other private values live in `s3://ente-sl-tfstate-<account>/secrets/<profile>.tfvars`, next to the
+remote state. **Back the key up** off-machine, because losing it orphans every email→user mapping
+(DECISIONS.md D4a).
 
 Start with [README.md](README.md) for architecture and commands, [NEXT-TASKS.md](NEXT-TASKS.md)
 for what to pick up, and [DECISIONS.md](DECISIONS.md) before trusting any shape.

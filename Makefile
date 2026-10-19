@@ -9,7 +9,8 @@ LOCALSTACK_ENV = AWS_ENDPOINT_URL=http://127.0.0.1:4567 AWS_REGION=us-east-1 \
 	build-lambda capture-diff lan infra-init guard-account plan deploy outputs smoke destroy destroy-data \
 	pricing-plan pricing-plan-status build-web deploy-web invite invites revoke-invite set-storage users \
 	pool-create pool-attach pool-detach pools pool-set-quota pool-disable pool-enable pool-requeue \
-	profile require-profile
+	profile require-profile state-bootstrap state-migrate tfvars-split tfvars-check \
+	secrets-push secrets-pull secrets-status
 
 # `make profile dev` / `make profile test` (D57): the env word arrives as a
 # SECOND GOAL, which would otherwise also run the real `dev` (LocalStack
@@ -311,10 +312,17 @@ deploy-web: require-profile guard-account
 	@echo "==> albums app live at $$($(TF) output -raw albums_url)"
 
 # ---------------------------------------------------------------------------
-# AWS deploy (M7, decision D4; profiles D57). Everything environment-specific
-# — region, hashing_key, mail_from — lives in src/infra/<profile>/ente-sl.tfvars
-# (gitignored). These targets pass ONLY -var-file, so plan and apply can never
-# disagree about which region they are addressing. Note that tofu reads the
+# AWS deploy (M7, decision D4; profiles D57; remote state D67). Everything
+# environment-specific lives in two var files per profile:
+#   src/infra/<profile>/config.tfvars   COMMITTED — region, env name, limits
+#   secrets/<profile>.tfvars in S3      PRIVATE  — hashing_key, mail_from, ...
+# `make plan` fetches the private file for that one run and removes it after.
+# State lives in the same bucket (s3://ente-sl-tfstate-<account>/state/
+# <profile>/terraform.tfstate, native S3 lock file), so any machine with the
+# deployer credentials sees the same deployment. One-time setup and the move
+# off a local state file: INSTALL.md "Remote state". These targets pass ONLY
+# -var-file, so plan and apply can never disagree about which region they
+# are addressing. Note that tofu reads the
 # region from that file, NOT from your AWS CLI config: the two being different
 # is normal and harmless, but it means `aws configure get region` tells you
 # nothing about where this deploys.
@@ -345,10 +353,38 @@ NO_PROFILE_MSG = no profile chosen — choose: make profile dev | make profile t
 
 TFDIR  = src/infra/$(PROFILE)
 TF     = tofu -chdir=$(TFDIR)
-# Path is relative to $(TFDIR), because of tofu -chdir above.
-TFVARS = ente-sl.tfvars
+# Paths are relative to $(TFDIR), because of tofu -chdir above.
+TFCONFIG  = config.tfvars
+# Fetched from S3 for one run (WITH_SECRETS) — gitignored, mode 0600.
+TFSECRETS = .secrets.tfvars
+# Where secrets-pull/tfvars-split put the private file for editing.
+TFSECRETS_EDIT = secrets.tfvars
+# The pre-D67 single file (secrets included). No longer read by any target.
+LEGACY_TFVARS = ente-sl.tfvars
+VARFILES  = -var-file=$(TFCONFIG) -var-file=$(TFSECRETS)
 TFPLAN = tfplan
-STATE  = $(TFDIR)/terraform.tfstate
+# Pre-D67 local state. Only state-migrate reads it; infra-init refuses while
+# it exists so nothing can quietly fork the deployment record.
+LOCAL_STATE = $(TFDIR)/terraform.tfstate
+
+# Remote state + private tfvars (D67). The bucket is ente-sl-tfstate-<account>
+# for whatever credentials run make — so wrong-account creds find no bucket and
+# init fails, instead of planning a fresh deployment. STATE_BUCKET overrides.
+TFSTATE_TOOL  = node --disable-warning=ExperimentalWarning --experimental-transform-types tools/tfstate.ts
+STATE_REGION ?= ap-south-1
+export STATE_REGION
+# Extra -backend-config args, e.g. for LocalStack (see INSTALL.md).
+BACKEND_EXTRA ?=
+BACKEND_ARGS = -backend-config=bucket=$(1) -backend-config=key=state/$(PROFILE)/terraform.tfstate \
+	-backend-config=region=$(STATE_REGION) -backend-config=use_lockfile=true -backend-config=encrypt=true \
+	$(BACKEND_EXTRA)
+
+# Shell prefix for a recipe line that needs the private vars: fetches them for
+# THIS run and deletes them on exit, success or not. SECRETS_FILE=<path> uses a
+# local file instead (LocalStack rehearsals, break-glass).
+WITH_SECRETS = trap 'rm -f $(TFDIR)/$(TFSECRETS)' EXIT; \
+	if [ -n "$(SECRETS_FILE)" ]; then install -m 600 "$(SECRETS_FILE)" $(TFDIR)/$(TFSECRETS); \
+	else $(TFSTATE_TOOL) secrets-pull $(PROFILE) $(TFDIR)/$(TFSECRETS) || exit 1; fi;
 
 # Wrapper for the operator CLIs (invite/pool, D64): assumes the SELECTED env's
 # operator role and sets TABLE_NAME + region so you run `make invite EMAIL=...`
@@ -390,8 +426,63 @@ require-profile:
 	@test -n "$(PROFILE_LABEL)" || { echo "unknown profile '$(PROFILE)' in $(PROFILE_FILE) — choose: make profile dev | make profile test"; exit 1; }
 	@echo ">>> profile: $(PROFILE) (ENV: $(PROFILE_LABEL))"
 
+# No -reconfigure on purpose: if the backend args ever change, tofu stops and
+# asks about migrating instead of silently pointing at a different (maybe
+# empty) state.
 infra-init: require-profile
-	$(TF) init
+	@test ! -s $(LOCAL_STATE) || { \
+		echo "local state found at $(LOCAL_STATE) — move it to S3 first:  make state-migrate"; \
+		exit 1; }
+	@B=$$($(TFSTATE_TOOL) bucket-name) || exit 1; \
+	set -x; $(TF) init -input=false $(call BACKEND_ARGS,$$B)
+
+# Creates/hardens the central state bucket. Idempotent; profile-independent.
+state-bootstrap:
+	$(TFSTATE_TOOL) bootstrap
+
+# ONE-TIME, on the machine that holds the pre-D67 local state: copies it into
+# the bucket, proves the copy is the same state (serial + resource count + a
+# hash of the canonical resources and outputs), and parks the local file as
+# *.migrated-to-s3 so nothing reads it again. A timestamped backup copy is kept
+# next to it either way. Not lineage: OpenTofu gives the migrated copy a new
+# one (rehearsed on LocalStack, D67), and empties the local file itself.
+state-migrate: require-profile guard-account
+	@test -s $(LOCAL_STATE) || { echo "no local state at $(LOCAL_STATE) — nothing to migrate"; exit 1; }
+	@B=$$($(TFSTATE_TOOL) bucket-name) || exit 1; \
+	BK=$(LOCAL_STATE).pre-s3-$$(date +%Y%m%d%H%M%S); cp -p $(LOCAL_STATE) $$BK; \
+	sig() { python3 -I -c 'import json,sys,hashlib;s=json.load(sys.stdin);c=json.dumps({"r":s.get("resources",[]),"o":s.get("outputs",{})},sort_keys=True);print(s["serial"],len(s.get("resources",[])),hashlib.sha256(c.encode()).hexdigest()[:16])'; }; \
+	WANT=$$(sig < $$BK) || exit 1; \
+	echo ">>> local state (serial resources sha256): $$WANT — backup at $$BK"; \
+	$(TF) init -input=false -migrate-state -force-copy $(call BACKEND_ARGS,$$B) || exit 1; \
+	HAVE=$$($(TF) state pull | sig) || exit 1; \
+	test "$$WANT" = "$$HAVE" || { echo "MISMATCH after migration: local '$$WANT' vs s3 '$$HAVE' — local file left in place"; exit 1; }; \
+	mv $(LOCAL_STATE) $(LOCAL_STATE).migrated-to-s3; \
+	echo ">>> migrated: s3://$$B/state/$(PROFILE)/terraform.tfstate ($$HAVE)"; \
+	echo "    local copy parked as $(LOCAL_STATE).migrated-to-s3 (+ $$BK) — keep one offline, they hold hashing_key"
+
+# Splits the legacy $(LEGACY_TFVARS) into the committed $(TFCONFIG) and the
+# private $(TFSECRETS_EDIT). Overwrites $(TFCONFIG): review with git diff.
+tfvars-split: require-profile
+	$(TFSTATE_TOOL) split $(TFDIR)/$(LEGACY_TFVARS) $(TFDIR)/$(TFCONFIG) $(TFDIR)/$(TFSECRETS_EDIT)
+	@echo "next: git diff $(TFDIR)/$(TFCONFIG)   then   make secrets-push"
+
+# Uploads the private file (default $(TFSECRETS_EDIT), or FILE=...). Refuses
+# to change hashing_key unless FORCE=1 — the old value stays as a version.
+secrets-push: require-profile
+	FORCE=$(FORCE) $(TFSTATE_TOOL) secrets-push $(PROFILE) $(or $(FILE),$(TFDIR)/$(TFSECRETS_EDIT))
+	@echo "the local copy still holds the secrets — delete it once you are done:  rm $(or $(FILE),$(TFDIR)/$(TFSECRETS_EDIT))"
+
+# Fetches the private file for editing (mode 0600); push it back when done.
+secrets-pull: require-profile
+	$(TFSTATE_TOOL) secrets-pull $(PROFILE) $(TFDIR)/$(TFSECRETS_EDIT)
+	@echo "wrote $(TFDIR)/$(TFSECRETS_EDIT) (private, gitignored) — edit, then make secrets-push"
+
+secrets-status: require-profile
+	@$(TFSTATE_TOOL) secrets-status $(PROFILE)
+
+# Refuses any committed config.tfvars that carries a private value.
+tfvars-check:
+	@for f in src/infra/*/$(TFCONFIG); do $(TFSTATE_TOOL) check $$f || exit 1; done; echo "config.tfvars: clean"
 
 # The objects bucket embeds the account id in its NAME, so running plan/apply
 # with credentials for a different account renames it — and tofu reads a rename
@@ -400,11 +491,16 @@ infra-init: require-profile
 # like a config bug rather than a wrong profile. Worse, the lambdas/role/topic
 # carry no such rail and WOULD be replaced. So: compare the caller against the
 # account already recorded in the SELECTED PROFILE's state. No extra config —
-# that state file is the source of truth, and a first deploy of an env (no
-# state yet, e.g. a fresh src/infra/test) skips the check.
+# that state is the source of truth, and a first deploy of an env (no state
+# yet) skips the check. D67: the state is remote (state pull); a pre-migration
+# local file is read instead while it still exists, so state-migrate is
+# guarded too.
 guard-account: require-profile
-	@test -s $(STATE) || exit 0; \
-	WANT=$$(grep -o 'arn:aws:dynamodb:[^"]*' $(STATE) | head -1 | cut -d: -f5); \
+	@if [ -s $(LOCAL_STATE) ]; then S=$$(cat $(LOCAL_STATE)); \
+	elif [ -d $(TFDIR)/.terraform ]; then S=$$($(TF) state pull 2>/dev/null) || { \
+		echo "cannot read the remote state — run: make infra-init"; exit 1; }; \
+	else echo "$(TFDIR) is not initialised — run: make infra-init"; exit 1; fi; \
+	WANT=$$(printf '%s' "$$S" | grep -o 'arn:aws:dynamodb:[^"]*' | head -1 | cut -d: -f5); \
 	test -n "$$WANT" || exit 0; \
 	HAVE=$$(aws sts get-caller-identity --query Account --output text 2>/dev/null); \
 	test "$$WANT" = "$$HAVE" || { \
@@ -431,16 +527,14 @@ guard-account: require-profile
 # plan/deploy pins the real domain. A tfvars albums_url (custom domain)
 # always wins over the hint.
 plan: require-profile build-lambda guard-account
-	@test -f $(TFDIR)/$(TFVARS) || { \
-		echo "missing $(TFDIR)/$(TFVARS)"; \
-		echo "  cp $(TFDIR)/ente-sl.tfvars.example $(TFDIR)/$(TFVARS)"; \
-		echo "  then fill in region, mail_from, and hashing_key (openssl rand -base64 32)"; \
-		echo "  BACK UP hashing_key first — losing it orphans every email->user mapping (D4a)"; \
-		exit 1; }
-	@HINT=$$($(TF) output -raw server_url 2>/dev/null || true); \
+	@test -f $(TFDIR)/$(TFCONFIG) || { echo "missing $(TFDIR)/$(TFCONFIG) (committed settings, D67)"; exit 1; }
+	@$(TFSTATE_TOOL) check $(TFDIR)/$(TFCONFIG) || { echo "refusing: a private value is in the committed $(TFCONFIG)"; exit 1; }
+	@test ! -f $(TFDIR)/$(LEGACY_TFVARS) || echo ">>> NOTE: $(TFDIR)/$(LEGACY_TFVARS) is no longer read (D67); once 'make secrets-status' shows the S3 copy, back it up offline and delete it"
+	@$(WITH_SECRETS) \
+	HINT=$$($(TF) output -raw server_url 2>/dev/null || true); \
 	test -n "$$HINT" || echo ">>> no server_url in state yet — ALBUMS_URL deploys as the pending sentinel; run plan+deploy again after this apply (D58)"; \
 	set -x; \
-	$(TF) plan -var-file=$(TFVARS) $${HINT:+-var albums_url_hint=$$HINT} -out=$(TFPLAN)
+	$(TF) plan $(VARFILES) $${HINT:+-var albums_url_hint=$$HINT} -out=$(TFPLAN)
 
 # Applies the SAVED plan, so what ships is exactly what you reviewed.
 # The CloudFront distribution takes 5-15 min to reach Deployed; the rest
@@ -535,7 +629,7 @@ pricing-plan-status:
 # the routine second plan/deploy to pick the new domain up (D58 hint).
 destroy: require-profile guard-account
 	@echo "==> destroying module.compute + module.edge — table and objects bucket are preserved"
-	$(TF) destroy -var-file=$(TFVARS) -target=module.compute -target=module.edge
+	@$(WITH_SECRETS) set -x; $(TF) destroy $(VARFILES) -target=module.compute -target=module.edge
 
 # There is deliberately no target that destroys module.data.
 destroy-data: require-profile
@@ -544,12 +638,13 @@ destroy-data: require-profile
 	@echo "The rails are variable-driven since D57. If you genuinely mean this (a TEST"
 	@echo "env, or a deliberate final teardown), lift them by hand so that each one is"
 	@echo "a separate conscious step:"
-	@echo "  1. set delete_protection = false in $(TFDIR)/$(TFVARS), then run"
+	@echo "  1. set delete_protection = false in $(TFDIR)/$(TFCONFIG), then run"
 	@echo "     'make plan' + 'make deploy' with THAT change alone — it disables the"
 	@echo "     table's API-level deletion protection and arms force_destroy on the"
 	@echo "     objects bucket (protection on, the destroy refuses: the table blocks"
 	@echo "     DeleteTable at the AWS API and tofu will not empty the bucket)"
-	@echo "  2. then, finally: $(TF) destroy -var-file=$(TFVARS)"
+	@echo "  2. then, finally: make secrets-pull, and"
+	@echo "     $(TF) destroy -var-file=$(TFCONFIG) -var-file=$(TFSECRETS_EDIT)"
 	@echo ""
-	@echo "Back up hashing_key and the tfstate before step 1 (D4a)."
+	@echo "Back up hashing_key (make secrets-pull) and the state (tofu state pull) before step 1 (D4a)."
 	@exit 1
