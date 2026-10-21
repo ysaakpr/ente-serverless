@@ -13,7 +13,19 @@ import { join } from 'node:path';
 import { HeadBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { bootstrap, secretsPull, secretsPush, secretsStatus } from '../../tools/tfstate.ts';
 
-const sts = vi.hoisted(() => ({ account: '' }));
+const sts = vi.hoisted(() => {
+  // tools/tfstate.ts reads the environment once, at import. Pin LocalStack and
+  // dummy keys first: run outside `make test-int` (e.g. by `make ledger`), this
+  // file once sent its calls — bootstrap's CreateBucket included — to real AWS
+  // under the machine's default credentials. With these keys real AWS rejects
+  // every request, so a wrong endpoint fails the test instead of acting.
+  process.env.AWS_ENDPOINT_URL ??= 'http://127.0.0.1:4567';
+  process.env.AWS_ACCESS_KEY_ID = 'test';
+  process.env.AWS_SECRET_ACCESS_KEY = 'test';
+  delete process.env.AWS_SESSION_TOKEN;
+  delete process.env.AWS_PROFILE;
+  return { account: '' };
+});
 vi.mock('@aws-sdk/client-sts', () => ({
   STSClient: class {
     send = async () => ({ Account: sts.account });
