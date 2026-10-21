@@ -2107,3 +2107,33 @@ source says Y — source won).
     /deploy; cross-machine lock; wrong-account refusal; missing secrets;
     smuggled private value). The live migration itself has to run on the
     machine holding the state.
+
+- **D68 [WEB 2026-10-21] Albums web bumped photos-v1.3.61 -> photos-v1.3.65;
+  root-absolute assets prefixed.**
+  - Why: v1.3.61 (2026-08-11) was three stable releases behind v1.3.65
+    (2026-10-01). v1.3.63+ reads the link device token only from
+    `X-Link-Device-Token` (upstream 9413f24ed0), so an environment's API
+    must carry the D66 fixes first. `make deploy-web` now refuses an API
+    whose preflight does not expose that header — prod stays on v1.3.61
+    until it gets the D66 API.
+  - The D60 basePath patch never reached hand-written root-absolute asset
+    URLs: the Inter @font-face rules and preload, the favicon and the upload
+    dialogs' images pointed at `/fonts/…` and `/images/…`, which CloudFront
+    sends to the API (404). Every build since 2026-08-27 silently fell back
+    to the system font. scripts/patch-albums-basepath.ts now prefixes every
+    quoted or `url(`-wrapped `/fonts/` and `/images/` reference under
+    apps/albums/src and packages/ (17 at v1.3.65), and `make build-web`
+    rejects an export that still has one.
+  - v1.3.65 reads the link token from `?t=` and otherwise from the first
+    path segment, which under /albums is the word "albums". Our links always
+    carry `?t=` (`<ALBUMS_URL>/?t=<token>#<key>`), so they are unaffected. A
+    bare `/albums/` has no link and shows nothing useful — on ente's own
+    domain the app redirects to ente.com, on a custom API origin it stays
+    put. Not a fault.
+  - Verified 2026-10-21: locally, a real encrypted album (secretbox keys,
+    secretstream file/thumbnail/metadata) opened in the v1.3.65 build against
+    our server — info, diff, thumbnail/v3 and download/v3 all 200, thumbnail
+    (512x384) and original (1600x1200) decrypted and rendered, no console or
+    page errors. Then deployed to test: live bundle reads
+    X-Link-Device-Token, fonts load, a bogus link shows "This link has
+    either expired or has been disabled".

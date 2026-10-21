@@ -11,13 +11,18 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ALBUMS_BASE_PATH,
   patchAlbumsNextConfig,
+  prefixRootAssetPaths,
+  prefixRootAssetsInWorkspace,
 } from '../../scripts/patch-albums-basepath.ts';
 
 // The pinned tag's web/apps/albums/next.config.js, verbatim shape
-// (photos-v1.3.61, fetched 2026-08-27).
+// (photos-v1.3.61 fetched 2026-08-27; unchanged at photos-v1.3.65, 2026-10-21).
 const PINNED_CONFIG = `const baseConfig = require("ente-base/next.config.base.js");
 
 module.exports = {
@@ -77,5 +82,63 @@ describe('patch-albums-basepath (D60)', () => {
   it('FAILS LOUDLY on a foreign basePath instead of silently keeping it', () => {
     const foreign = PINNED_CONFIG.replace('...baseConfig,', '...baseConfig,\n    basePath: "/x",');
     expect(() => patchAlbumsNextConfig(foreign)).toThrow(/basePath/);
+  });
+});
+
+describe('root-absolute asset prefixing (D68)', () => {
+  // Verbatim shapes from photos-v1.3.65: apps/albums/src/app/styles/fonts.css
+  // and packages/base/components/Head.tsx.
+  const FONTS_CSS = `@font-face {
+    font-family: "Inter Variable";
+    src: url("/fonts/inter-latin-wght-normal.woff2") format("woff2-variations");
+}`;
+  const HEAD_TSX = `<link rel="preload" href="/fonts/inter-latin-wght-normal.woff2" as="font" />
+const albumsPreviewImage = "https://albums.ente.com/images/preview.png";
+<link rel="icon" href="/images/favicon.png" type="image/png" />
+<img src='/images/upload-complete-duck.svg' />`;
+
+  it('prefixes quoted and url()-wrapped /fonts/ and /images/ references', () => {
+    const css = prefixRootAssetPaths(FONTS_CSS);
+    expect(css.count).toBe(1);
+    expect(css.patched).toContain('url("/albums/fonts/inter-latin-wght-normal.woff2")');
+    const head = prefixRootAssetPaths(HEAD_TSX);
+    expect(head.count).toBe(3);
+    expect(head.patched).toContain('href="/albums/fonts/inter-latin-wght-normal.woff2"');
+    expect(head.patched).toContain('href="/albums/images/favicon.png"');
+    expect(head.patched).toContain("src='/albums/images/upload-complete-duck.svg'");
+  });
+
+  it('leaves paths inside absolute URLs and other directories alone', () => {
+    const { patched, count } = prefixRootAssetPaths(
+      'a = "https://albums.ente.com/images/preview.png"; b = "/_next/x.js"; c = "/imagesX/y"; d = "/api/images/z"',
+    );
+    expect(count).toBe(0);
+    expect(patched).toContain('https://albums.ente.com/images/preview.png');
+  });
+
+  it('is idempotent', () => {
+    const once = prefixRootAssetPaths(HEAD_TSX).patched;
+    expect(prefixRootAssetPaths(once)).toEqual({ patched: once, count: 0 });
+  });
+
+  it('walks apps/albums/src and packages/, skipping node_modules and wasm pkg output', () => {
+    const root = mkdtempSync(join(tmpdir(), 'albums-assets-'));
+    const put = (rel: string, text: string) => {
+      mkdirSync(join(root, rel, '..'), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    };
+    put('apps/albums/src/app/styles/fonts.css', FONTS_CSS);
+    put('packages/base/components/Head.tsx', HEAD_TSX);
+    put('packages/base/node_modules/dep/index.js', 'x = "/images/a.png"');
+    put('packages/wasm/prelogin/pkg/glue.js', 'x = "/images/a.png"');
+    put('apps/photos/src/page.tsx', 'x = "/images/a.png"'); // another app: not albums-reachable
+
+    const changed = prefixRootAssetsInWorkspace(root).map((c) => [c.file.slice(root.length + 1), c.count]);
+    expect(changed.sort()).toEqual([
+      ['apps/albums/src/app/styles/fonts.css', 1],
+      ['packages/base/components/Head.tsx', 3],
+    ]);
+    expect(readFileSync(join(root, 'packages/base/node_modules/dep/index.js'), 'utf8')).toContain('"/images/a.png"');
+    expect(readFileSync(join(root, 'apps/photos/src/page.tsx'), 'utf8')).toContain('"/images/a.png"');
   });
 });

@@ -8,7 +8,7 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | account-extras.test.ts | [ACCOUNT] completeness | M7 | 10 | 10 | ✅ |
 | account.test.ts | [KEYS] [ACCOUNT] | M2 | 10 | 10 | ✅ |
 | admin-role.test.ts | ? | ? | 9 | 9 | ✅ |
-| albums-basepath-patch.test.ts | ? | ? | 5 | 5 | ✅ |
+| albums-basepath-patch.test.ts | ? | ? | 9 | 9 | ✅ |
 | auth-token.test.ts | query-param auth (gate finding D32) | M5 | 16 | 16 | ✅ |
 | collection-restamp.test.ts | ? | ? | 9 | 9 | ✅ |
 | collection-share.test.ts | ? | ? | 11 | 11 | ✅ |
@@ -58,6 +58,6 @@ Oracle capture-parity: **pending** (no capture run yet — DECISIONS.md D2).
 | upload-v2.test.ts | [UPLOAD] V2 (gate finding D26) | M3/M5 | 7 | 7 | ✅ |
 | upload.test.ts | [UPLOAD] | M3 | 19 | 19 | ✅ |
 | verify-email.test.ts | [AUTH-OTT] | M1 | 7 | 7 | ✅ |
-| web.test.ts | infra guards: albums web hosting (D52) | P3-F | 31 | 31 | ✅ |
+| web.test.ts | infra guards: albums web hosting (D52) | P3-F | 32 | 32 | ✅ |
 
-**Total: 526/526 passing.** CI must fail if any implemented endpoint is below 100%.
+**Total: 531/531 passing.** CI must fail if any implemented endpoint is below 100%.

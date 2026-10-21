@@ -463,6 +463,19 @@ describe('albums build pin + deploy target guards (D52/D58/D60)', () => {
     // it (an unpatched export 404s behind /albums*).
     expect(body).toContain('scripts/patch-albums-basepath.ts');
     expect(body.indexOf('patch-albums-basepath.ts')).toBeLessThan(body.indexOf('npm ci'));
+    // D68: the patch also gets the workspace root (root-absolute /fonts/ and
+    // /images/ references), and the export is refused if one survives.
+    expect(body).toContain('next.config.js dist/ente-web-src/web');
+    expect(body).toMatch(/grep -rlE "\[\\"'\(\]\/\(fonts\|images\)\/" dist\/web-albums/);
+    expect(body.indexOf('(fonts|images)')).toBeGreaterThan(body.indexOf('cp -R'));
+  });
+
+  it('deploy-web refuses an API that does not expose X-Link-Device-Token (albums >= v1.3.63, D68)', () => {
+    const body = target('deploy-web');
+    expect(body).toContain('output -raw server_url');
+    expect(body).toContain('x-link-device-token');
+    // Checked before anything is uploaded.
+    expect(body.indexOf('x-link-device-token')).toBeLessThan(body.indexOf('aws s3 sync'));
   });
 
   it('deploy-web syncs to the albums/ prefix with the D60 cache metadata and invalidates the ONE distribution', () => {

@@ -238,7 +238,8 @@ capture-diff:
 # Albums web viewer (Phase F, D52) — the second client in the compatibility
 # contract (plan §3 caveat 5). PINNED, same discipline as the museum image:
 # this tag must match the "albums web" line in ORACLE-VERSION (guard-tested).
-# photos-v1.3.61 = ente-io/ente release of 2026-08-11; the albums app lives
+# photos-v1.3.65 = ente-io/ente release of 2026-10-01 (D68; was v1.3.61 of
+# 2026-08-11 until 2026-10-21); the albums app lives
 # at web/apps/albums in that monorepo and rides the photos-v* tag family
 # (it has no tag family of its own).
 #
@@ -250,7 +251,7 @@ capture-diff:
 #   - NEXT_PUBLIC_ENTE_ENDPOINT is baked in AT BUILD TIME (web/apps/albums/
 #     .env); changing the API URL means rebuilding, not re-syncing.
 # ---------------------------------------------------------------------------
-ALBUMS_WEB_TAG  = photos-v1.3.61
+ALBUMS_WEB_TAG  = photos-v1.3.65
 ALBUMS_WEB_REPO = https://github.com/ente-io/ente
 
 # Builds LOCALLY into dist/web-albums (gitignored). Deploys nothing.
@@ -287,7 +288,7 @@ build-web: require-profile
 	git clone --depth 1 --branch $(ALBUMS_WEB_TAG) --filter=blob:none --sparse $(ALBUMS_WEB_REPO) dist/ente-web-src && \
 	git -C dist/ente-web-src sparse-checkout set web rust && \
 	node --experimental-transform-types scripts/patch-albums-basepath.ts \
-		dist/ente-web-src/web/apps/albums/next.config.js && \
+		dist/ente-web-src/web/apps/albums/next.config.js dist/ente-web-src/web && \
 	cd dist/ente-web-src/web && npm ci && \
 	NEXT_PUBLIC_ENTE_ENDPOINT="$$ORIGIN" NEXT_TELEMETRY_DISABLED=1 npm run build:albums || { \
 		echo ""; \
@@ -297,6 +298,12 @@ build-web: require-profile
 		exit 1; }
 	mkdir -p dist/web-albums
 	cp -R dist/ente-web-src/web/apps/albums/out/. dist/web-albums/
+	@# basePath does not reach hand-written root-absolute asset URLs (D68): one
+	@# left in the export would hit the API behind /albums* and 404.
+	@if grep -rlE "[\"'(]/(fonts|images)/" dist/web-albums --include='*.html' --include='*.css' --include='*.js' >/dev/null; then \
+		echo "dist/web-albums still references root-absolute /fonts/ or /images/ (they 404 behind /albums*, D68):"; \
+		grep -rlE "[\"'(]/(fonts|images)/" dist/web-albums --include='*.html' --include='*.css' --include='*.js' | head; \
+		exit 1; fi
 	@echo "==> dist/web-albums ready ($$(du -sh dist/web-albums | cut -f1)) — 'make deploy-web' syncs it"
 
 # Syncs the local build to the web bucket's albums/ KEY PREFIX (D60 — the
@@ -313,6 +320,15 @@ build-web: require-profile
 # the bucket yet; the invalidation stays the belt and braces.
 deploy-web: require-profile guard-account
 	@test -d dist/web-albums || { echo "no dist/web-albums — run 'make build-web' first"; exit 1; }
+	@# Albums photos-v1.3.63+ reads the link device token only from
+	@# X-Link-Device-Token (D66/D68): against an API that does not send it, every
+	@# visit counts as a new device and links hit their device limit.
+	@API=$$($(TF) output -raw server_url); \
+	curl -s -o /dev/null -D - -X OPTIONS "$$API/public-collection/info" \
+		-H "Origin: https://albums.invalid" -H "Access-Control-Request-Method: GET" \
+		| grep -qi '^access-control-expose-headers:.*x-link-device-token' || { \
+		echo "the API at $$API does not expose X-Link-Device-Token — albums $(ALBUMS_WEB_TAG) needs it."; \
+		echo "Deploy the API (D66) to this profile first, then re-run make deploy-web."; exit 1; }
 	@test -f dist/web-albums/index.html || { echo "dist/web-albums has no index.html — the albums build did not finish"; exit 1; }
 	@grep -q '/albums/_next' dist/web-albums/index.html || { \
 		echo "dist/web-albums was built WITHOUT basePath /albums — a stale pre-D60 build."; \

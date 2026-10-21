@@ -130,3 +130,7 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
     second machine (tofu 1.12.5, same as the migrating machine): prod plans
     "No changes"; test plans only the alarm e-mail subscription, which SNS
     had dropped because its confirmation link was never clicked.
+18. **Albums web photos-v1.3.65 (D68)** is live on test (2026-10-21). Prod
+    keeps v1.3.61 until it gets the D66 API: deploy the API to prod, then
+    `make build-web` + `make deploy-web` with the dev profile (deploy-web
+    refuses before that). Then open a real shared link on prod once.
