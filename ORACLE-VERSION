@@ -3,6 +3,13 @@ museum image: ghcr.io/ente/server@sha256:f646b68a1b8d27e3375a67e3719ed6af97e9501
                source the contract shapes were pinned against)
 app APK:      io.ente.photos — pin at M5 device-gate time: record the then-current
               Play Store version here before running the gate (decision D1b)
+desktop app:  ente Photos desktop 1.7.30 (ente-io/photos-desktop v1.7.30, released
+              2026-10-06), macOS. Operator smoke test against the test env on
+              2026-10-21 with the D66 API: login, sync, browse, photo upload OK
+              (upload confirmed server-side: the photo + thumbnail objects landed
+              in the test bucket). Large-file (multipart) upload not exercised on
+              a device; desktop and mobile both send 20 MiB parts, inside the
+              >= 5 MiB rule D66 adopted from museum.
 albums web:   ente-io/ente tag photos-v1.3.65 (released 2026-10-01; the albums
               viewer lives at web/apps/albums and rides the photos-v* tag family —
               no tag family of its own). Bumped 2026-10-21 from photos-v1.3.61

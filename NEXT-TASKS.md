@@ -112,6 +112,8 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
     session identifiers + `isCurrent`. Revisit D61's tombstone note.
 13. **DONE 2026-10-19 (D66) — serverApiFlag → 13** (UploadV2 | BackupOptions | VideoStreaming) so
     mobile streams videos by default (UPSTREAM-DRIFT.md §5).
+    Items 11–13 deployed: test 2026-10-19, prod 2026-10-21 (tofu apply from
+    main 342240f, after a desktop 1.7.30 smoke test on test — ORACLE-VERSION).
 14. **Originals storage class:** evaluate Intelligent-Tiering (no archive
     tiers) in place of GLACIER_IR for new uploads, and whether a one-time
     copy-in-place of existing GIR originals pays back (UPSTREAM-DRIFT.md §7).
@@ -130,7 +132,8 @@ recorded in UPSTREAM-DRIFT.md; its fix list is items 11–15. Ship fixes to
     second machine (tofu 1.12.5, same as the migrating machine): prod plans
     "No changes"; test plans only the alarm e-mail subscription, which SNS
     had dropped because its confirmation link was never clicked.
-18. **Albums web photos-v1.3.65 (D68)** is live on test (2026-10-21). Prod
-    keeps v1.3.61 until it gets the D66 API: deploy the API to prod, then
-    `make build-web` + `make deploy-web` with the dev profile (deploy-web
-    refuses before that). Then open a real shared link on prod once.
+18. **DONE 2026-10-21 — Albums web photos-v1.3.65 (D68)** is live on test
+    and prod (prod after its D66 API deploy, same day). Headless check on
+    both: new device-token header in the bundle, fonts 200, a bogus link
+    renders "expired or disabled". Still to do once by hand: open a REAL
+    shared link on prod (photos decrypt, full-size view, download).
