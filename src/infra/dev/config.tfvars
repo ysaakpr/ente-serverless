@@ -1,28 +1,10 @@
-# COMMITTED settings for the PRODUCTION (dev profile) deployment (D67). Safe for a public repo:
-# nothing private lives here. hashing_key, mail_from, alarm_email and
-# operator_principal_arns are kept in s3://ente-sl-tfstate-<account>/secrets/dev.tfvars
-# and fetched by `make plan` for the run only (make secrets-pull / secrets-push).
-# `make tfvars-check` (and the infra tests) refuse this file if a private value
-# lands in it. Values below were read off the live deployment on 2026-10-19.
-
+# Copy to ente-sl.tfvars (gitignored) and fill in. BACK UP hashing_key:
+# losing it orphans every email->user mapping (decision D4a).
+# Generate once:  openssl rand -base64 32
 # hashing_key = <private: secrets/<env>.tfvars in the state bucket — make secrets-pull>
 
-# Any SES-verified identity in `region` below. A plain ADDRESS is fine — you do
-# NOT need a domain. Verify your own inbox in the SES console for that region
-# (it mails you a confirmation link) and put it here.
-#
-# Staying in the SES sandbox is fine for a private server, and is the default:
-# it caps sending at 200/day and delivers only to *verified* recipients, which
-# here is a feature rather than a limit — verify each person who should be able
-# to hold an account, once each. Only request production access if strangers
-# need to sign themselves up.
-#
-# Deliverability: sending from an @gmail.com-style address means SPF/DKIM cannot
-# align with that domain's DMARC, so mail may be spam-filed. Tolerable for codes
-# you send to yourself; a ~$12/yr domain fixes it properly if it annoys you.
-#
-# Misconfiguration shows up at runtime, not at apply: SES rejecting the send
-# makes POST /users/ott return 500 with the code already stored but undelivered.
+# Must be an SES-verified identity IN `region` below, and the account must be
+# out of the SES sandbox or mail only reaches pre-verified recipients.
 # mail_from = <private: secrets/<env>.tfvars in the state bucket — make secrets-pull>
 
 # The single source of truth for where this deploys. `make plan` / `make deploy`
@@ -32,43 +14,9 @@
 # bucket carry prevent_destroy.
 region = "ap-south-1"
 
-# Optional. Where CloudWatch alarms are mailed; omit and it follows mail_from.
-# Either way, CONFIRM the subscription link AWS sends, or alarms go nowhere.
-# alarm_email = <private when set: secrets/<env>.tfvars>
-
-# Optional. Where public album share links point (D52). Omit and links use the
-# web module's own CloudFront domain (the albums_url output), which is right
-# until a custom domain fronts the albums app. Origin only — no path, no
-# trailing slash: the server appends /?t=<token> itself.
-# albums_url = "https://albums.example.com"
-
-# Optional. Days originals stay in S3 Standard before moving to GLACIER_IR
-# (D59, default 7). The tradeoff: day N in Standard costs ≈ $0.023/GB-month
-# prorated (~$0.0008/GB per day), while GIR charges $0.03/GB retrieval — and
-# fresh uploads are exactly the ones people view. 0 = transition at once
-# (cheapest storage, pays retrieval on every early view); raise it if your
-# household re-watches new photos for weeks.
-# gir_transition_days = 7
-
-# Optional. Invite-gated signup (D54/D56): "invite" admits only emails invited
-# via `make invite`; omit for open signup (the default). Only account CREATION
-# is gated — login and existing accounts are untouched either way.
-signup_mode = "invite"
-
-# Optional. Who may assume ente-sl-<env>-operator, the role the tools/ CLI runs
-# under (invite.ts, storagePool.ts — they need dynamodb:Scan the request path
-# lacks, D64). Omit to trust the ACCOUNT ROOT — the self-host default, where the
-# operator owns the account. Set it to specific IAM user / SSO-role ARNs to
-# narrow who can assume it. Point an AWS profile's role_arn at the role, then
-# run the make targets under it (`AWS_PROFILE=... make invite ...`).
-# operator_principal_arns = <private when set: secrets/<env>.tfvars>
-
-# Names everything: table ente-sl-<env>, bucket ente-sl-<env>-objects-<account>,
-# both lambdas, the IAM role, the log groups, the Env tag. The deployer policy is
-# scoped to ente-sl-* so any value works.
-# SET THIS BEFORE THE FIRST APPLY. Changing it afterwards renames the table and
-# the bucket, which forces a replacement that prevent_destroy will refuse —
-# recovering from that means editing the module and doing `tofu state mv`.
 env_name = "prod"
 
 api_reserved_concurrency = 100
+
+signup_mode = "invite"
+
