@@ -2016,9 +2016,11 @@ source says Y — source won).
     re-applied idempotently: versioning, SSE-S3 + bucket key, owner-enforced,
     public access blocked, deny non-TLS, deny `s3:DeleteObjectVersion` and
     `s3:DeleteBucket` for every principal (plain deletes only add a marker, so
-    everything stays recoverable); lifecycle keeps a year / the 50 newest
-    noncurrent state versions and clears expired delete markers left by the
-    lock file.
+    everything stays recoverable); lifecycle (`state-history`, prefix
+    `state/`) expires noncurrent versions after a year while always keeping
+    the 50 newest, and `abort-incomplete-multipart` clears stalled uploads
+    after 7 days. Nothing removes the delete markers the lock file leaves on
+    every run — they are a few bytes each and harmless.
   - Backend config is PARTIAL (`backend "s3" {}`), filled by `make infra-init`
     from the caller's account — no account id committed, and wrong-account
     credentials find no bucket instead of an empty state. infra-init never
@@ -2031,6 +2033,14 @@ source says Y — source won).
     rehearsed on LocalStack, OpenTofu 1.13 gives the migrated copy a new
     lineage and empties the local file itself. guard-account now reads
     `tofu state pull` (or the local file while one still exists).
+  - Wrong-account runs (2026-10-21, after a bare `make secrets-push` with the
+    machine's default credentials looked for `ente-sl-tfstate-<other account>`
+    and failed with S3's bare "The specified bucket does not exist"): every
+    secrets command and `bucket-name` (infra-init, state-migrate) HEADs the
+    bucket first and fails naming the account, the credential source and the
+    fix; creating the bucket requires `CONFIRM_ACCOUNT=<id>`, so the obvious
+    next step can no longer put the state and `hashing_key` in the wrong
+    account.
   - Rehearsed end to end on LocalStack with the real make targets (legacy
     machine -> split/push/migrate; fresh checkout -> init/plan "No changes"
     /deploy; cross-machine lock; wrong-account refusal; missing secrets;

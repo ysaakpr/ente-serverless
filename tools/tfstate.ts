@@ -4,7 +4,9 @@
  *   node --experimental-transform-types tools/tfstate.ts <command> [args]
  *
  *   bucket-name                 print the state bucket name for these credentials
- *   bootstrap                   create/harden the state bucket (idempotent)
+ *                               (fails, naming the account, if it does not exist)
+ *   bootstrap                   create/harden the state bucket (idempotent;
+ *                               creating it needs CONFIRM_ACCOUNT=<account>)
  *   split <in> <config> <secrets>
  *                               split a legacy ente-sl.tfvars into the committed
  *                               config.tfvars and the private secrets.tfvars
@@ -189,12 +191,75 @@ const endpoint = process.env.AWS_ENDPOINT_URL;
 const s3 = () =>
   new S3Client({ region: STATE_REGION, ...(endpoint ? { endpoint, forcePathStyle: true } : {}) });
 
-export const bucketName = async (): Promise<string> => {
-  if (process.env.STATE_BUCKET) return process.env.STATE_BUCKET;
+export interface StateTarget {
+  bucket: string;
+  /** null when STATE_BUCKET named the bucket (LocalStack rehearsals). */
+  account: string | null;
+}
+
+export const resolveTarget = async (): Promise<StateTarget> => {
+  if (process.env.STATE_BUCKET) return { bucket: process.env.STATE_BUCKET, account: null };
   const sts = new STSClient({ region: STATE_REGION, ...(endpoint ? { endpoint } : {}) });
   const { Account } = await sts.send(new GetCallerIdentityCommand({}));
   if (!Account) throw new Error('could not resolve the AWS account id');
-  return `ente-sl-tfstate-${Account}`;
+  return { bucket: `ente-sl-tfstate-${Account}`, account: Account };
+};
+
+/** Which credentials a run uses, in words — the account is what picks the bucket. */
+export const describeCaller = (t: StateTarget, env: NodeJS.ProcessEnv = process.env): string => {
+  const via = env.AWS_PROFILE
+    ? `AWS_PROFILE=${env.AWS_PROFILE}`
+    : env.AWS_ACCESS_KEY_ID
+      ? 'AWS_ACCESS_KEY_ID from the environment'
+      : 'the default credentials (AWS_PROFILE is not set)';
+  const who = t.account ? `account ${t.account} via ${via}` : `STATE_BUCKET=${t.bucket} via ${via}`;
+  return env.AWS_ENDPOINT_URL ? `${who}, endpoint ${env.AWS_ENDPOINT_URL}` : who;
+};
+
+/**
+ * The bucket name is derived from the caller's account, so a missing bucket
+ * almost always means credentials for the wrong account — never a cue to
+ * bootstrap one there.
+ */
+export const missingBucketMessage = (t: StateTarget, env: NodeJS.ProcessEnv = process.env): string =>
+  [
+    `state bucket s3://${t.bucket} does not exist (running as ${describeCaller(t, env)}).`,
+    t.account
+      ? "  The bucket name comes from the account. If this is not the deployment's account, select its\n" +
+        '  credentials and re-run, e.g.  AWS_PROFILE=ente-sl make <target>'
+      : '  STATE_BUCKET names a bucket that is not there.',
+    '  Only for a brand-new account: make state-bootstrap (it asks you to confirm the account).',
+  ].join('\n');
+
+/** Creating the bucket picks the account that will hold every state and secret. */
+export const bootstrapRefusal = (
+  t: StateTarget,
+  confirm: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null =>
+  t.account && confirm !== t.account
+    ? `s3://${t.bucket} does not exist yet. Creating it makes account ${t.account} the home of this\n` +
+      `project's state and secrets (running as ${describeCaller(t, env)}).\n` +
+      `  Right account:  make state-bootstrap CONFIRM_ACCOUNT=${t.account}\n` +
+      "  Wrong account:  select the deployment's credentials (e.g. AWS_PROFILE=ente-sl) and re-run."
+    : null;
+
+const requireBucket = async (t: StateTarget): Promise<void> => {
+  try {
+    await s3().send(new HeadBucketCommand({ Bucket: t.bucket }));
+  } catch (e) {
+    const status = (e as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    if (status === 404 || ['NotFound', 'NoSuchBucket'].includes(errName(e) ?? '')) {
+      throw new Error(missingBucketMessage(t));
+    }
+    if (status === 403) {
+      throw new Error(
+        `s3://${t.bucket} exists but ${describeCaller(t)} may not read it — another account owns ` +
+          'that name, or the credentials lack s3:ListBucket on it.',
+      );
+    }
+    throw e;
+  }
 };
 
 const secretsKey = (env: string): string => {
@@ -216,7 +281,8 @@ const readObject = async (bucket: string, key: string): Promise<string | null> =
 };
 
 export const bootstrap = async (): Promise<string> => {
-  const Bucket = await bucketName();
+  const target = await resolveTarget();
+  const Bucket = target.bucket;
   const client = s3();
   let exists = true;
   try {
@@ -226,6 +292,8 @@ export const bootstrap = async (): Promise<string> => {
     exists = false;
   }
   if (!exists) {
+    const refusal = bootstrapRefusal(target, process.env.CONFIRM_ACCOUNT);
+    if (refusal) throw new Error(refusal);
     await client.send(
       new CreateBucketCommand({
         Bucket,
@@ -236,7 +304,7 @@ export const bootstrap = async (): Promise<string> => {
     );
     console.log(`created s3://${Bucket} (${STATE_REGION})`);
   } else {
-    console.log(`s3://${Bucket} exists — re-applying settings`);
+    console.log(`s3://${Bucket} exists — re-applying settings (${describeCaller(target)})`);
   }
   await client.send(
     new PutBucketOwnershipControlsCommand({
@@ -330,8 +398,10 @@ export const bootstrap = async (): Promise<string> => {
 };
 
 export const secretsPush = async (env: string, file: string): Promise<void> => {
-  const Bucket = await bucketName();
   const Key = secretsKey(env);
+  const target = await resolveTarget();
+  await requireBucket(target);
+  const Bucket = target.bucket;
   const next = readFileSync(file, 'utf8');
   for (const b of parseTfvars(next)) {
     if (b.key && !isPrivate(b.key)) {
@@ -362,8 +432,10 @@ export const secretsPush = async (env: string, file: string): Promise<void> => {
 };
 
 export const secretsPull = async (env: string, out: string): Promise<void> => {
-  const Bucket = await bucketName();
   const Key = secretsKey(env);
+  const target = await resolveTarget();
+  await requireBucket(target);
+  const Bucket = target.bucket;
   const text = await readObject(Bucket, Key);
   if (text === null) {
     throw new Error(`no secrets at s3://${Bucket}/${Key} — run make tfvars-split + make secrets-push first`);
@@ -373,8 +445,10 @@ export const secretsPull = async (env: string, out: string): Promise<void> => {
 };
 
 export const secretsStatus = async (env: string): Promise<boolean> => {
-  const Bucket = await bucketName();
   const Key = secretsKey(env);
+  const target = await resolveTarget();
+  await requireBucket(target);
+  const Bucket = target.bucket;
   try {
     const head = await s3().send(new HeadObjectCommand({ Bucket, Key }));
     console.log(`s3://${Bucket}/${Key}: present (version ${head.VersionId ?? '-'}, ${head.LastModified?.toISOString()})`);
@@ -394,9 +468,13 @@ const main = async (argv: string[]): Promise<number> => {
     if (args.length !== n) throw new Error(`usage: tfstate.ts ${cmd} ${usage}`);
   };
   switch (cmd) {
-    case 'bucket-name':
-      console.log(await bucketName());
+    case 'bucket-name': {
+      // infra-init and state-migrate need the bucket; say why when it is missing.
+      const target = await resolveTarget();
+      await requireBucket(target);
+      console.log(target.bucket);
       return 0;
+    }
     case 'bootstrap':
       await bootstrap();
       return 0;

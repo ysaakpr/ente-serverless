@@ -9,7 +9,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   PRIVATE_KEYS,
+  bootstrapRefusal,
   checkCommittedTfvars,
+  missingBucketMessage,
   parseTfvars,
   splitTfvars,
 } from '../../tools/tfstate.ts';
@@ -22,10 +24,10 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8');
 const makefile = () => read('Makefile');
 const target = (name: string) => {
   const text = makefile().replace(/\\\n\s*/g, ' ');
-  const at = text.search(new RegExp(`\\n${name}:(?!\\s*(?:export\\s+)?[A-Za-z_]+\\s*[:+?]?=)`));
+  const at = text.search(new RegExp(`\\n${name}:(?![ \\t]*(?:export\\s+)?[A-Za-z_]+\\s*[:+?]?=)`));
   expect(at, `no ${name} target`).toBeGreaterThan(-1);
   const body = text.slice(at + 1);
-  const end = body.search(/\n[a-z][a-z-]*:(?!\s*(?:export\s+)?[A-Za-z_]+\s*[:+?]?=)/);
+  const end = body.search(/\n[a-z][a-z-]*:(?![ \t]*(?:export\s+)?[A-Za-z_]+\s*[:+?]?=)/);
   return end === -1 ? body : body.slice(0, end);
 };
 
@@ -200,5 +202,31 @@ describe('S3 backend wiring', () => {
     expect(body).toContain('state pull');
     expect(body).toContain('$(LOCAL_STATE)');
     expect(body).toContain('ACCOUNT MISMATCH');
+  });
+});
+
+describe('wrong-account protection (tools/tfstate.ts)', () => {
+  // The bucket name is derived from the caller's account, so default
+  // credentials for another account look for a bucket that is not there.
+  const derived = { bucket: 'ente-sl-tfstate-111111111111', account: '111111111111' };
+
+  it('a missing bucket names the account, where the credentials came from, and the fix', () => {
+    const msg = missingBucketMessage(derived, {});
+    expect(msg).toContain('s3://ente-sl-tfstate-111111111111 does not exist');
+    expect(msg).toContain('account 111111111111 via the default credentials (AWS_PROFILE is not set)');
+    expect(msg).toContain('AWS_PROFILE=ente-sl');
+    expect(missingBucketMessage(derived, { AWS_PROFILE: 'other' })).toContain('via AWS_PROFILE=other');
+    expect(missingBucketMessage(derived, { AWS_ENDPOINT_URL: 'http://ls:4566' })).toContain('endpoint http://ls:4566');
+  });
+
+  it('creating the bucket needs the account confirmed, unless STATE_BUCKET named it', () => {
+    expect(bootstrapRefusal(derived, undefined, {})).toContain('CONFIRM_ACCOUNT=111111111111');
+    expect(bootstrapRefusal(derived, '222222222222', {})).not.toBeNull();
+    expect(bootstrapRefusal(derived, '111111111111', {})).toBeNull();
+    expect(bootstrapRefusal({ bucket: 'rehearsal', account: null }, undefined, {})).toBeNull();
+  });
+
+  it('state-bootstrap passes CONFIRM_ACCOUNT through', () => {
+    expect(target('state-bootstrap')).toContain('CONFIRM_ACCOUNT=$(CONFIRM_ACCOUNT)');
   });
 });

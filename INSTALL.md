@@ -267,12 +267,18 @@ Each env's variables live in two places:
 | `s3://ente-sl-tfstate-<account>/secrets/<profile>.tfvars` | `hashing_key`, `mail_from`, and `alarm_email` / `operator_principal_arns` when set | no — `make plan` fetches it for the run and deletes it afterwards |
 
 The state lives in the same bucket (`state/<profile>/terraform.tfstate`, locked
-with OpenTofu's native S3 lock file — **OpenTofu >= 1.10**). Create the bucket
-once per account (idempotent — re-running re-applies its settings: versioning,
-SSE-S3, public access blocked, TLS-only, permanent version deletes denied):
+with OpenTofu's native S3 lock file — **OpenTofu >= 1.10**). The bucket name
+comes from the account the credentials belong to, so **always run these targets
+with the deployment's credentials (`AWS_PROFILE=ente-sl`)** — with another
+account's credentials every command stops with "state bucket … does not exist
+(running as account …)". Create the bucket once per account; the first run
+prints the account id and asks you to confirm it (re-running later just
+re-applies its settings: versioning, SSE-S3, public access blocked, TLS-only,
+permanent version deletes denied):
 
 ```bash
-AWS_PROFILE=ente-sl make state-bootstrap
+AWS_PROFILE=ente-sl make state-bootstrap                            # prints the account to confirm
+AWS_PROFILE=ente-sl make state-bootstrap CONFIRM_ACCOUNT=<that id>  # creates the bucket
 ```
 
 A brand-new env: edit its `config.tfvars`, then write the private file and push it:
@@ -316,7 +322,7 @@ pulling this change, per profile:
 
 ```bash
 export AWS_PROFILE=ente-sl
-make state-bootstrap                 # once per account
+make state-bootstrap                 # bucket already exists for the live account: re-applies settings
 make profile dev                     # then repeat everything below for `test`
 make tfvars-split                    # ente-sl.tfvars -> config.tfvars + secrets.tfvars
 git diff src/infra/dev/config.tfvars # compare with the committed values (read off the live deployment)
@@ -1037,6 +1043,7 @@ Two things to know:
 |---|---|
 | `no profile chosen — choose: make profile dev \| make profile test` | Do step C4a — the make targets refuse to guess which env they address. |
 | `make plan` fails: `missing src/infra/<profile>/config.tfvars` | The committed settings file is missing — restore it from git (step C4). |
+| `tfstate: state bucket s3://ente-sl-tfstate-<id> does not exist (running as account <id> via …)` | The credentials are for another account (the bucket name comes from the account) — re-run with `AWS_PROFILE=ente-sl`. Do **not** bootstrap a bucket in that account. |
 | `tfstate: no secrets at s3://…/secrets/<profile>.tfvars` | Push the env's private file once (step C4: `make secrets-push`). |
 | `local state found … move it to S3 first: make state-migrate` | This machine still holds pre-D67 local state — do the one-time move in step C4. |
 | `… is not initialised — run: make infra-init` / `Backend initialization required` | Run `AWS_PROFILE=ente-sl make infra-init` for the selected profile. |

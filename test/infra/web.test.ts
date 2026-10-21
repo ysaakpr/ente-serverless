@@ -433,11 +433,11 @@ describe('albums build pin + deploy target guards (D52/D58/D60)', () => {
     const text = makefile().replace(/\\\n\s*/g, ' ');
     // Skip target-specific variable lines (`name: export VAR := …`) — the
     // rule line is the one that carries prerequisites and the recipe.
-    const rule = new RegExp(`\\n${name}:(?!\\s*(?:export\\s+)?[A-Za-z_]+\\s*[:+?]?=)`);
+    const rule = new RegExp(`\\n${name}:(?![ \\t]*(?:export\\s+)?[A-Za-z_]+\\s*[:+?]?=)`);
     const at = text.search(rule);
     expect(at, `no ${name} target`).toBeGreaterThan(-1);
     const body = text.slice(at + 1);
-    const end = body.search(/\n[a-z][a-z-]*:(?!\s*(?:export\s+)?[A-Za-z_]+\s*[:+?]?=)/);
+    const end = body.search(/\n[a-z][a-z-]*:(?![ \t]*(?:export\s+)?[A-Za-z_]+\s*[:+?]?=)/);
     return end === -1 ? body : body.slice(0, end);
   };
 

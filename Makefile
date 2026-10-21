@@ -438,7 +438,7 @@ infra-init: require-profile
 
 # Creates/hardens the central state bucket. Idempotent; profile-independent.
 state-bootstrap:
-	$(TFSTATE_TOOL) bootstrap
+	CONFIRM_ACCOUNT=$(CONFIRM_ACCOUNT) $(TFSTATE_TOOL) bootstrap
 
 # ONE-TIME, on the machine that holds the pre-D67 local state: copies it into
 # the bucket, proves the copy is the same state (serial + resource count + a
